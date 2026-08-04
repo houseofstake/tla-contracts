@@ -1,0 +1,24 @@
+pub const ONLY_PARENT: &str = "init caller must be the direct parent account";
+pub const ONLY_AUTHORITY: &str = "only the lease authority may perform this operation";
+pub const ONLY_RENTER: &str = "only the renter may perform this operation";
+pub const UNAUTHORIZED: &str = "unauthorized";
+pub const AUTHORITY_PROTECTED: &str = "the lease authority extension cannot be removed";
+pub const AUTHORITY_IS_SELF: &str = "authority must not be this account";
+pub const SELF_TARGET: &str = "receiver must not be this account";
+pub const NOT_ACTIVE: &str = "wallet is not active";
+pub const LEASE_EXPIRED: &str = "lease expired";
+pub const FROZEN: &str = "wallet frozen";
+pub const NOT_FROZEN: &str = "wallet not frozen";
+pub const SELF_FROZEN: &str = "wallet is self-frozen and only the renter may unfreeze it";
+pub const AUTHORITY_FROZEN: &str =
+    "wallet is authority-frozen and only the authority may unfreeze it";
+pub const INVALID_TIMEOUT: &str = "timeout_secs out of bounds";
+pub const LEASE_IN_PAST: &str = "lease_until_ns must be in the future";
+pub const LEASE_NOT_MONOTONIC: &str = "lease end may not move backwards";
+pub const BAD_LEASE_STATE: &str = "state not settable through lease push";
+pub const RESERVE_BREACH: &str = "action would breach the balance reserve";
+pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";
+pub const PAYOUT_IS_SELF: &str = "payout account must not be this account";
+pub const OWNER_IS_SELF: &str = "owner account must not be this account";
+pub const LEASE_ACTIVE: &str = "sweep requires an expired lease";
+pub const NOTHING_TO_SWEEP: &str = "nothing to sweep";

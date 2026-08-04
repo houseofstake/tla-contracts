@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hos-common",
+    "contracts/hos-wallet",
+    "contracts/wallet-impl-deployer",
+    "contracts/registrar",
+    "contracts/hos-extension",
+    "contracts/mpc-recovery",
+    "contracts/tla-registry",
+    "dev-contracts/test-ft",
+    "dev-contracts/test-mpc",
+    "dev-contracts/test-staking-pool",
+    "dev-contracts/test-dapp",
+]
+exclude = ["integration"]
+
+[workspace.dependencies]
+near-sdk = { version = "=5.29.0" }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+panic = "abort"
+overflow-checks = true

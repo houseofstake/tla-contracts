@@ -1,0 +1,15 @@
+[package]
+name = "test-dapp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+repository = "https://github.com/neo-sky/hos-tla-contracts"
+license = "MIT OR Apache-2.0"
+description = "Minimal NEP-141 receiver and dapp target used only by the integration test suite. Not for deployment."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
