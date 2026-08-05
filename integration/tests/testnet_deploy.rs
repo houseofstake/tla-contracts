@@ -166,10 +166,12 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
                 .into_result()?;
             println!("  topped up {deployer_id} by {top_up}");
         }
+        // TEMPORARY: the deployer live on testnet predates assert_one_yocto on
+        // gd_approve and rejects any deposit. Restore the 1 yoctoNEAR once the
+        // deployer itself has been upgraded to this source.
         council
             .call(&deployer_id, "gd_approve")
             .args_json(json!({ "hash": wallet_hash }))
-            .deposit(NearToken::from_yoctonear(1))
             .max_gas()
             .transact()
             .await?
@@ -186,10 +188,13 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
     }
 
     println!("\n== registrar on the TLA ==");
-    if is_live(&worker, &root_id).await {
-        println!("  already initialized, skipping");
+    // The state struct is unchanged since the fleet was first deployed, so the
+    // code can be refreshed in place and the existing state still deserializes.
+    let registrar_live = is_live(&worker, &root_id).await;
+    root.deploy(&wasm("registrar")).await?.into_result()?;
+    if registrar_live {
+        println!("  code refreshed on {ROOT}, state kept");
     } else {
-        root.deploy(&wasm("registrar")).await?.into_result()?;
         root.call(&root_id, "new")
             .args_json(json!({ "config": {
                 "registry": registry.id(),

@@ -91,7 +91,11 @@ pub async fn deploy_fleet() -> Result<Fleet> {
         .into_result()?;
     deployer
         .call("new")
-        .args_json(json!({ "council": council.id(), "patch_authority": patch.id() }))
+        .args_json(json!({
+            "council": council.id(),
+            "patch_authority": patch.id(),
+            "approval_delay_ns": "0",
+        }))
         .transact()
         .await?
         .into_result()?;

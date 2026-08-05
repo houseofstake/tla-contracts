@@ -152,10 +152,28 @@ fn the_renter_cannot_evict_the_lease_authority() {
 #[should_panic(expected = "the lease authority extension cannot be removed")]
 fn not_even_the_authority_can_evict_itself() {
     let mut c = deploy();
-    ctx(AUTHORITY, 1, now_ns());
+    ctx(AUTHORITY, 1, now_ns() + YEAR_NS + 1);
     c.w_execute_extension(request([WalletOp::RemoveExtension {
         account_id: acc(AUTHORITY),
     }]));
+}
+
+#[test]
+#[should_panic(expected = "the authority may edit extensions only after the lease ends")]
+fn the_authority_cannot_evict_the_renter_while_the_lease_runs() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.w_execute_extension(request([WalletOp::RemoveExtension {
+        account_id: acc(OWNER),
+    }]));
+}
+
+#[test]
+#[should_panic(expected = "the authority may edit extensions only after the lease ends")]
+fn the_authority_cannot_add_an_extension_while_the_lease_runs() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
 }
 
 #[test]

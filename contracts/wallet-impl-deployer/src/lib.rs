@@ -5,6 +5,10 @@ use near_sdk::{
 
 const ON_DEPLOYED_GAS: Gas = Gas::from_tgas(10);
 const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
+/// Leased accounts reference the implementation by account id, so a publish
+/// reaches every one of them at once. The delay gives owners a window to see
+/// an approval and act on it before the code changes underneath them.
+const DEFAULT_APPROVAL_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 mod error {
     pub const ONLY_COUNCIL: &str = "only council";
@@ -12,6 +16,7 @@ mod error {
     pub const NO_APPROVED_HASH: &str = "no approved code hash";
     pub const HASH_MISMATCH: &str = "code does not match the approved hash";
     pub const DEPLOY_IN_FLIGHT: &str = "another deploy is in flight";
+    pub const APPROVAL_TOO_YOUNG: &str = "approved code must wait out the delay before publishing";
     pub const INSUFFICIENT_DEPOSIT: &str = "attached deposit below global storage cost";
     pub const EMPTY_CODE: &str = "code must not be empty";
     pub const COST_OVERFLOW: &str = "storage cost overflow";
@@ -43,18 +48,60 @@ pub struct ImplDeployer {
     patch_authority: AccountId,
     current_hash: Option<[u8; 32]>,
     approved_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
+    approval_delay_ns: u64,
+    deploy_in_flight: bool,
+}
+
+/// Shape of the state written before the approval delay existed. Only read by
+/// `migrate`.
+#[near(serializers = [borsh])]
+pub struct LegacyImplDeployer {
+    council: AccountId,
+    patch_authority: AccountId,
+    current_hash: Option<[u8; 32]>,
+    approved_hash: Option<[u8; 32]>,
     deploy_in_flight: bool,
 }
 
 #[near]
 impl ImplDeployer {
+    /// Carries pre-delay state forward. Any pending approval is dropped, so it
+    /// has to be re-approved and serve the delay.
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let old: LegacyImplDeployer =
+            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        Self {
+            council: old.council,
+            patch_authority: old.patch_authority,
+            current_hash: old.current_hash,
+            approved_hash: None,
+            approved_at: None,
+            approval_delay_ns: DEFAULT_APPROVAL_DELAY_NS,
+            deploy_in_flight: old.deploy_in_flight,
+        }
+    }
+
     #[init]
-    pub fn new(council: AccountId, patch_authority: AccountId) -> Self {
+    /// `approval_delay_ns` is omitted in every real deployment, which takes the
+    /// 48 hour default. The sandbox passes 0 so tests do not have to advance
+    /// two days of blocks.
+    pub fn new(
+        council: AccountId,
+        patch_authority: AccountId,
+        approval_delay_ns: Option<near_sdk::json_types::U64>,
+    ) -> Self {
         Self {
             council,
             patch_authority,
             current_hash: None,
             approved_hash: None,
+            approved_at: None,
+            approval_delay_ns: approval_delay_ns
+                .map(|value| value.0)
+                .unwrap_or(DEFAULT_APPROVAL_DELAY_NS),
             deploy_in_flight: false,
         }
     }
@@ -69,6 +116,7 @@ impl ImplDeployer {
         );
         let raw: [u8; 32] = hash.into();
         self.approved_hash = Some(raw);
+        self.approved_at = Some(env::block_timestamp());
         Event::HashApproved {
             hash: (&hash).into(),
             by: caller,
@@ -84,6 +132,13 @@ impl ImplDeployer {
             .approved_hash
             .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
         require!(env::sha256_array(&code) == approved, error::HASH_MISMATCH);
+        let approved_at = self
+            .approved_at
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(self.approval_delay_ns),
+            error::APPROVAL_TOO_YOUNG
+        );
         let cost = (code.len() as u128)
             .checked_mul(GLOBAL_CODE_COST_PER_BYTE)
             .unwrap_or_else(|| env::panic_str(error::COST_OVERFLOW));
@@ -121,6 +176,7 @@ impl ImplDeployer {
             Ok(()) => {
                 self.current_hash = Some(hash.into());
                 self.approved_hash = None;
+                self.approved_at = None;
                 Event::ImplDeployed {
                     hash: (&hash).into(),
                     size,
@@ -161,6 +217,14 @@ impl ImplDeployer {
 
     pub fn approved_hash(&self) -> Option<Base58CryptoHash> {
         self.approved_hash.map(Base58CryptoHash::from)
+    }
+
+    pub fn approved_at(&self) -> Option<near_sdk::json_types::U64> {
+        self.approved_at.map(near_sdk::json_types::U64)
+    }
+
+    pub fn approval_delay_ns(&self) -> near_sdk::json_types::U64 {
+        near_sdk::json_types::U64(self.approval_delay_ns)
     }
 
     pub fn config(&self) -> DeployerView {
@@ -209,9 +273,20 @@ mod tests {
             .build());
     }
 
+    const AFTER_DELAY: u64 = DEFAULT_APPROVAL_DELAY_NS + 1;
+
+    fn ctx_at(predecessor: &str, deposit: u128, ts: u64) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acc(IMPL))
+            .predecessor_account_id(acc(predecessor))
+            .attached_deposit(NearToken::from_yoctonear(deposit))
+            .block_timestamp(ts)
+            .build());
+    }
+
     fn deploy() -> ImplDeployer {
         ctx(COUNCIL, 0);
-        ImplDeployer::new(acc(COUNCIL), acc(PATCH))
+        ImplDeployer::new(acc(COUNCIL), acc(PATCH), None)
     }
 
     fn code() -> Vec<u8> {
@@ -232,7 +307,7 @@ mod tests {
         ctx(COUNCIL, 1);
         c.gd_approve(code_hash());
         assert_eq!(c.approved_hash(), Some(code_hash()));
-        ctx("anyone.testnet", cost());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
         ctx(IMPL, 0);
         assert!(c.gd_on_deployed(
@@ -287,7 +362,17 @@ mod tests {
         let mut c = deploy();
         ctx(COUNCIL, 1);
         c.gd_approve(code_hash());
-        ctx("anyone.testnet", cost() - 1);
+        ctx_at("anyone.testnet", cost() - 1, AFTER_DELAY);
+        let _ = c.gd_deploy(code());
+    }
+
+    #[test]
+    #[should_panic(expected = "approved code must wait out the delay before publishing")]
+    fn deploy_before_the_delay_rejected() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1);
+        c.gd_approve(code_hash());
+        ctx_at("anyone.testnet", cost(), DEFAULT_APPROVAL_DELAY_NS - 1);
         let _ = c.gd_deploy(code());
     }
 
@@ -297,9 +382,9 @@ mod tests {
         let mut c = deploy();
         ctx(COUNCIL, 1);
         c.gd_approve(code_hash());
-        ctx("anyone.testnet", cost());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
-        ctx("anyone.testnet", cost());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
     }
 
@@ -308,7 +393,7 @@ mod tests {
         let mut c = deploy();
         ctx(COUNCIL, 1);
         c.gd_approve(code_hash());
-        ctx("anyone.testnet", cost());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
         ctx(IMPL, 0);
         assert!(!c.gd_on_deployed(
@@ -321,7 +406,7 @@ mod tests {
         ));
         assert_eq!(c.current_hash(), None);
         assert_eq!(c.approved_hash(), Some(code_hash()));
-        ctx("anyone.testnet", cost());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
     }
 

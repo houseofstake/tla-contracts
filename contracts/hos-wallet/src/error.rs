@@ -21,4 +21,5 @@ pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be this account";
 pub const OWNER_IS_SELF: &str = "owner account must not be this account";
 pub const LEASE_ACTIVE: &str = "sweep requires an expired lease";
+pub const EXTENSIONS_LOCKED: &str = "the authority may edit extensions only after the lease ends";
 pub const NOTHING_TO_SWEEP: &str = "nothing to sweep";

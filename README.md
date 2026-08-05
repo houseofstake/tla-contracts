@@ -39,6 +39,10 @@ To move funds or call a contract, the owner sends a transaction from their own a
 `w_execute_extension` on the leased account. The wallet checks the caller is an enabled extension and
 runs the request. An owner can add and remove co-owners through the same path.
 
+While a lease runs, the owner alone decides who holds the account. `assert_extension_editor` lets the
+authority reach the extension set only once the lease has expired, which is the reclaim window. The
+authority can never remove itself, expired or not.
+
 `w_resolve_auth` implements NEP-641. It never resolves an authorization itself. It returns `Pending`
 listing every extension except the authority, which points a caller at the accounts that can actually
 authorise. If no such extension remains, it returns `Invalid`.
@@ -113,10 +117,15 @@ This is not trustless. It trusts the watcher set by design.
 ## Publishing the wallet implementation
 
 `wallet-impl-deployer` splits approval from publication. The council or the patch authority approves a
-code hash. After that anyone may call `gd_deploy` with code matching that hash, attaching the global
-storage cost, which is charged per byte and refunded above the amount used. A successful deploy records
-the hash and clears the approval. A failed one refunds the deposit and leaves the approval usable, so a
-retry does not need a second approval. Only one deploy runs at a time.
+code hash, which stamps the approval time. Once 48 hours have passed, anyone may call `gd_deploy` with
+code matching that hash, attaching the global storage cost, which is charged per byte and refunded
+above the amount used. A successful deploy records the hash and clears the approval. A failed one
+refunds the deposit and leaves the approval usable, so a retry does not need a second approval. Only
+one deploy runs at a time.
+
+`approved_at` and `approval_delay_ns` are views, so the window is readable on chain rather than
+promised. `migrate` carries pre-delay state forward and drops any approval pending at the time, so it
+has to be re-approved and serve the delay.
 
 `upgrade_self` is council only.
 
@@ -127,6 +136,8 @@ The contracts assume the following and do not re-check them.
 Leased accounts reference the wallet implementation by account id rather than by hash, so republishing
 changes the code under every leased account at once. That is deliberate, so a fault can be patched
 without House of Stake being locked out, and it makes code approval the highest privilege action here.
+The 48 hour delay between approval and publication bounds it: the code under an account cannot change
+without a window in which the pending hash is already visible on chain.
 
 The patch authority approves a code hash with the same power as the council.
 

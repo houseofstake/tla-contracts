@@ -399,7 +399,7 @@ impl TenantWallet {
     }
 
     fn add_extension(&mut self, account_id: AccountId, actor: &Actor<'_>) {
-        self.assert_renter_or_authority(actor);
+        self.assert_extension_editor(actor);
         require!(account_id != env::current_account_id(), error::SELF_TARGET);
         if !self.wallet.extensions.insert(account_id.clone()) {
             ContractError::ExtensionEnabled(account_id).panic();
@@ -414,7 +414,7 @@ impl TenantWallet {
     /// Deviation from upstream: upstream lets any extension remove any other,
     /// which would let a renter evict the authority and escape reclaim.
     fn remove_extension(&mut self, account_id: AccountId, actor: &Actor<'_>) {
-        self.assert_renter_or_authority(actor);
+        self.assert_extension_editor(actor);
         require!(account_id != self.authority, error::AUTHORITY_PROTECTED);
         if !self.wallet.extensions.remove(&account_id) {
             ContractError::ExtensionNotEnabled(account_id).panic();
@@ -485,6 +485,17 @@ impl TenantWallet {
 
     fn assert_renter_or_authority(&self, actor: &Actor<'_>) {
         if Self::is_authority(actor, &self.authority) {
+            return;
+        }
+        self.assert_renter_active();
+    }
+
+    /// The authority reaches the extension set only once the lease has ended,
+    /// which is the reclaim window. While a lease runs, the renter alone
+    /// decides who holds their account.
+    fn assert_extension_editor(&self, actor: &Actor<'_>) {
+        if Self::is_authority(actor, &self.authority) {
+            require!(self.lease_expired(), error::EXTENSIONS_LOCKED);
             return;
         }
         self.assert_renter_active();
