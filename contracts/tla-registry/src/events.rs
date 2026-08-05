@@ -48,6 +48,10 @@ pub enum Event {
     #[event_version("1.0.0")]
     ContractUnpaused { by: AccountId },
     #[event_version("1.0.0")]
+    MarketplacePaused { by: AccountId },
+    #[event_version("1.0.0")]
+    MarketplaceUnpaused { by: AccountId },
+    #[event_version("1.0.0")]
     FeeConfigUpdated { by: AccountId },
     #[event_version("1.0.0")]
     AdminAdded { account: AccountId, by: AccountId },

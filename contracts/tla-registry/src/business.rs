@@ -97,7 +97,7 @@ impl TlaRegistry {
         tla_id: AccountId,
         cap: Option<u32>,
     ) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         {
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
             if tla.tla_type != TlaType::Business {

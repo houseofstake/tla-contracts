@@ -556,7 +556,7 @@ mod rental {
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
-            .0 as u64;
+            .0;
         let rent = c
             .get_rent_price(acc(TLA), "alice".to_string())
             .unwrap()
@@ -1220,7 +1220,7 @@ mod reclaim {
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
-            .0 as u64;
+            .0;
         ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
         let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
         assert!(matches!(view.lifecycle, LifecycleStatus::Reclaimable));
@@ -1234,7 +1234,7 @@ mod reclaim {
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
-            .0 as u64;
+            .0;
         ctx(ALICE, 1, 2);
         c.list_sub_account(acc(TLA), "alice".to_string(), U128(10))
             .unwrap();
@@ -1275,7 +1275,7 @@ mod reclaim {
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
-            .0 as u64;
+            .0;
         ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
         let _ = c
             .reclaim_finalize(acc(TLA), "alice".to_string())
@@ -1297,7 +1297,7 @@ mod reclaim {
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
-            .0 as u64;
+            .0;
         ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
         let _ = c
             .reclaim_finalize(acc(TLA), "alice".to_string())
@@ -1989,4 +1989,89 @@ mod council_split {
         ctx(OTHER_COUNCIL, 0, 0);
         assert!(matches!(c.pause(), Err(ContractError::OnlyAdmin)));
     }
+}
+
+mod marketplace_pause {
+    use super::*;
+
+    fn pause_market(c: &mut TlaRegistry) {
+        ctx(ADMIN, 0, 2);
+        c.pause_marketplace().unwrap();
+    }
+
+    #[test]
+    fn a_paused_marketplace_refuses_listing() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        pause_market(&mut c);
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            Err(ContractError::MarketplacePaused)
+        ));
+    }
+
+    #[test]
+    fn a_paused_marketplace_refuses_buying() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        pause_market(&mut c);
+        ctx(BOB, 10, 3);
+        assert!(matches!(
+            c.buy_sub_account(acc(TLA), "alice".to_string()),
+            Err(ContractError::MarketplacePaused)
+        ));
+    }
+
+    #[test]
+    fn renting_still_works_while_the_marketplace_is_paused() {
+        let mut c = deploy_with_open_tla();
+        pause_market(&mut c);
+        rent_alice_sub(&mut c, "alice");
+        assert!(c.get_sub_account(acc(TLA), "alice".to_string()).is_some());
+    }
+
+    #[test]
+    fn unpausing_restores_listing() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        pause_market(&mut c);
+        ctx(ADMIN, 0, 2);
+        c.unpause_marketplace().unwrap();
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .list_sub_account(acc(TLA), "alice".to_string(), U128(10))
+            .is_ok());
+    }
+
+    #[test]
+    fn the_marketplace_pause_is_separate_from_the_registry_pause() {
+        let mut c = deploy_with_open_tla();
+        pause_market(&mut c);
+        assert!(c.is_marketplace_paused());
+        assert!(!c.is_paused());
+    }
+
+    #[test]
+    fn only_an_admin_can_pause_the_marketplace() {
+        let mut c = deploy_with_open_tla();
+        ctx(ALICE, 0, 2);
+        assert!(matches!(
+            c.pause_marketplace(),
+            Err(ContractError::OnlyAdmin)
+        ));
+    }
+}
+
+#[test]
+fn a_seller_can_still_unlist_while_the_marketplace_is_paused() {
+    let mut c = deploy_with_open_tla();
+    rent_alice_sub(&mut c, "alice");
+    ctx(ALICE, 1, 2);
+    c.list_sub_account(acc(TLA), "alice".to_string(), U128(10))
+        .unwrap();
+    ctx(ADMIN, 0, 2);
+    c.pause_marketplace().unwrap();
+    ctx(ALICE, 1, 3);
+    assert!(c.unlist_sub_account(acc(TLA), "alice".to_string()).is_ok());
 }

@@ -80,6 +80,7 @@ pub struct TlaRegistry {
     pub(crate) rate_sequence: u64,
     pub(crate) treasury: AccountId,
     pub(crate) council: AccountId,
+    pub(crate) marketplace_paused: bool,
 }
 
 #[near(serializers = [borsh])]
@@ -161,6 +162,7 @@ impl TlaRegistry {
             rate_sequence: 0,
             treasury,
             council,
+            marketplace_paused: false,
         }
     }
 
@@ -197,12 +199,13 @@ impl TlaRegistry {
             rate_sequence: old.rate_sequence,
             treasury,
             council,
+            marketplace_paused: false,
         }
     }
 
     #[handle_result]
     pub fn admin_set_initial_rate(&mut self, rate: U128) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if self.near_usd_rate_micro != 0 {
             return Err(ContractError::RateAlreadyInitialized);
         }
@@ -257,7 +260,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn set_price_oracle(&mut self, account: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         self.price_oracle = account.clone();
         Event::PriceOracleUpdated {
             account,
@@ -341,6 +344,39 @@ impl TlaRegistry {
 
     pub fn get_version(&self) -> u8 {
         self.version
+    }
+
+    #[handle_result]
+    pub fn pause_marketplace(&mut self) -> Result<(), ContractError> {
+        self.assert_admin()?;
+        self.marketplace_paused = true;
+        Event::MarketplacePaused {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    pub fn unpause_marketplace(&mut self) -> Result<(), ContractError> {
+        self.assert_admin()?;
+        self.marketplace_paused = false;
+        Event::MarketplaceUnpaused {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    pub fn is_marketplace_paused(&self) -> bool {
+        self.marketplace_paused
+    }
+
+    pub(crate) fn assert_marketplace_open(&self) -> Result<(), ContractError> {
+        if self.marketplace_paused {
+            return Err(ContractError::MarketplacePaused);
+        }
+        Ok(())
     }
 
     pub fn is_paused(&self) -> bool {

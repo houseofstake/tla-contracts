@@ -170,11 +170,19 @@ initialised.
 
 Both `tla-registry` and `hos-extension` separate a council from an operations admin set. Council holds
 what changes the business or hands out power: adding and removing admins, the fee model, releasing
-revenue, registering a TLA, granting the payment and recovery authorities, and approving an extension
-upgrade. Operations keeps the day to day surface, including pause and unpause so an incident does not
-wait on a multisig. Admin rights are not self-granting: an operations key cannot add its own co-admins,
-so a key compromise is a rotation rather than a permanent loss. Council is a constructor parameter on
-both contracts, since on mainnet it is a DAO rather than a fixed account.
+revenue, registering a TLA, granting the payment and recovery authorities, approving an extension
+upgrade, the price oracle account and the initial rate, and a business sub-account cap. Pricing sits
+with council because the oracle account and the rate together set what every name costs. Operations
+keeps the day to day surface, including both pause switches so an incident does not wait on a multisig.
+Admin rights are not self-granting: an operations key cannot add its own co-admins, so a key compromise
+is a rotation rather than a permanent loss. Council is a constructor parameter on both contracts, since
+on mainnet it is a DAO rather than a fixed account.
+
+Pausing is scoped. `pause` halts the registry. `pause_marketplace` halts only entering or completing a
+trade: listing, accepting an offer, and both buy paths. Unlisting and revoking an offer stay open, so a
+pause cannot trap a seller in a position they are trying to leave, and `assert_sale_idle` still stops
+either from unwinding a sale already settling. Renting, renewing, transfers, reclaim and recovery keep
+running while the marketplace is paused. `is_paused` and `is_marketplace_paused` are separate views.
 
 Withdrawal destinations are fixed at deployment. `withdraw` on the registry and `skim` on the extension
 take an amount but not a recipient, so an admin can release funds and cannot redirect them.

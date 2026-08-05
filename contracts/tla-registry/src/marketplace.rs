@@ -36,6 +36,7 @@ impl TlaRegistry {
         name: String,
         price: U128,
     ) -> Result<(), ContractError> {
+        self.assert_marketplace_open()?;
         let seller = self.assert_listable(&tla_id, &name, price)?;
         let key = sub_account_key(&tla_id, &name);
         self.listings.insert(
@@ -239,6 +240,7 @@ impl TlaRegistry {
         buyer: AccountId,
         price: U128,
     ) -> Result<(), ContractError> {
+        self.assert_marketplace_open()?;
         let seller = self.assert_listable(&tla_id, &name, price)?;
         let key = sub_account_key(&tla_id, &name);
         self.accepted_offers.insert(
@@ -292,6 +294,7 @@ impl TlaRegistry {
         name: String,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
+        self.assert_marketplace_open()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
@@ -329,6 +332,7 @@ impl TlaRegistry {
         buyer: AccountId,
     ) -> Result<PromiseOrValue<()>, ContractError> {
         self.assert_not_paused()?;
+        self.assert_marketplace_open()?;
         let operator = self.assert_payment_authority()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);

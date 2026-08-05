@@ -6,6 +6,7 @@ use near_sdk::FunctionError;
 pub enum ContractError {
     OnlyAdmin,
     OnlyCouncil,
+    MarketplacePaused,
     OnlyPaymentAuthority,
     OnlyRecoveryAuthority,
     OnlyPriceOracle,
