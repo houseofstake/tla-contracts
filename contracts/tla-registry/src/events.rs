@@ -15,6 +15,12 @@ pub enum Event {
     #[event_version("1.0.0")]
     PriceOracleUpdated { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
+    RateRecoveredFromOutOfBand {
+        stranded_micro: U128,
+        new_micro: U128,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     TlaRegistered {
         tla_id: AccountId,
         tla_type: TlaType,

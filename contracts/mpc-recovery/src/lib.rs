@@ -22,10 +22,23 @@ const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const MIN_TIMELOCK_SECS: u32 = 60;
+const MAX_TIMELOCK_SECS: u32 = 2_592_000;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct MpcRecovery {
+    owner: AccountId,
+    installer: AccountId,
+    signer: AccountId,
+    transfer_authority: AccountId,
+    watchers: Vec<PublicKey>,
+    threshold: u32,
+    accounts: LookupMap<AccountId, Account>,
+    round_floor: LookupMap<AccountId, u64>,
+}
+
+#[near(serializers = [borsh])]
+struct LegacyMpcRecovery {
     owner: AccountId,
     signer: AccountId,
     transfer_authority: AccountId,
@@ -73,6 +86,7 @@ impl MpcRecovery {
             require!(seen.insert(watcher.clone()), error::DUPLICATE_WATCHER);
         }
         Self {
+            installer: owner.clone(),
             owner,
             signer,
             transfer_authority,
@@ -83,6 +97,32 @@ impl MpcRecovery {
         }
     }
 
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let old: LegacyMpcRecovery =
+            env::state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        Self {
+            installer: old.owner.clone(),
+            owner: old.owner,
+            signer: old.signer,
+            transfer_authority: old.transfer_authority,
+            watchers: old.watchers,
+            threshold: old.threshold,
+            accounts: old.accounts,
+            round_floor: old.round_floor,
+        }
+    }
+
+    pub fn set_installer(&mut self, installer: AccountId) {
+        require!(
+            env::predecessor_account_id() == self.owner,
+            error::ONLY_OWNER
+        );
+        self.installer = installer.clone();
+        Event::InstallerChanged { installer }.emit();
+    }
+
     pub fn install_policy(
         &mut self,
         account: AccountId,
@@ -90,14 +130,12 @@ impl MpcRecovery {
         attestation_key: PublicKey,
         timelock_secs: u32,
     ) {
-        require!(
-            env::predecessor_account_id() == self.owner,
-            error::ONLY_OWNER
-        );
+        require!(self.is_installer(), error::ONLY_INSTALLER);
         require!(
             timelock_secs >= MIN_TIMELOCK_SECS,
             error::TIMELOCK_TOO_SHORT
         );
+        require!(timelock_secs <= MAX_TIMELOCK_SECS, error::TIMELOCK_TOO_LONG);
         require!(
             hos_common::is_ed25519(&attestation_key),
             error::ATTESTATION_NOT_ED25519
@@ -109,6 +147,10 @@ impl MpcRecovery {
         let round = match self.accounts.get(&account) {
             Some(existing) => {
                 require!(matches!(existing.phase, Phase::Idle), error::NOT_IDLE);
+                require!(
+                    env::predecessor_account_id() == self.owner,
+                    error::ONLY_OWNER_REINSTALL
+                );
                 existing.round
             }
             None => self.round_floor.get(&account).copied().unwrap_or(0),
@@ -117,8 +159,8 @@ impl MpcRecovery {
             account.clone(),
             Account {
                 policy: Policy {
-                    mpc_public_key,
-                    attestation_key,
+                    mpc_public_key: mpc_public_key.clone(),
+                    attestation_key: attestation_key.clone(),
                     timelock_secs,
                 },
                 round,
@@ -128,6 +170,8 @@ impl MpcRecovery {
         Event::PolicyInstalled {
             account,
             timelock_secs,
+            mpc_public_key,
+            attestation_key,
         }
         .emit();
     }
@@ -237,8 +281,7 @@ impl MpcRecovery {
         nonce: U64,
         block_hash: Base58CryptoHash,
     ) -> Promise {
-        let caller = env::predecessor_account_id();
-        let owner = self.owner.clone();
+        let authorized = self.is_installer();
         let entry = self
             .accounts
             .get_mut(&account)
@@ -247,7 +290,7 @@ impl MpcRecovery {
             Phase::Approved { new_owner, round } => (new_owner.clone(), *round),
             _ => env::panic_str(error::NOT_APPROVED),
         };
-        require!(caller == owner, error::ONLY_OWNER);
+        require!(authorized, error::ONLY_INSTALLER);
         let mpc_public_key = entry.policy.mpc_public_key.clone();
         entry.phase = Phase::Resolving {
             new_owner: new_owner.clone(),
@@ -264,10 +307,7 @@ impl MpcRecovery {
     }
 
     pub fn abort_recovery(&mut self, account: AccountId) -> PromiseOrValue<()> {
-        require!(
-            env::predecessor_account_id() == self.owner,
-            error::ONLY_OWNER
-        );
+        require!(self.is_installer(), error::ONLY_INSTALLER);
         let entry = self
             .accounts
             .get_mut(&account)
@@ -311,10 +351,7 @@ impl MpcRecovery {
     }
 
     pub fn claim_native_finalized(&mut self, account: AccountId, round: U64) {
-        require!(
-            env::predecessor_account_id() == self.owner,
-            error::ONLY_OWNER
-        );
+        require!(self.is_installer(), error::ONLY_INSTALLER);
         let entry = self
             .accounts
             .get_mut(&account)
@@ -349,6 +386,10 @@ impl MpcRecovery {
 
     pub fn owner(&self) -> AccountId {
         self.owner.clone()
+    }
+
+    pub fn installer(&self) -> AccountId {
+        self.installer.clone()
     }
 
     pub fn signer(&self) -> AccountId {
@@ -387,6 +428,11 @@ impl MpcRecovery {
         self.round_floor.insert(wallet.clone(), round);
         self.accounts.remove(&wallet);
         Event::PolicyReset { account: wallet }.emit();
+    }
+
+    fn is_installer(&self) -> bool {
+        let caller = env::predecessor_account_id();
+        caller == self.installer || caller == self.owner
     }
 
     fn sign_add_key(&self, req: &AddKeyRequest) -> Promise {

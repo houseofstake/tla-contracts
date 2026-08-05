@@ -351,8 +351,8 @@ fn second_finalize_rejected_while_resolving() {
 }
 
 #[test]
-#[should_panic(expected = "only owner")]
-fn finalize_rejects_a_non_owner_caller() {
+#[should_panic(expected = "only installer or owner")]
+fn finalize_rejects_an_unauthorized_caller() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(std::slice::from_ref(&wk1), 1);
@@ -402,8 +402,8 @@ fn abort_from_approved_returns_to_idle() {
 }
 
 #[test]
-#[should_panic(expected = "only owner")]
-fn abort_rejects_non_owner() {
+#[should_panic(expected = "only installer or owner")]
+fn abort_rejects_an_unauthorized_caller() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(std::slice::from_ref(&wk1), 1);
@@ -623,8 +623,8 @@ fn native_on_signed_failure_restores_approved() {
 }
 
 #[test]
-#[should_panic(expected = "only owner")]
-fn native_finalize_rejects_non_owner() {
+#[should_panic(expected = "only installer or owner")]
+fn native_finalize_rejects_unauthorized() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(std::slice::from_ref(&wk1), 1);
@@ -635,8 +635,8 @@ fn native_finalize_rejects_non_owner() {
 }
 
 #[test]
-#[should_panic(expected = "only owner")]
-fn native_claim_rejects_non_owner() {
+#[should_panic(expected = "only installer or owner")]
+fn native_claim_rejects_unauthorized() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(std::slice::from_ref(&wk1), 1);
@@ -721,6 +721,16 @@ fn reinstall_rejected_while_in_flight() {
 }
 
 #[test]
+#[should_panic(expected = "timelock above maximum")]
+fn install_rejects_a_timelock_that_would_brick_recovery() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, u32::MAX);
+}
+
+#[test]
 #[should_panic(expected = "timelock below minimum")]
 fn install_rejects_zero_timelock() {
     let (_, wk1) = keypair();
@@ -795,4 +805,126 @@ fn expected_native_path_is_account_scoped() {
     let b = AccountId::from_str("bob.tla.testnet").unwrap();
     assert_ne!(c.expected_native_path(a.clone()), c.expected_native_path(b));
     assert_eq!(c.expected_native_path(a), "hos-recovery/alice.tla.testnet");
+}
+
+const INSTALLER: &str = "installer.testnet";
+
+#[test]
+fn installer_defaults_to_the_owner_on_deploy() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1], 1);
+    assert_eq!(c.installer(), c.owner());
+}
+
+#[test]
+fn set_installer_delegates_and_owner_keeps_authority() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx(OWNER, 0, 0);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    assert_eq!(c.installer(), AccountId::from_str(INSTALLER).unwrap());
+    assert_eq!(c.owner(), AccountId::from_str(OWNER).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn set_installer_rejects_a_non_owner() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx("attacker.testnet", 0, 0);
+    c.set_installer(AccountId::from_str("attacker.testnet").unwrap());
+}
+
+#[test]
+fn a_delegated_installer_can_install_a_policy() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx(OWNER, 0, 0);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(INSTALLER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
+    assert_eq!(c.timelock_of(account_id()), Some(259_200));
+}
+
+#[test]
+fn the_owner_can_still_install_after_delegating() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx(OWNER, 0, 0);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
+    assert_eq!(c.timelock_of(account_id()), Some(259_200));
+}
+
+#[test]
+#[should_panic(expected = "only installer or owner")]
+fn install_rejects_an_unauthorized_caller() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx("attacker.testnet", 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
+}
+
+#[test]
+fn a_delegated_installer_can_finalize_an_approved_recovery() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(INSTALLER, 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Resolving { .. }
+    ));
+}
+
+#[test]
+fn a_delegated_installer_can_abort_a_recovery() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    install(&mut c, mother_pk);
+    approve_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 0, 6);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(INSTALLER, 0, 6);
+    let _ = c.abort_recovery(account_id());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Idle
+    ));
+}
+
+#[test]
+#[should_panic(expected = "only owner may replace an existing policy")]
+fn a_delegated_installer_cannot_replace_an_existing_policy() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let (_, attacker_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    install(&mut c, mother_pk);
+    ctx(OWNER, 0, 0);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(INSTALLER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), attacker_pk, 259_200);
+}
+
+#[test]
+fn the_owner_can_still_replace_an_existing_policy() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let (_, next_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    install(&mut c, mother_pk);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), next_pk, 259_200);
+    assert_eq!(c.timelock_of(account_id()), Some(259_200));
 }

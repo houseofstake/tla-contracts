@@ -141,7 +141,7 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
             .into_result()?;
         deployer
             .call(&deployer_id, "new")
-            .args_json(json!({ "council": council.id(), "patch_authority": council.id() }))
+            .args_json(json!({ "council": council.id() }))
             .max_gas()
             .transact()
             .await?
@@ -380,6 +380,7 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
                 "admin": council.id(),
                 "registry": registry.id(),
                 "recovery": recovery.id(),
+                "treasury": council.id(),
             }))
             .max_gas()
             .transact()
@@ -429,6 +430,8 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
                 "admin": council.id(),
                 "hos_extension": extension.id(),
                 "grace_period_ns": U64(GRACE_NS),
+                "treasury": council.id(),
+                "council": council.id(),
             }))
             .max_gas()
             .transact()

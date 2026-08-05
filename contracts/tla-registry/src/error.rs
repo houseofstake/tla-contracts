@@ -5,6 +5,7 @@ use near_sdk::FunctionError;
 #[serde(crate = "near_sdk::serde", tag = "code", rename_all = "snake_case")]
 pub enum ContractError {
     OnlyAdmin,
+    OnlyCouncil,
     OnlyPaymentAuthority,
     OnlyRecoveryAuthority,
     OnlyPriceOracle,
@@ -12,7 +13,10 @@ pub enum ContractError {
     RateNotInitialized,
     RateAlreadyInitialized,
     RateCooldown,
+    RateStale,
     InvalidRateBounds,
+    InvalidBusinessCap,
+    RetractionNoticeTooShort,
     FeeExceedsCap,
     OnlyLicensee,
     OnlyOwner,

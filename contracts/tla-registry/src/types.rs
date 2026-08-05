@@ -110,6 +110,7 @@ pub struct FeeConfig {
     pub min_near_usd_rate_micro: U128,
     pub max_near_usd_rate_micro: U128,
     pub rate_update_cooldown_ns: U64,
+    pub max_rate_age_ns: U64,
 }
 
 #[derive(Serialize)]
@@ -180,6 +181,13 @@ pub struct RegistryStats {
     pub sub_account_count: u64,
     pub total_revenue_yocto: U128,
     pub total_pending_refunds_yocto: U128,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct RateMetaView {
+    pub updated_at: U64,
+    pub sequence: U64,
 }
 
 #[derive(Serialize)]

@@ -53,6 +53,10 @@ pub fn rate_upper_bound(current: u128, move_bps: u16) -> u128 {
     current * (BPS_DENOMINATOR + u128::from(move_bps)) / BPS_DENOMINATOR
 }
 
+pub fn rate_is_usable(rate: u128, floor: u128, ceiling: u128) -> bool {
+    rate != 0 && rate >= floor && rate <= ceiling
+}
+
 pub fn rate_within_bounds(
     current: u128,
     new: u128,
@@ -66,7 +70,7 @@ pub fn rate_within_bounds(
     if new < floor || new > ceiling {
         return false;
     }
-    if current == 0 {
+    if !rate_is_usable(current, floor, ceiling) {
         return true;
     }
     new >= rate_lower_bound(current, move_bps) && new <= rate_upper_bound(current, move_bps)
@@ -218,6 +222,29 @@ mod tests {
             floor,
             ceiling
         ));
+    }
+
+    #[test]
+    fn an_out_of_band_baseline_does_not_veto_a_move_back_inside() {
+        let (floor, ceiling) = (dollars(1), dollars(2));
+        assert!(rate_within_bounds(
+            dollars(5),
+            dollars(2),
+            2_000,
+            floor,
+            ceiling
+        ));
+        assert!(rate_within_bounds(
+            dollars(5) / 100,
+            dollars(1),
+            2_000,
+            floor,
+            ceiling
+        ));
+        assert!(
+            !rate_within_bounds(dollars(5), dollars(3), 2_000, floor, ceiling),
+            "the absolute band still binds when the baseline is unusable"
+        );
     }
 
     #[test]

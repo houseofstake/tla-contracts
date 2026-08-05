@@ -9,6 +9,9 @@ use std::str::FromStr;
 
 const ADMIN: &str = "hos.testnet";
 const HOSEXT: &str = "hos-extension.testnet";
+const TREASURY: &str = "treasury.testnet";
+const COUNCIL: &str = ADMIN;
+const OTHER_COUNCIL: &str = "council.testnet";
 const TLA: &str = "mytla";
 const ALICE: &str = "alice.testnet";
 const BOB: &str = "bob.testnet";
@@ -46,7 +49,13 @@ const NEAR_USD_MICRO: u128 = 5_000_000;
 
 fn deploy() -> TlaRegistry {
     ctx(ADMIN, 0, 0);
-    TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(GRACE_NS))
+    TlaRegistry::new(
+        acc(ADMIN),
+        acc(HOSEXT),
+        U64(GRACE_NS),
+        acc(TREASURY),
+        acc(COUNCIL),
+    )
 }
 
 fn deploy_priced() -> TlaRegistry {
@@ -62,9 +71,10 @@ fn usd_to_near(usd_micro: u128) -> u128 {
 
 fn deploy_with_open_tla() -> TlaRegistry {
     let mut c = deploy_priced();
-    ctx(ADMIN, 0, 0);
+    ctx(COUNCIL, 0, 0);
     c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
         .unwrap();
+    ctx(ADMIN, 0, 0);
     c.activate_open_tla(acc(TLA)).unwrap();
     c
 }
@@ -217,7 +227,7 @@ mod tla_admin {
         ctx(ALICE, 0, 0);
         assert!(matches!(
             c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None),
-            Err(ContractError::OnlyAdmin)
+            Err(ContractError::OnlyCouncil)
         ));
     }
 
@@ -242,12 +252,12 @@ mod tla_admin {
     }
 
     #[test]
-    fn only_admin_grants_the_recovery_role() {
+    fn only_the_council_grants_the_recovery_role() {
         let mut c = deploy();
         ctx(ALICE, 0, 0);
         assert!(matches!(
             c.add_recovery_authority(acc(BOB)),
-            Err(ContractError::OnlyAdmin)
+            Err(ContractError::OnlyCouncil)
         ));
     }
 
@@ -658,6 +668,35 @@ mod marketplace {
         ctx(BOB, 10, 2);
         assert!(matches!(
             c.buy_sub_account(acc(TLA), "ali.ce".to_string()),
+            Err(ContractError::InvalidName { .. })
+        ));
+    }
+
+    #[test]
+    fn every_name_entrypoint_rejects_a_dotted_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        assert!(
+            matches!(
+                c.set_payout_account(acc(TLA), "ali.ce".to_string(), acc(BOB)),
+                Err(ContractError::InvalidName { .. })
+            ),
+            "a dotted name must not reach the storage key"
+        );
+        ctx(ALICE, 10, 2);
+        assert!(matches!(
+            c.renew_sub_account(acc(TLA), "ali.ce".to_string()),
+            Err(ContractError::InvalidName { .. })
+        ));
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.schedule_retraction(acc(TLA), "ali.ce".to_string()),
+            Err(ContractError::InvalidName { .. })
+        ));
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.cancel_retraction(acc(TLA), "ali.ce".to_string()),
             Err(ContractError::InvalidName { .. })
         ));
     }
@@ -1225,7 +1264,7 @@ mod reclaim {
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
         ctx(ADMIN, 0, 0);
-        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0));
+        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0), acc(TREASURY), acc(COUNCIL));
     }
 
     #[test]
@@ -1324,7 +1363,7 @@ mod refunds_and_admin {
         let mut c = deploy();
         ctx(ADMIN, 0, 1);
         assert!(matches!(
-            c.withdraw(U128(1), acc(ADMIN)),
+            c.withdraw(U128(1)),
             Err(ContractError::InsufficientRevenue)
         ));
     }
@@ -1527,7 +1566,7 @@ mod price_oracle {
     use super::*;
 
     const KEEPER: &str = "keeper.testnet";
-    const COOLDOWN: u64 = 60 * 1_000_000_000;
+    const COOLDOWN: u64 = 300 * 1_000_000_000;
 
     fn dollars(d: u128) -> u128 {
         d * 1_000_000
@@ -1547,16 +1586,16 @@ mod price_oracle {
         let c = deploy();
         assert_eq!(c.get_price_oracle(), acc(ADMIN));
         assert_eq!(c.get_near_usd_rate().0, 0);
-        assert_eq!(c.get_rate_meta().1, 0);
+        assert_eq!(c.get_rate_meta().sequence.0, 0);
     }
 
     #[test]
     fn admin_initializes_rate_and_stamps_sequence() {
         let c = deploy_initialized();
         assert_eq!(c.get_near_usd_rate().0, dollars(5));
-        let (updated_at, sequence) = c.get_rate_meta();
-        assert_eq!(updated_at.0, 1);
-        assert_eq!(sequence, 1);
+        let meta = c.get_rate_meta();
+        assert_eq!(meta.updated_at.0, 1);
+        assert_eq!(meta.sequence.0, 1);
     }
 
     #[test]
@@ -1598,7 +1637,7 @@ mod price_oracle {
         c.set_near_usd_rate(U128(dollars(5) * 11_000 / 10_000))
             .unwrap();
         assert_eq!(c.get_near_usd_rate().0, dollars(5) * 11_000 / 10_000);
-        assert_eq!(c.get_rate_meta().1, 2);
+        assert_eq!(c.get_rate_meta().sequence.0, 2);
     }
 
     #[test]
@@ -1663,6 +1702,134 @@ mod price_oracle {
         }
         assert!(c.get_near_usd_rate().0 <= dollars(100));
         assert_eq!(c.get_near_usd_rate().0, dollars(100));
+    }
+
+    #[test]
+    fn a_stale_rate_stops_pricing() {
+        let mut c = deploy_initialized();
+        ctx(ADMIN, 0, 1);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        let max_age = c.get_fee_config().max_rate_age_ns.0;
+        ctx(ALICE, 0, 1 + max_age);
+        assert!(
+            c.get_rent_price(acc(TLA), "alice".to_string()).is_ok(),
+            "a rate exactly at the age limit is still usable"
+        );
+        ctx(ALICE, 0, 2 + max_age);
+        assert!(matches!(
+            c.get_rent_price(acc(TLA), "alice".to_string()),
+            Err(ContractError::RateStale)
+        ));
+    }
+
+    #[test]
+    fn pricing_rejects_a_stored_rate_outside_the_configured_band() {
+        let mut c = deploy_initialized();
+        ctx(ADMIN, 0, 1);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        c.fee_config.max_near_usd_rate_micro = U128(dollars(2));
+        ctx(ALICE, 0, 2);
+        assert!(
+            matches!(
+                c.get_rent_price(acc(TLA), "alice".to_string()),
+                Err(ContractError::RateOutOfBounds)
+            ),
+            "a stored rate must be re-checked against the band at point of use"
+        );
+    }
+
+    #[test]
+    fn the_oracle_can_recover_a_rate_stranded_outside_the_band() {
+        let mut c = deploy_initialized();
+        c.fee_config.max_near_usd_rate_micro = U128(dollars(2));
+        ctx(KEEPER, 0, 1 + COOLDOWN);
+        c.set_near_usd_rate(U128(dollars(2)))
+            .expect("an out-of-band baseline must not veto a move back inside the band");
+        assert_eq!(c.get_near_usd_rate().0, dollars(2));
+        assert!(
+            near_sdk::test_utils::get_logs()
+                .iter()
+                .any(|l| l.contains("rate_recovered_from_out_of_band")),
+            "recovering from a stranded rate must be observable, not silent"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_rate_move_is_not_reported_as_a_recovery() {
+        let mut c = deploy_initialized();
+        ctx(KEEPER, 0, 1 + COOLDOWN);
+        c.set_near_usd_rate(U128(dollars(5) * 11_000 / 10_000))
+            .unwrap();
+        assert!(
+            !near_sdk::test_utils::get_logs()
+                .iter()
+                .any(|l| l.contains("rate_recovered_from_out_of_band")),
+            "the recovery signal must stay rare enough to mean something"
+        );
+    }
+
+    #[test]
+    fn config_cannot_strand_the_live_rate_outside_the_new_band() {
+        let mut c = deploy_initialized();
+        let mut config = c.get_fee_config();
+        config.min_near_usd_rate_micro = U128(dollars(1));
+        config.max_near_usd_rate_micro = U128(dollars(2));
+        ctx(ADMIN, 0, 1);
+        assert!(
+            matches!(
+                c.update_fee_config(config),
+                Err(ContractError::RateOutOfBounds)
+            ),
+            "a band that excludes the live rate halts pricing with no oracle move able to recover"
+        );
+    }
+
+    #[test]
+    fn config_rejects_unsafe_operational_values() {
+        let mut c = deploy();
+        let base = c.get_fee_config();
+
+        let mut zero_cap = base.clone();
+        zero_cap.business_max_subs = 0;
+        ctx(ADMIN, 0, 1);
+        assert!(matches!(
+            c.update_fee_config(zero_cap),
+            Err(ContractError::InvalidBusinessCap)
+        ));
+
+        let mut short_notice = base.clone();
+        short_notice.retraction_notice_ns = U64(1);
+        ctx(ADMIN, 0, 1);
+        assert!(matches!(
+            c.update_fee_config(short_notice),
+            Err(ContractError::RetractionNoticeTooShort)
+        ));
+
+        let mut age_below_cooldown = base.clone();
+        age_below_cooldown.max_rate_age_ns = U64(1);
+        ctx(ADMIN, 0, 1);
+        assert!(matches!(
+            c.update_fee_config(age_below_cooldown),
+            Err(ContractError::InvalidRateBounds)
+        ));
+
+        let mut no_cooldown = base.clone();
+        no_cooldown.rate_update_cooldown_ns = U64(0);
+        ctx(ADMIN, 0, 1);
+        assert!(matches!(
+            c.update_fee_config(no_cooldown),
+            Err(ContractError::InvalidRateBounds)
+        ));
+
+        let mut huge_fee = base;
+        huge_fee.rent_tier_5_usd_micro = U128(crate::pricing::MAX_USD_MICRO + 1);
+        ctx(ADMIN, 0, 1);
+        assert!(matches!(
+            c.update_fee_config(huge_fee),
+            Err(ContractError::FeeExceedsCap)
+        ));
     }
 
     #[test]
@@ -1736,5 +1903,90 @@ mod price_oracle {
             c.rent_sub_account(acc(TLA), "alice".to_string(), None),
             Err(ContractError::RateNotInitialized)
         ));
+    }
+}
+
+mod council_split {
+    use super::*;
+
+    fn deploy_split() -> TlaRegistry {
+        ctx(ADMIN, 0, 0);
+        TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(GRACE_NS),
+            acc(TREASURY),
+            acc(OTHER_COUNCIL),
+        )
+    }
+
+    #[test]
+    fn an_operations_admin_cannot_escalate_itself() {
+        let mut c = deploy_split();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.add_admin(acc(BOB)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn an_operations_admin_cannot_move_the_fee_model_or_release_revenue() {
+        let mut c = deploy_split();
+        ctx(ADMIN, 0, 0);
+        let config = c.get_fee_config();
+        assert!(matches!(
+            c.update_fee_config(config),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert!(matches!(
+            c.withdraw(U128(1)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn an_operations_admin_cannot_grant_authorities_or_open_a_tla() {
+        let mut c = deploy_split();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.add_payment_authority(acc(BOB)),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert!(matches!(
+            c.add_recovery_authority(acc(BOB)),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert!(matches!(
+            c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_council_holds_those_powers() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 0, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        c.add_payment_authority(acc(BOB)).unwrap();
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn operations_keeps_pause_and_unpause_so_an_incident_needs_no_multisig() {
+        let mut c = deploy_split();
+        ctx(ADMIN, 0, 0);
+        c.pause().unwrap();
+        assert!(c.is_paused());
+        c.unpause().unwrap();
+        assert!(!c.is_paused());
+    }
+
+    #[test]
+    fn the_council_cannot_run_operations() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 0, 0);
+        assert!(matches!(c.pause(), Err(ContractError::OnlyAdmin)));
     }
 }

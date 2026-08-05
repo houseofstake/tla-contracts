@@ -26,6 +26,7 @@ const IMPL_VERSION: u32 = 3;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
+const AUTHORITY_FREEZE_MAX_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
 #[ext_contract(ext_ft)]
 pub trait Ft {
@@ -107,6 +108,8 @@ pub struct TenantWallet {
     lease_until_ns: u64,
     state: OperatingState,
     frozen: FreezeState,
+    authority_freeze_until_ns: u64,
+    transfer_armed: bool,
 }
 
 #[near]
@@ -206,7 +209,26 @@ impl TenantWallet {
             lease_until_ns: lease_until_ns.0,
             state: OperatingState::Active,
             frozen: FreezeState::Unfrozen,
+            authority_freeze_until_ns: 0,
+            transfer_armed: false,
         }
+    }
+
+    #[payable]
+    pub fn hos_arm_transfer(&mut self, armed: bool) {
+        let caller = env::predecessor_account_id();
+        require!(
+            self.wallet.extensions.contains(&caller),
+            error::UNAUTHORIZED
+        );
+        require!(caller != self.authority, error::ONLY_RENTER);
+        self.assert_renter_active();
+        self.transfer_armed = armed;
+        Event::TransferArmed { armed }.emit();
+    }
+
+    pub fn hos_transfer_armed(&self) -> bool {
+        self.transfer_armed
     }
 
     /// NEP-641. Always delegates: the account holds no key, so its owner
@@ -255,7 +277,7 @@ impl TenantWallet {
             payout_account: self.payout_account.clone(),
             lease_until_ns: U64(self.lease_until_ns),
             state: self.state,
-            frozen: self.frozen,
+            frozen: self.effective_frozen(),
             impl_version: IMPL_VERSION,
         }
     }
@@ -285,6 +307,10 @@ impl TenantWallet {
     #[payable]
     pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>) {
         self.assert_authority();
+        if !self.lease_expired() {
+            require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+        }
+        self.transfer_armed = false;
         if let Some(next) = to.as_ref() {
             require!(*next != env::current_account_id(), error::SELF_TARGET);
             require!(*next != self.authority, error::UNAUTHORIZED);
@@ -308,11 +334,17 @@ impl TenantWallet {
             self.wallet.extensions.contains(&caller),
             error::UNAUTHORIZED
         );
-        require!(self.frozen == FreezeState::Unfrozen, error::FROZEN);
+        require!(
+            self.effective_frozen() == FreezeState::Unfrozen,
+            error::FROZEN
+        );
         let self_initiated = caller != self.authority;
         self.frozen = if self_initiated {
+            self.authority_freeze_until_ns = 0;
             FreezeState::SelfFrozen
         } else {
+            self.authority_freeze_until_ns =
+                env::block_timestamp().saturating_add(AUTHORITY_FREEZE_MAX_NS);
             FreezeState::AuthorityFrozen
         };
         Event::Frozen { self_initiated }.emit();
@@ -326,12 +358,13 @@ impl TenantWallet {
             error::UNAUTHORIZED
         );
         let by_authority = caller == self.authority;
-        match self.frozen {
+        match self.effective_frozen() {
             FreezeState::Unfrozen => env::panic_str(error::NOT_FROZEN),
             FreezeState::SelfFrozen => require!(!by_authority, error::SELF_FROZEN),
             FreezeState::AuthorityFrozen => require!(by_authority, error::AUTHORITY_FROZEN),
         }
         self.frozen = FreezeState::Unfrozen;
+        self.authority_freeze_until_ns = 0;
         Event::Unfrozen {}.emit();
     }
 
@@ -457,7 +490,19 @@ impl TenantWallet {
     fn assert_renter_active(&self) {
         require!(self.state == OperatingState::Active, error::NOT_ACTIVE);
         require!(!self.lease_expired(), error::LEASE_EXPIRED);
-        require!(self.frozen == FreezeState::Unfrozen, error::FROZEN);
+        require!(
+            self.effective_frozen() == FreezeState::Unfrozen,
+            error::FROZEN
+        );
+    }
+
+    fn effective_frozen(&self) -> FreezeState {
+        if self.frozen == FreezeState::AuthorityFrozen
+            && env::block_timestamp() >= self.authority_freeze_until_ns
+        {
+            return FreezeState::Unfrozen;
+        }
+        self.frozen
     }
 
     fn lease_expired(&self) -> bool {
@@ -481,13 +526,6 @@ impl TenantWallet {
             !Self::is_authority(actor, &self.authority),
             error::ONLY_RENTER
         );
-    }
-
-    fn assert_renter_or_authority(&self, actor: &Actor<'_>) {
-        if Self::is_authority(actor, &self.authority) {
-            return;
-        }
-        self.assert_renter_active();
     }
 
     /// The authority reaches the extension set only once the lease has ended,

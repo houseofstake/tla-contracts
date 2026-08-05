@@ -6,6 +6,7 @@ use near_sdk::json_types::{U128, U64};
 use near_sdk::{env, near, AccountId};
 
 const MAX_ALLOWLIST_SIZE: u32 = 16;
+const MIN_RETRACTION_NOTICE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 #[near]
 impl TlaRegistry {
@@ -17,7 +18,7 @@ impl TlaRegistry {
         premium_category: PremiumCategory,
         licensee: Option<AccountId>,
     ) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if self.tlas.contains_key(&tla_id) {
             return Err(ContractError::TlaAlreadyRegistered);
         }
@@ -88,7 +89,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn add_admin(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.admins.insert(account_id.clone()) {
             return Ok(());
         }
@@ -102,7 +103,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn remove_admin(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if self.admins.len() <= 1 {
             return Err(ContractError::CannotRemoveLastAdmin);
         }
@@ -119,7 +120,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn add_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.payment_authorities.insert(account_id.clone()) {
             return Ok(());
         }
@@ -133,7 +134,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn remove_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.payment_authorities.remove(&account_id) {
             return Ok(());
         }
@@ -147,7 +148,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn add_recovery_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.recovery_authorities.insert(account_id.clone()) {
             return Ok(());
         }
@@ -164,7 +165,7 @@ impl TlaRegistry {
         &mut self,
         account_id: AccountId,
     ) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.recovery_authorities.remove(&account_id) {
             return Ok(());
         }
@@ -178,7 +179,7 @@ impl TlaRegistry {
 
     #[handle_result]
     pub fn update_fee_config(&mut self, config: FeeConfig) -> Result<(), ContractError> {
-        self.assert_admin()?;
+        self.assert_council()?;
         if config.rent_tier_5_usd_micro.0 == 0
             && config.rent_tier_8_usd_micro.0 == 0
             && config.rent_tier_10_usd_micro.0 == 0
@@ -203,6 +204,35 @@ impl TlaRegistry {
         {
             return Err(ContractError::InvalidRateBounds);
         }
+        if self.near_usd_rate_micro != 0
+            && (self.near_usd_rate_micro < min_rate || self.near_usd_rate_micro > max_rate)
+        {
+            return Err(ContractError::RateOutOfBounds);
+        }
+        if config.rate_update_cooldown_ns.0 == 0
+            || config.max_rate_age_ns.0 < config.rate_update_cooldown_ns.0
+        {
+            return Err(ContractError::InvalidRateBounds);
+        }
+        if config.business_max_subs == 0 {
+            return Err(ContractError::InvalidBusinessCap);
+        }
+        if config.retraction_notice_ns.0 < MIN_RETRACTION_NOTICE_NS {
+            return Err(ContractError::RetractionNoticeTooShort);
+        }
+        if [
+            config.tla_allocation_fee_usd_micro.0,
+            config.rent_tier_5_usd_micro.0,
+            config.rent_tier_8_usd_micro.0,
+            config.rent_tier_10_usd_micro.0,
+            config.rent_tier_12plus_usd_micro.0,
+            config.sub_fee_per_account_usd_micro.0,
+        ]
+        .iter()
+        .any(|fee| *fee > crate::pricing::MAX_USD_MICRO)
+        {
+            return Err(ContractError::FeeExceedsCap);
+        }
         self.fee_config = config;
         Event::FeeConfigUpdated {
             by: env::predecessor_account_id(),
@@ -212,8 +242,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
-    pub fn withdraw(&mut self, amount: U128, recipient: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
+    pub fn withdraw(&mut self, amount: U128) -> Result<(), ContractError> {
+        self.assert_council()?;
+        let recipient = self.treasury.clone();
         let amount_yocto = amount.0;
         if amount_yocto == 0 {
             return Err(ContractError::WithdrawalAmountZero);

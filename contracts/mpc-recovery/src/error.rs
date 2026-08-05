@@ -1,5 +1,8 @@
 pub const ONLY_OWNER: &str = "only owner";
+pub const ONLY_INSTALLER: &str = "only installer or owner";
+pub const ONLY_OWNER_REINSTALL: &str = "only owner may replace an existing policy";
 pub const ONLY_TRANSFER_AUTHORITY: &str = "only transfer authority";
+pub const NO_STATE: &str = "no contract state to migrate";
 pub const BAD_THRESHOLD: &str = "threshold must be in 1..=watchers";
 pub const NO_POLICY: &str = "no recovery policy for account";
 pub const NOT_IDLE: &str = "recovery already in progress";
@@ -13,6 +16,7 @@ pub const TIMELOCK: &str = "timelock not elapsed";
 pub const NO_QUORUM: &str = "watcher quorum not met";
 pub const BAD_SIGNATURE_LEN: &str = "signature must be 64 bytes";
 pub const TIMELOCK_TOO_SHORT: &str = "timelock below minimum";
+pub const TIMELOCK_TOO_LONG: &str = "timelock above maximum";
 pub const DUPLICATE_WATCHER: &str = "duplicate watcher key";
 pub const MPC_NOT_ED25519: &str = "native mpc key must be ed25519";
 pub const WATCHER_NOT_ED25519: &str = "watcher key must be ed25519";

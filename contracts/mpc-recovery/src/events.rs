@@ -7,6 +7,8 @@ pub enum Event {
     PolicyInstalled {
         account: AccountId,
         timelock_secs: u32,
+        mpc_public_key: PublicKey,
+        attestation_key: PublicKey,
     },
     #[event_version("1.0.0")]
     Requested {
@@ -24,6 +26,8 @@ pub enum Event {
     Finalized { account: AccountId, round: U64 },
     #[event_version("1.0.0")]
     Aborted { account: AccountId, round: U64 },
+    #[event_version("1.0.0")]
+    InstallerChanged { installer: AccountId },
     #[event_version("1.0.0")]
     PolicyReset { account: AccountId },
     #[event_version("1.0.0")]

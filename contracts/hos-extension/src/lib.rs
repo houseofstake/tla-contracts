@@ -5,7 +5,7 @@ use crate::error::ContractError;
 use crate::events::Event;
 use hos_common::OperatingState;
 use near_sdk::borsh::BorshSerialize;
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::store::IterableSet;
 use near_sdk::{
     env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
@@ -13,6 +13,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
+const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_ROTATE: Gas = Gas::from_tgas(30);
 const GAS_FOR_ROTATE_CB: Gas = Gas::from_tgas(10);
@@ -71,12 +72,31 @@ pub struct HosExtension {
     pub(crate) recovery: AccountId,
     pub(crate) paused: bool,
     pub(crate) version: u8,
+    pub(crate) treasury: AccountId,
+    pub(crate) approved_code_hash: Option<[u8; 32]>,
+    pub(crate) approved_at: Option<u64>,
+    pub(crate) council: AccountId,
+}
+
+#[near(serializers = [borsh])]
+pub struct LegacyHosExtension {
+    admins: IterableSet<AccountId>,
+    registry: AccountId,
+    recovery: AccountId,
+    paused: bool,
+    version: u8,
 }
 
 #[near]
 impl HosExtension {
     #[init]
-    pub fn new(admin: AccountId, registry: AccountId, recovery: AccountId) -> Self {
+    pub fn new(
+        admin: AccountId,
+        registry: AccountId,
+        recovery: AccountId,
+        treasury: AccountId,
+        council: AccountId,
+    ) -> Self {
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);
         Self {
@@ -85,7 +105,33 @@ impl HosExtension {
             recovery,
             paused: false,
             version: CONTRACT_VERSION,
+            treasury,
+            approved_code_hash: None,
+            approved_at: None,
+            council,
         }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate(treasury: AccountId, council: AccountId) -> Self {
+        let old: LegacyHosExtension =
+            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        Self {
+            admins: old.admins,
+            registry: old.registry,
+            recovery: old.recovery,
+            paused: old.paused,
+            version: CONTRACT_VERSION,
+            treasury,
+            approved_code_hash: None,
+            approved_at: None,
+            council,
+        }
+    }
+
+    pub fn get_council(&self) -> AccountId {
+        self.council.clone()
     }
 
     #[handle_result]
@@ -114,7 +160,7 @@ impl HosExtension {
     #[handle_result]
     pub fn add_admin(&mut self, account: AccountId) -> Result<(), ContractError> {
         self.assert_one_yocto()?;
-        self.assert_admin()?;
+        self.assert_council()?;
         if !self.admins.insert(account.clone()) {
             return Ok(());
         }
@@ -130,7 +176,7 @@ impl HosExtension {
     #[handle_result]
     pub fn remove_admin(&mut self, account: AccountId) -> Result<(), ContractError> {
         self.assert_one_yocto()?;
-        self.assert_admin()?;
+        self.assert_council()?;
         if self.admins.len() <= 1 {
             return Err(ContractError::CannotRemoveLastAdmin);
         }
@@ -147,12 +193,39 @@ impl HosExtension {
 
     #[payable]
     #[handle_result]
+    #[handle_result]
+    pub fn approve_upgrade(&mut self, code_hash: Base58CryptoHash) -> Result<(), ContractError> {
+        self.assert_one_yocto()?;
+        self.assert_council()?;
+        self.approved_code_hash = Some(code_hash.into());
+        self.approved_at = Some(env::block_timestamp());
+        Event::UpgradeApproved {
+            hash: (&code_hash).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
     pub fn upgrade(&mut self, code: Vec<u8>) -> Result<Promise, ContractError> {
         self.assert_one_yocto()?;
         self.assert_admin()?;
         if code.is_empty() {
             return Err(ContractError::EmptyCode);
         }
+        let approved = self
+            .approved_code_hash
+            .ok_or(ContractError::NoApprovedHash)?;
+        if env::sha256_array(&code) != approved {
+            return Err(ContractError::HashMismatch);
+        }
+        let approved_at = self.approved_at.ok_or(ContractError::NoApprovedHash)?;
+        if env::block_timestamp() < approved_at.saturating_add(UPGRADE_DELAY_NS) {
+            return Err(ContractError::ApprovalTooYoung);
+        }
+        self.approved_code_hash = None;
+        self.approved_at = None;
         Event::Upgraded {
             by: env::predecessor_account_id(),
         }
@@ -161,8 +234,9 @@ impl HosExtension {
     }
 
     #[handle_result]
-    pub fn skim(&mut self, amount: U128, to: AccountId) -> Result<Promise, ContractError> {
+    pub fn skim(&mut self, amount: U128) -> Result<Promise, ContractError> {
         self.assert_admin()?;
+        let to = self.treasury.clone();
         let reserve = env::storage_byte_cost()
             .as_yoctonear()
             .saturating_mul(env::storage_usage() as u128);
@@ -440,6 +514,13 @@ impl HosExtension {
     fn assert_admin(&self) -> Result<(), ContractError> {
         if !self.admins.contains(&env::predecessor_account_id()) {
             return Err(ContractError::OnlyAdmin);
+        }
+        Ok(())
+    }
+
+    fn assert_council(&self) -> Result<(), ContractError> {
+        if env::predecessor_account_id() != self.council {
+            return Err(ContractError::OnlyCouncil);
         }
         Ok(())
     }

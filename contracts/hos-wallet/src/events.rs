@@ -26,6 +26,8 @@ pub enum Event {
         amount: U128,
     },
     #[event_version("1.0.0")]
+    TransferArmed { armed: bool },
+    #[event_version("1.0.0")]
     Frozen { self_initiated: bool },
     #[event_version("1.0.0")]
     Unfrozen {},

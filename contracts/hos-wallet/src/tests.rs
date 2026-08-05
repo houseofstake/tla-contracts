@@ -48,6 +48,11 @@ fn init(ts: u64, lease_until_ns: u64) -> TenantWallet {
     })
 }
 
+fn arm(c: &mut TenantWallet) {
+    ctx(OWNER, 1, now_ns());
+    c.hos_arm_transfer(true);
+}
+
 fn deploy() -> TenantWallet {
     init(now_ns(), now_ns() + YEAR_NS)
 }
@@ -240,6 +245,7 @@ fn the_lease_push_cannot_park_the_wallet() {
 #[test]
 fn a_transfer_moves_ownership_and_payout_together() {
     let mut c = deploy();
+    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
     c.hos_transfer_ownership(Some(acc(BUYER)));
     assert!(c.w_is_extension_enabled(acc(BUYER)));
@@ -252,6 +258,7 @@ fn a_transfer_evicts_co_owners() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner("carol.testnet")]));
+    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
     c.hos_transfer_ownership(Some(acc(BUYER)));
     assert!(!c.w_is_extension_enabled(acc("carol.testnet")));
@@ -261,6 +268,7 @@ fn a_transfer_evicts_co_owners() {
 #[test]
 fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
     let mut c = deploy();
+    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
     c.hos_transfer_ownership(None);
     assert_eq!(c.w_extensions().len(), 1);
@@ -493,6 +501,7 @@ fn resolve_auth_never_names_the_authority_as_an_owner() {
 #[test]
 fn resolve_auth_is_invalid_once_the_account_is_parked() {
     let mut c = deploy();
+    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
     c.hos_transfer_ownership(None);
     assert!(matches!(
@@ -545,4 +554,80 @@ fn resolve_auth_serialises_to_the_nep641_wire_format() {
     .unwrap();
     assert_eq!(bad["status"], "INVALID");
     assert_eq!(bad["error_kind"], "INVALID_INPUT");
+}
+
+#[test]
+fn an_authority_freeze_lapses_on_its_own() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    assert_eq!(c.hos_lease().frozen, FreezeState::AuthorityFrozen);
+    ctx(OWNER, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS);
+    assert_eq!(
+        c.hos_lease().frozen,
+        FreezeState::Unfrozen,
+        "a renter must regain the account without us acting"
+    );
+}
+
+#[test]
+fn a_renter_freeze_does_not_lapse() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.hos_freeze();
+    ctx(OWNER, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS * 4);
+    assert_eq!(c.hos_lease().frozen, FreezeState::SelfFrozen);
+}
+
+#[test]
+fn the_authority_can_refreeze_after_a_lapse() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS);
+    c.hos_freeze();
+    assert_eq!(c.hos_lease().frozen, FreezeState::AuthorityFrozen);
+}
+
+#[test]
+#[should_panic(expected = "the owner has not authorised a transfer")]
+fn the_authority_cannot_move_a_live_lease_the_owner_has_not_armed() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)));
+}
+
+#[test]
+fn reclaim_after_expiry_needs_no_arming() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None);
+    assert_eq!(c.w_extensions().len(), 1);
+}
+
+#[test]
+fn arming_is_consumed_by_a_transfer() {
+    let mut c = deploy();
+    arm(&mut c);
+    assert!(c.hos_transfer_armed());
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)));
+    assert!(!c.hos_transfer_armed());
+}
+
+#[test]
+#[should_panic(expected = "only the renter")]
+fn the_authority_cannot_arm_a_transfer_for_the_owner() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_arm_transfer(true);
+}
+
+#[test]
+fn the_owner_can_disarm_before_a_sale_settles() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(OWNER, 1, now_ns());
+    c.hos_arm_transfer(false);
+    assert!(!c.hos_transfer_armed());
 }

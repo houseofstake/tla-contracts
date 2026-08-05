@@ -49,7 +49,8 @@ pub fn default_fee_config() -> FeeConfig {
         quote_slippage_bps: 527,
         min_near_usd_rate_micro: U128(100_000),
         max_near_usd_rate_micro: U128(100_000_000),
-        rate_update_cooldown_ns: U64(60 * 1_000_000_000),
+        rate_update_cooldown_ns: U64(300 * 1_000_000_000),
+        max_rate_age_ns: U64(6 * 60 * 60 * 1_000_000_000),
     }
 }
 

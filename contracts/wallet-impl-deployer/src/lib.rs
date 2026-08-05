@@ -12,7 +12,6 @@ const DEFAULT_APPROVAL_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 mod error {
     pub const ONLY_COUNCIL: &str = "only council";
-    pub const ONLY_APPROVER: &str = "only council or patch authority";
     pub const NO_APPROVED_HASH: &str = "no approved code hash";
     pub const HASH_MISMATCH: &str = "code does not match the approved hash";
     pub const DEPLOY_IN_FLIGHT: &str = "another deploy is in flight";
@@ -38,14 +37,12 @@ pub enum Event {
 #[near(serializers = [json])]
 pub struct DeployerView {
     pub council: AccountId,
-    pub patch_authority: AccountId,
 }
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct ImplDeployer {
     council: AccountId,
-    patch_authority: AccountId,
     current_hash: Option<[u8; 32]>,
     approved_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
@@ -75,7 +72,6 @@ impl ImplDeployer {
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
         Self {
             council: old.council,
-            patch_authority: old.patch_authority,
             current_hash: old.current_hash,
             approved_hash: None,
             approved_at: None,
@@ -88,14 +84,9 @@ impl ImplDeployer {
     /// `approval_delay_ns` is omitted in every real deployment, which takes the
     /// 48 hour default. The sandbox passes 0 so tests do not have to advance
     /// two days of blocks.
-    pub fn new(
-        council: AccountId,
-        patch_authority: AccountId,
-        approval_delay_ns: Option<near_sdk::json_types::U64>,
-    ) -> Self {
+    pub fn new(council: AccountId, approval_delay_ns: Option<near_sdk::json_types::U64>) -> Self {
         Self {
             council,
-            patch_authority,
             current_hash: None,
             approved_hash: None,
             approved_at: None,
@@ -110,10 +101,7 @@ impl ImplDeployer {
     pub fn gd_approve(&mut self, hash: Base58CryptoHash) {
         assert_one_yocto();
         let caller = env::predecessor_account_id();
-        require!(
-            caller == self.council || caller == self.patch_authority,
-            error::ONLY_APPROVER
-        );
+        require!(caller == self.council, error::ONLY_COUNCIL);
         let raw: [u8; 32] = hash.into();
         self.approved_hash = Some(raw);
         self.approved_at = Some(env::block_timestamp());
@@ -230,7 +218,6 @@ impl ImplDeployer {
     pub fn config(&self) -> DeployerView {
         DeployerView {
             council: self.council.clone(),
-            patch_authority: self.patch_authority.clone(),
         }
     }
 
@@ -286,7 +273,7 @@ mod tests {
 
     fn deploy() -> ImplDeployer {
         ctx(COUNCIL, 0);
-        ImplDeployer::new(acc(COUNCIL), acc(PATCH), None)
+        ImplDeployer::new(acc(COUNCIL), None)
     }
 
     fn code() -> Vec<u8> {
@@ -323,15 +310,15 @@ mod tests {
     }
 
     #[test]
-    fn patch_authority_can_approve() {
+    #[should_panic(expected = "only council")]
+    fn a_second_approver_key_no_longer_exists() {
         let mut c = deploy();
         ctx(PATCH, 1);
         c.gd_approve(code_hash());
-        assert_eq!(c.approved_hash(), Some(code_hash()));
     }
 
     #[test]
-    #[should_panic(expected = "only council or patch authority")]
+    #[should_panic(expected = "only council")]
     fn outsider_cannot_approve() {
         let mut c = deploy();
         ctx("attacker.testnet", 1);
@@ -412,7 +399,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "only council")]
-    fn self_upgrade_rejects_patch_authority() {
+    fn self_upgrade_rejects_a_non_council_caller() {
         let mut c = deploy();
         ctx(PATCH, 1);
         let _ = c.upgrade_self(code());

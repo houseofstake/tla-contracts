@@ -332,6 +332,7 @@ impl TlaRegistry {
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
         if new_payout_account.as_str() == key {
@@ -362,6 +363,7 @@ impl TlaRegistry {
         name: String,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
         let now = env::block_timestamp();

@@ -10,6 +10,7 @@ const WALLET: &str = "alice.tla.testnet";
 const TOKEN: &str = "token.testnet";
 const DEST: &str = "treasury.testnet";
 const BUYER: &str = "buyer.testnet";
+const COUNCIL: &str = "council.testnet";
 fn acc(s: &str) -> AccountId {
     AccountId::from_str(s).unwrap()
 }
@@ -25,7 +26,13 @@ fn ctx(predecessor: &str, deposit: u128) {
 
 fn deploy() -> HosExtension {
     ctx(ADMIN, 0);
-    HosExtension::new(acc(ADMIN), acc(REGISTRY), acc(RECOVERY))
+    HosExtension::new(
+        acc(ADMIN),
+        acc(REGISTRY),
+        acc(RECOVERY),
+        acc(DEST),
+        acc(COUNCIL),
+    )
 }
 
 fn sweep_deposit() -> u128 {
@@ -140,24 +147,94 @@ fn non_registry_cannot_sweep() {
 fn admin_can_skim_within_available_balance() {
     let mut c = deploy();
     ctx(ADMIN, 0);
-    assert!(c.skim(U128(1), acc(DEST)).is_ok());
+    assert!(c.skim(U128(1)).is_ok());
 }
 
 #[test]
 fn non_admin_cannot_skim() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
+    assert!(matches!(c.skim(U128(1)), Err(ContractError::OnlyAdmin)));
+}
+
+fn ctx_at(predecessor: &str, deposit: u128, ts: u64) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(acc("hos-extension.testnet"))
+        .predecessor_account_id(acc(predecessor))
+        .attached_deposit(NearToken::from_yoctonear(deposit))
+        .account_balance(NearToken::from_near(10))
+        .block_timestamp(ts)
+        .build());
+}
+
+fn approve(c: &mut HosExtension, code: &[u8], ts: u64) {
+    ctx_at(COUNCIL, 1, ts);
+    c.approve_upgrade(Base58CryptoHash::from(env::sha256_array(code)))
+        .unwrap();
+}
+
+#[test]
+fn admin_upgrade_returns_promise_once_the_delay_has_run() {
+    let mut c = deploy();
+    let code = vec![1, 2, 3];
+    approve(&mut c, &code, 0);
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
+    assert!(c.upgrade(code).is_ok());
+}
+
+#[test]
+fn upgrade_rejects_code_that_was_never_approved() {
+    let mut c = deploy();
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
     assert!(matches!(
-        c.skim(U128(1), acc(DEST)),
-        Err(ContractError::OnlyAdmin)
+        c.upgrade(vec![1, 2, 3]),
+        Err(ContractError::NoApprovedHash)
     ));
 }
 
 #[test]
-fn admin_upgrade_returns_promise() {
+fn upgrade_rejects_code_that_does_not_match_the_approved_hash() {
     let mut c = deploy();
-    ctx(ADMIN, 1);
-    assert!(c.upgrade(vec![1, 2, 3]).is_ok());
+    approve(&mut c, &[1, 2, 3], 0);
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
+    assert!(matches!(
+        c.upgrade(vec![9, 9, 9]),
+        Err(ContractError::HashMismatch)
+    ));
+}
+
+#[test]
+fn upgrade_rejects_an_approval_that_has_not_aged() {
+    let mut c = deploy();
+    let code = vec![1, 2, 3];
+    approve(&mut c, &code, 0);
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS - 1);
+    assert!(matches!(
+        c.upgrade(code),
+        Err(ContractError::ApprovalTooYoung)
+    ));
+}
+
+#[test]
+fn a_landed_upgrade_clears_the_approval_so_it_cannot_be_replayed() {
+    let mut c = deploy();
+    let code = vec![1, 2, 3];
+    approve(&mut c, &code, 0);
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
+    assert!(c.upgrade(code.clone()).is_ok());
+    ctx_at(ADMIN, 1, UPGRADE_DELAY_NS * 2);
+    assert!(matches!(
+        c.upgrade(code),
+        Err(ContractError::NoApprovedHash)
+    ));
+}
+
+#[test]
+fn skim_always_pays_the_treasury_fixed_at_deploy() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    assert!(c.skim(U128(1)).is_ok());
+    assert_eq!(c.treasury, acc(DEST));
 }
 
 #[test]
@@ -180,7 +257,7 @@ fn non_admin_cannot_upgrade() {
 #[test]
 fn admin_management_keeps_at_least_one() {
     let mut c = deploy();
-    ctx(ADMIN, 1);
+    ctx(COUNCIL, 1);
     assert!(matches!(
         c.remove_admin(acc(ADMIN)),
         Err(ContractError::CannotRemoveLastAdmin)
@@ -229,4 +306,24 @@ fn config_views() {
     assert_eq!(c.get_recovery(), acc(RECOVERY));
     assert_eq!(c.get_version(), CONTRACT_VERSION);
     assert!(!c.is_paused());
+}
+
+#[test]
+fn an_admin_cannot_add_another_admin() {
+    let mut c = deploy();
+    ctx(ADMIN, 1);
+    assert!(matches!(
+        c.add_admin(acc("second.testnet")),
+        Err(ContractError::OnlyCouncil)
+    ));
+}
+
+#[test]
+fn an_admin_cannot_approve_an_upgrade() {
+    let mut c = deploy();
+    ctx_at(ADMIN, 1, 0);
+    assert!(matches!(
+        c.approve_upgrade(Base58CryptoHash::from(env::sha256_array([1, 2, 3]))),
+        Err(ContractError::OnlyCouncil)
+    ));
 }

@@ -17,6 +17,7 @@ impl TlaRegistry {
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
         let now = env::block_timestamp();
@@ -55,6 +56,7 @@ impl TlaRegistry {
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
         let retraction_notice_ns = self.fee_config.retraction_notice_ns.0;

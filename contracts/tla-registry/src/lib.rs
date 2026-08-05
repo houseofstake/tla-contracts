@@ -78,12 +78,49 @@ pub struct TlaRegistry {
     pub(crate) near_usd_rate_micro: u128,
     pub(crate) rate_updated_at: u64,
     pub(crate) rate_sequence: u64,
+    pub(crate) treasury: AccountId,
+    pub(crate) council: AccountId,
+}
+
+#[near(serializers = [borsh])]
+pub struct LegacyTlaRegistry {
+    tlas: IterableMap<AccountId, TlaEntry>,
+    sub_accounts: LookupMap<String, SubAccountEntry>,
+    admins: IterableSet<AccountId>,
+    fee_config: FeeConfig,
+    total_revenue: u128,
+    sub_account_count: u64,
+    paused: bool,
+    version: u8,
+    pending_refunds: LookupMap<AccountId, u128>,
+    total_pending_refunds: u128,
+    ft_allowlist: IterableSet<AccountId>,
+    business_sub_count: LookupMap<AccountId, u32>,
+    business_sub_cap_override: LookupMap<AccountId, u32>,
+    listings: LookupMap<String, Listing>,
+    accepted_offers: LookupMap<String, AcceptedOffer>,
+    parked_names: LookupMap<String, ParkedEntry>,
+    reclaim_pending: LookupMap<String, bool>,
+    payment_authorities: IterableSet<AccountId>,
+    recovery_authorities: IterableSet<AccountId>,
+    hos_extension: AccountId,
+    grace_period_ns: u64,
+    price_oracle: AccountId,
+    near_usd_rate_micro: u128,
+    rate_updated_at: u64,
+    rate_sequence: u64,
 }
 
 #[near]
 impl TlaRegistry {
     #[init]
-    pub fn new(admin: AccountId, hos_extension: AccountId, grace_period_ns: U64) -> Self {
+    pub fn new(
+        admin: AccountId,
+        hos_extension: AccountId,
+        grace_period_ns: U64,
+        treasury: AccountId,
+        council: AccountId,
+    ) -> Self {
         require!(
             grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
             "grace period too short"
@@ -122,6 +159,44 @@ impl TlaRegistry {
             near_usd_rate_micro: 0,
             rate_updated_at: 0,
             rate_sequence: 0,
+            treasury,
+            council,
+        }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate(treasury: AccountId, council: AccountId) -> Self {
+        let old: LegacyTlaRegistry =
+            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        Self {
+            tlas: old.tlas,
+            sub_accounts: old.sub_accounts,
+            admins: old.admins,
+            fee_config: old.fee_config,
+            total_revenue: old.total_revenue,
+            sub_account_count: old.sub_account_count,
+            paused: old.paused,
+            version: CONTRACT_VERSION,
+            pending_refunds: old.pending_refunds,
+            total_pending_refunds: old.total_pending_refunds,
+            ft_allowlist: old.ft_allowlist,
+            business_sub_count: old.business_sub_count,
+            business_sub_cap_override: old.business_sub_cap_override,
+            listings: old.listings,
+            accepted_offers: old.accepted_offers,
+            parked_names: old.parked_names,
+            reclaim_pending: old.reclaim_pending,
+            payment_authorities: old.payment_authorities,
+            recovery_authorities: old.recovery_authorities,
+            hos_extension: old.hos_extension,
+            grace_period_ns: old.grace_period_ns,
+            price_oracle: old.price_oracle,
+            near_usd_rate_micro: old.near_usd_rate_micro,
+            rate_updated_at: old.rate_updated_at,
+            rate_sequence: old.rate_sequence,
+            treasury,
+            council,
         }
     }
 
@@ -156,16 +231,26 @@ impl TlaRegistry {
         {
             return Err(ContractError::RateCooldown);
         }
+        let floor = self.fee_config.min_near_usd_rate_micro.0;
+        let ceiling = self.fee_config.max_near_usd_rate_micro.0;
+        let previous = self.near_usd_rate_micro;
         if !pricing::rate_within_bounds(
-            self.near_usd_rate_micro,
+            previous,
             rate.0,
             self.fee_config.max_rate_move_bps,
-            self.fee_config.min_near_usd_rate_micro.0,
-            self.fee_config.max_near_usd_rate_micro.0,
+            floor,
+            ceiling,
         ) {
             return Err(ContractError::RateOutOfBounds);
         }
-        let previous = self.near_usd_rate_micro;
+        if !pricing::rate_is_usable(previous, floor, ceiling) {
+            Event::RateRecoveredFromOutOfBand {
+                stranded_micro: U128(previous),
+                new_micro: rate,
+                by: env::predecessor_account_id(),
+            }
+            .emit();
+        }
         self.commit_rate(previous, rate.0);
         Ok(())
     }
@@ -186,8 +271,11 @@ impl TlaRegistry {
         U128(self.near_usd_rate_micro)
     }
 
-    pub fn get_rate_meta(&self) -> (U64, u64) {
-        (U64(self.rate_updated_at), self.rate_sequence)
+    pub fn get_rate_meta(&self) -> RateMetaView {
+        RateMetaView {
+            updated_at: U64(self.rate_updated_at),
+            sequence: U64(self.rate_sequence),
+        }
     }
 
     pub fn get_price_oracle(&self) -> AccountId {
@@ -276,17 +364,40 @@ impl TlaRegistry {
         Ok(())
     }
 
+    pub(crate) fn assert_council(&self) -> Result<(), ContractError> {
+        if env::predecessor_account_id() != self.council {
+            return Err(ContractError::OnlyCouncil);
+        }
+        Ok(())
+    }
+
+    pub fn get_council(&self) -> AccountId {
+        self.council.clone()
+    }
+
+    pub fn get_treasury(&self) -> AccountId {
+        self.treasury.clone()
+    }
+
     pub(crate) fn convert_usd_to_near(&self, usd_micro: u128) -> Result<u128, ContractError> {
-        if self.near_usd_rate_micro == 0 {
+        let rate = self.near_usd_rate_micro;
+        if rate == 0 {
             return Err(ContractError::RateNotInitialized);
+        }
+        if rate < self.fee_config.min_near_usd_rate_micro.0
+            || rate > self.fee_config.max_near_usd_rate_micro.0
+        {
+            return Err(ContractError::RateOutOfBounds);
+        }
+        if env::block_timestamp().saturating_sub(self.rate_updated_at)
+            > self.fee_config.max_rate_age_ns.0
+        {
+            return Err(ContractError::RateStale);
         }
         if usd_micro > pricing::MAX_USD_MICRO {
             return Err(ContractError::FeeExceedsCap);
         }
-        Ok(pricing::usd_micro_to_near_yocto(
-            usd_micro,
-            self.near_usd_rate_micro,
-        ))
+        Ok(pricing::usd_micro_to_near_yocto(usd_micro, rate))
     }
 
     pub(crate) fn quote_usd_to_near(&self, usd_micro: u128) -> Result<u128, ContractError> {
