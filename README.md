@@ -36,8 +36,12 @@ set, the owner's account and the authority the registrar supplies, and rejects a
 those two are the same or where either is the account itself.
 
 To move funds or call a contract, the owner sends a transaction from their own account calling
-`w_execute_extension` on the leased account. The wallet checks the caller is an enabled extension and
-runs the request. An owner can add and remove co-owners through the same path.
+`w_execute_extension` on the leased account. The caller check runs in two stages. Membership in the
+extension set admits the caller to the function. Anything external, meaning a transfer or a call to
+another contract, additionally requires the caller not to be the authority. So the authority passes the
+first check and is refused by the second, and cannot spend from a leased account. The test is "not the
+authority" rather than "is the renter", so any co-owner the renter adds inherits the same rights. An
+owner can add and remove co-owners through the same path.
 
 While a lease runs, the owner alone decides who holds the account. `assert_extension_editor` lets the
 authority reach the extension set only once the lease has expired, which is the reclaim window. The
@@ -59,10 +63,17 @@ given, and moves the payout account to match. Co-owners the previous owner added
 is no key to rotate and no token to move, so a sale, a reclaim or a recovery all end the previous
 owner's control the same way.
 
+While a lease is live the owner must authorise the move first. `hos_arm_transfer` is callable by a
+non-authority extension on an active unfrozen lease, and `hos_transfer_ownership` refuses without it.
+Arming is consumed by the transfer, so every move needs a fresh authorisation. After expiry no arming
+is required, which is the reclaim window. The registry already restricts when it will call this, and
+the arming check is a second condition the wallet enforces on its own.
+
 Freezing runs in both directions. Any extension may call `hos_freeze`. A freeze is recorded as
 `SelfFrozen` when the caller is not the authority and `AuthorityFrozen` when it is. `hos_unfreeze`
 enforces the matching side, so the authority cannot lift an owner's freeze and an owner cannot lift the
-authority's.
+authority's. An authority freeze lapses on its own after seven days, so a lost or misused authority key
+cannot strand an account. An owner's own freeze does not lapse.
 
 Sweeping is gated on the authority and an expired lease. `assert_sweepable` checks those two and does
 not read the freeze state, so a frozen account can still be swept once its lease has ended.
@@ -101,23 +112,31 @@ once the lease has ended, since neither freeze survives expiry.
 `mpc-recovery` covers ordinary NEAR accounts, which have no wallet contract to call and therefore
 cannot be recovered by rewriting an extension set.
 
-The owner installs a policy per account holding an MPC public key, an attestation key and a timelock.
-Both keys must be ed25519 and the timelock is bounded at both ends.
+A policy per account holds an MPC public key, an attestation key and a timelock. Both keys must be
+ed25519 and the timelock is bounded at both ends.
+
+Installation is delegated. The contract holds an `installer` alongside its owner, set by the owner
+through `set_installer` and defaulting to the owner. The installer may create a policy where none
+exists, and may finalize, claim and abort. Replacing an existing policy is owner only, because a policy
+carries the attestation key that authorises starting a recovery, and an installer able to rewrite it
+could point an armed account at a key of its own. Abort is deliberately open to both: it can only deny
+a recovery, never grant one, so the brake must not be slower than the automated path it stops.
+`PolicyInstalled` carries both keys, so a rotation is visible on chain rather than silent.
 
 A recovery request carries the new owner key, the current round, and a signature over a request message
 made with the attestation key. The round increments on every request, so a replayed request is stale.
 
 After the timelock has elapsed, watchers submit a verdict signed by a quorum. Their public keys and the
 threshold are fixed when the contract is initialised. A rejection returns the account to idle. An
-approval lets the owner call `finalize_recovery`, which asks the MPC signer for a signature over an
-`AddKey` transaction for the account.
+approval lets the installer or the owner call `finalize_recovery`, which asks the MPC signer for a
+signature over an `AddKey` transaction for the account.
 
 This is not trustless. It trusts the watcher set by design.
 
 ## Publishing the wallet implementation
 
-`wallet-impl-deployer` splits approval from publication. The council or the patch authority approves a
-code hash, which stamps the approval time. Once 48 hours have passed, anyone may call `gd_deploy` with
+`wallet-impl-deployer` splits approval from publication. The council approves a code hash, which stamps
+the approval time. Once 48 hours have passed, anyone may call `gd_deploy` with
 code matching that hash, attaching the global storage cost, which is charged per byte and refunded
 above the amount used. A successful deploy records the hash and clears the approval. A failed one
 refunds the deposit and leaves the approval usable, so a retry does not need a second approval. Only
@@ -139,13 +158,26 @@ without House of Stake being locked out, and it makes code approval the highest 
 The 48 hour delay between approval and publication bounds it: the code under an account cannot change
 without a window in which the pending hash is already visible on chain.
 
-The patch authority approves a code hash with the same power as the council.
+`hos-extension` is the authority on every leased account, so replacing its code rewrites transfer,
+lease and sweep behaviour everywhere at once. It carries the same rule as the wallet implementation: a
+code hash is approved first and cannot be published until 48 hours have passed.
 
 `push_lease`, `force_transfer`, `sweep_near` and `sweep_ft` on `hos-extension` each call
 `assert_registry`, so only `tla-registry` can reach them. The registrar passes its configured
 `hos_extension` as the `authority` in every `hos_init`, which is how one account ends up holding the
-authority seat on every leased account. `hos-extension` keeps its own admin set and pause switch,
-separate from the registry. `mpc-recovery` holds a transfer authority fixed when it is initialised.
+authority seat on every leased account. `mpc-recovery` holds a transfer authority fixed when it is
+initialised.
+
+Both `tla-registry` and `hos-extension` separate a council from an operations admin set. Council holds
+what changes the business or hands out power: adding and removing admins, the fee model, releasing
+revenue, registering a TLA, granting the payment and recovery authorities, and approving an extension
+upgrade. Operations keeps the day to day surface, including pause and unpause so an incident does not
+wait on a multisig. Admin rights are not self-granting: an operations key cannot add its own co-admins,
+so a key compromise is a rotation rather than a permanent loss. Council is a constructor parameter on
+both contracts, since on mainnet it is a DAO rather than a fixed account.
+
+Withdrawal destinations are fixed at deployment. `withdraw` on the registry and `skim` on the extension
+take an amount but not a recipient, so an admin can release funds and cannot redirect them.
 
 ## Events and JSON types
 
