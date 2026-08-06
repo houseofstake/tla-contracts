@@ -4,6 +4,7 @@ use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::Serialize;
+use near_sdk::store::IterableSet;
 use near_sdk::{near, AccountId};
 
 #[near]
@@ -96,6 +97,76 @@ impl TlaRegistry {
             .collect()
     }
 
+    pub fn list_sub_accounts(&self, from_index: u64, limit: u64) -> Vec<SubAccountDetailView> {
+        self.sub_accounts
+            .iter()
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .filter_map(|(key, sub)| self.to_sub_detail(key, sub))
+            .collect()
+    }
+
+    pub fn list_sub_accounts_by_owner(
+        &self,
+        owner: AccountId,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<SubAccountDetailView> {
+        let Some(keys) = self.sub_accounts_by_owner.get(&owner) else {
+            return Vec::new();
+        };
+        self.page_details(keys, from_index, limit)
+    }
+
+    pub fn list_sub_accounts_by_tla(
+        &self,
+        tla_id: AccountId,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<SubAccountDetailView> {
+        let Some(keys) = self.sub_accounts_by_tla.get(&tla_id) else {
+            return Vec::new();
+        };
+        self.page_details(keys, from_index, limit)
+    }
+
+    pub fn list_listings(&self, from_index: u64, limit: u64) -> Vec<ListingView> {
+        self.listings
+            .iter()
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|(key, listing)| ListingView {
+                full_name: key.clone(),
+                price_yocto: U128(listing.price),
+                settling: listing.settling,
+            })
+            .collect()
+    }
+
+    pub fn list_recent_activity(
+        &self,
+        from_index: u64,
+        limit: u64,
+        account: Option<String>,
+    ) -> Vec<ActivityView> {
+        let len = u64::from(self.recent_activity.len());
+        (0..len)
+            .filter_map(|i| {
+                let slot = (u64::from(self.activity_cursor) + len - 1 - i) % len;
+                self.recent_activity.get(slot as u32)
+            })
+            .filter(|r| account.as_ref().is_none_or(|a| &r.account == a))
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|r| ActivityView {
+                event: r.event.clone(),
+                account: r.account.clone(),
+                block_height: U64(r.block_height),
+                block_timestamp: U64(r.block_timestamp),
+            })
+            .collect()
+    }
+
     pub fn get_fee_config(&self) -> FeeConfig {
         self.fee_config.clone()
     }
@@ -123,6 +194,49 @@ impl TlaRegistry {
 
     pub fn get_ft_allowlist(&self) -> Vec<AccountId> {
         self.ft_allowlist.iter().cloned().collect()
+    }
+}
+
+impl TlaRegistry {
+    fn page_details(
+        &self,
+        keys: &IterableSet<String>,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<SubAccountDetailView> {
+        keys.iter()
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .filter_map(|key| self.to_sub_detail(key, self.sub_accounts.get(key)?))
+            .collect()
+    }
+
+    fn to_sub_detail(&self, key: &str, sub: &SubAccountEntry) -> Option<SubAccountDetailView> {
+        let tla = self.tlas.get(&sub.tla_id)?;
+        let name = key.strip_suffix(&format!(".{}", sub.tla_id))?;
+        Some(SubAccountDetailView {
+            sub_account: to_sub_view(
+                key,
+                sub,
+                tla,
+                &sub.tla_id,
+                name,
+                &self.fee_config,
+                self.grace_period_ns,
+            ),
+            listing: self.listings.get(key).map(|l| ListingView {
+                full_name: key.to_string(),
+                price_yocto: U128(l.price),
+                settling: l.settling,
+            }),
+            accepted_offer: self.accepted_offers.get(key).map(|o| AcceptedOfferView {
+                full_name: key.to_string(),
+                buyer: o.buyer.clone(),
+                price_yocto: U128(o.price),
+                settling: o.settling,
+            }),
+            retraction_at: sub.retraction_at.map(U64),
+        })
     }
 }
 

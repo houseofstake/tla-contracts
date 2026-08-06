@@ -133,6 +133,7 @@ async fn nobody_can_repoint_the_payout_account_independently() -> Result<()> {
 async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let tenant = mint(&fleet, "sold", NearToken::from_near(5)).await?;
+    arm_transfer(&fleet, &tenant).await?;
 
     let moved = fleet
         .extension

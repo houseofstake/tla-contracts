@@ -48,6 +48,7 @@ trait TenantWallet {
     fn hos_sweep_near(&mut self);
     fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128);
     fn hos_payout_account(&self) -> AccountId;
+    fn hos_migrate(owner: AccountId);
 }
 
 const EXTENSION_CALL_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -268,6 +269,18 @@ impl HosExtension {
             .with_static_gas(GAS_FOR_LEASE)
             .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
             .hos_set_lease(lease_until_ns, state))
+    }
+
+    #[handle_result]
+    pub fn migrate_wallet(
+        &mut self,
+        wallet: AccountId,
+        owner: AccountId,
+    ) -> Result<Promise, ContractError> {
+        self.assert_council()?;
+        Ok(ext_wallet::ext(wallet)
+            .with_static_gas(GAS_FOR_LEASE)
+            .hos_migrate(owner))
     }
 
     #[handle_result]

@@ -11,6 +11,7 @@ use defuse_wallet::{
     ContractError, NearPromise, Request, RequestMessage, State, Timestamp, WalletOp, STATE_KEY,
 };
 use defuse_wallet_no_sign::NoPublicKey;
+use near_sdk::borsh::BorshDeserialize;
 use near_sdk::json_types::{U128, U64};
 use near_sdk::{
     env, ext_contract, near, require, AccountId, FunctionError, Gas, NearToken, PanicOnDefault,
@@ -92,6 +93,18 @@ pub struct LeaseView {
     pub impl_version: u32,
 }
 
+#[near(serializers = [borsh])]
+pub struct LegacyTenantWallet {
+    wallet: State<NoPublicKey>,
+    authority: AccountId,
+    payout_account: AccountId,
+    lease_until_ns: u64,
+    state: OperatingState,
+    frozen: FreezeState,
+    authority_freeze_until_ns: u64,
+    transfer_armed: bool,
+}
+
 #[near(
     contract_state(key = STATE_KEY),
     contract_metadata(
@@ -104,6 +117,7 @@ pub struct LeaseView {
 pub struct TenantWallet {
     wallet: State<NoPublicKey>,
     authority: AccountId,
+    owner: AccountId,
     payout_account: AccountId,
     lease_until_ns: u64,
     state: OperatingState,
@@ -200,11 +214,12 @@ impl TenantWallet {
         .emit();
         let mut wallet = State::new(NoPublicKey)
             .timeout(Duration::from_secs(timeout_secs.into()))
-            .extensions([owner_account, authority.clone()]);
+            .extensions([owner_account.clone(), authority.clone()]);
         wallet.signature_enabled = false;
         Self {
             wallet,
             authority,
+            owner: owner_account,
             payout_account,
             lease_until_ns: lease_until_ns.0,
             state: OperatingState::Active,
@@ -214,14 +229,33 @@ impl TenantWallet {
         }
     }
 
+    #[init(ignore_state)]
+    pub fn hos_migrate(owner: AccountId) -> Self {
+        let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        let old = LegacyTenantWallet::try_from_slice(&raw)
+            .unwrap_or_else(|_| env::panic_str(error::NO_STATE));
+        require!(
+            env::predecessor_account_id() == old.authority,
+            error::ONLY_AUTHORITY
+        );
+        require!(owner != old.authority, error::UNAUTHORIZED);
+        require!(old.wallet.extensions.contains(&owner), error::ONLY_OWNER);
+        Self {
+            wallet: old.wallet,
+            authority: old.authority,
+            owner,
+            payout_account: old.payout_account,
+            lease_until_ns: old.lease_until_ns,
+            state: old.state,
+            frozen: old.frozen,
+            authority_freeze_until_ns: old.authority_freeze_until_ns,
+            transfer_armed: false,
+        }
+    }
+
     #[payable]
     pub fn hos_arm_transfer(&mut self, armed: bool) {
-        let caller = env::predecessor_account_id();
-        require!(
-            self.wallet.extensions.contains(&caller),
-            error::UNAUTHORIZED
-        );
-        require!(caller != self.authority, error::ONLY_RENTER);
+        self.assert_owner_caller();
         self.assert_renter_active();
         self.transfer_armed = armed;
         Event::TransferArmed { armed }.emit();
@@ -319,6 +353,7 @@ impl TenantWallet {
         self.wallet.extensions.retain(|held| *held == authority);
         if let Some(next) = to {
             self.wallet.extensions.insert(next.clone());
+            self.owner = next.clone();
             self.payout_account = next.clone();
             Event::PayoutAccountSet {
                 payout_account: next,
@@ -330,6 +365,10 @@ impl TenantWallet {
     #[payable]
     pub fn hos_freeze(&mut self) {
         let caller = env::predecessor_account_id();
+        require!(
+            caller == self.authority || caller == self.owner,
+            error::UNAUTHORIZED
+        );
         require!(
             self.wallet.extensions.contains(&caller),
             error::UNAUTHORIZED
@@ -353,6 +392,10 @@ impl TenantWallet {
     #[payable]
     pub fn hos_unfreeze(&mut self) {
         let caller = env::predecessor_account_id();
+        require!(
+            caller == self.authority || caller == self.owner,
+            error::UNAUTHORIZED
+        );
         require!(
             self.wallet.extensions.contains(&caller),
             error::UNAUTHORIZED
@@ -529,14 +572,35 @@ impl TenantWallet {
     }
 
     /// The authority reaches the extension set only once the lease has ended,
-    /// which is the reclaim window. While a lease runs, the renter alone
+    /// which is the reclaim window. While a lease runs, the owner alone
     /// decides who holds their account.
     fn assert_extension_editor(&self, actor: &Actor<'_>) {
         if Self::is_authority(actor, &self.authority) {
             require!(self.lease_expired(), error::EXTENSIONS_LOCKED);
             return;
         }
+        self.assert_owner(actor);
         self.assert_renter_active();
+    }
+
+    fn assert_owner(&self, actor: &Actor<'_>) {
+        let Actor::Extension(id) = actor else {
+            env::panic_str(error::ONLY_OWNER);
+        };
+        require!(id.as_ref() == self.owner.as_str(), error::ONLY_OWNER);
+        require!(
+            self.wallet.extensions.contains(&self.owner),
+            error::ONLY_OWNER
+        );
+    }
+
+    fn assert_owner_caller(&self) {
+        let caller = env::predecessor_account_id();
+        require!(caller == self.owner, error::ONLY_OWNER);
+        require!(
+            self.wallet.extensions.contains(&caller),
+            error::UNAUTHORIZED
+        );
     }
 
     fn is_authority(actor: &Actor<'_>, authority: &AccountId) -> bool {

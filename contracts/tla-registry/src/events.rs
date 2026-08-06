@@ -193,3 +193,38 @@ pub enum Event {
     #[event_version("1.0.0")]
     ReclaimPendingCleared { full_name: String, by: AccountId },
 }
+
+impl Event {
+    pub(crate) fn activity_entry(&self) -> Option<(&'static str, String)> {
+        match self {
+            Self::SubAccountRented { full_name, .. } => {
+                Some(("sub_account_rented", full_name.clone()))
+            }
+            Self::SubAccountReRented { full_name, .. } => {
+                Some(("sub_account_re_rented", full_name.clone()))
+            }
+            Self::SubAccountRenewed { full_name, .. } => {
+                Some(("sub_account_renewed", full_name.clone()))
+            }
+            Self::SubAccountListed { full_name, .. } => {
+                Some(("sub_account_listed", full_name.clone()))
+            }
+            Self::SubAccountUnlisted { full_name, .. } => {
+                Some(("sub_account_unlisted", full_name.clone()))
+            }
+            Self::OfferAccepted { full_name, .. } => Some(("offer_accepted", full_name.clone())),
+            Self::OfferRevoked { full_name, .. } => Some(("offer_revoked", full_name.clone())),
+            Self::SubAccountTransferred { full_name, .. } => {
+                Some(("sub_account_transferred", full_name.clone()))
+            }
+            Self::SubAccountRecovered { full_name, .. } => {
+                Some(("sub_account_recovered", full_name.clone()))
+            }
+            Self::SubAccountSold { full_name, .. } => Some(("sub_account_sold", full_name.clone())),
+            Self::SubAccountReclaimed { full_name, .. } => {
+                Some(("sub_account_reclaimed", full_name.clone()))
+            }
+            _ => None,
+        }
+    }
+}

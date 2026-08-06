@@ -92,6 +92,7 @@ async fn demonstrate_account_id_ownership_and_hos_reclaim() -> Result<()> {
     println!("\n===== 5. THE OWNER TRIES TO SEIZE (AddKey FullAccess) =====");
     println!("  result      : REJECTED (the account never adds keys, so none exist)");
 
+    arm_transfer(&fleet, &alice).await?;
     let rotate = fleet
         .extension
         .call(&alice, "hos_transfer_ownership")

@@ -182,13 +182,56 @@ fn the_authority_cannot_add_an_extension_while_the_lease_runs() {
 }
 
 #[test]
-fn an_owner_may_add_a_co_owner_who_can_then_act() {
+fn an_installed_extension_may_spend() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "only the owner")]
+fn an_installed_extension_cannot_add_another() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner(BUYER)]));
     ctx(BUYER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner("carol.testnet")]));
-    assert!(c.w_is_extension_enabled(acc("carol.testnet")));
+}
+
+#[test]
+#[should_panic(expected = "only the owner")]
+fn an_installed_extension_cannot_evict_the_owner() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(request([WalletOp::RemoveExtension {
+        account_id: acc(OWNER),
+    }]));
+}
+
+#[test]
+#[should_panic(expected = "only the owner")]
+fn an_installed_extension_cannot_arm_a_transfer() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(BUYER, 1, now_ns());
+    c.hos_arm_transfer(true);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn an_installed_extension_cannot_freeze_the_account() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(BUYER, 1, now_ns());
+    c.hos_freeze();
 }
 
 #[test]
@@ -616,7 +659,7 @@ fn arming_is_consumed_by_a_transfer() {
 }
 
 #[test]
-#[should_panic(expected = "only the renter")]
+#[should_panic(expected = "only the owner")]
 fn the_authority_cannot_arm_a_transfer_for_the_owner() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
@@ -630,4 +673,53 @@ fn the_owner_can_disarm_before_a_sale_settles() {
     ctx(OWNER, 1, now_ns());
     c.hos_arm_transfer(false);
     assert!(!c.hos_transfer_armed());
+}
+
+fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
+    LegacyTenantWallet {
+        wallet: c.wallet,
+        authority: acc(AUTHORITY),
+        payout_account: acc(PAYOUT),
+        lease_until_ns: c.lease_until_ns,
+        state: OperatingState::Active,
+        frozen: FreezeState::Unfrozen,
+        authority_freeze_until_ns: 0,
+        transfer_armed: armed,
+    }
+}
+
+#[test]
+fn migrate_names_the_owner_and_disarms_any_pending_transfer() {
+    let c = deploy();
+    let lease = c.lease_until_ns;
+    let legacy = legacy_state(c, true);
+    ctx(AUTHORITY, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    let migrated = TenantWallet::hos_migrate(acc(OWNER));
+    assert_eq!(migrated.owner, acc(OWNER));
+    assert_eq!(migrated.lease_until_ns, lease);
+    assert!(
+        !migrated.transfer_armed,
+        "a migration must not carry an armed transfer across"
+    );
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority")]
+fn migrate_is_refused_to_anyone_but_the_authority() {
+    let c = deploy();
+    let legacy = legacy_state(c, false);
+    ctx(OWNER, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    TenantWallet::hos_migrate(acc(OWNER));
+}
+
+#[test]
+#[should_panic(expected = "only the owner")]
+fn migrate_refuses_an_owner_outside_the_extension_set() {
+    let c = deploy();
+    let legacy = legacy_state(c, false);
+    ctx(AUTHORITY, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    TenantWallet::hos_migrate(acc("stranger.testnet"));
 }

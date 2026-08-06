@@ -129,7 +129,7 @@ impl TlaRegistry {
 
         let now = env::block_timestamp();
         let lease_until_ns = now.saturating_add(ONE_YEAR_NS);
-        self.sub_accounts.insert(
+        self.sub_account_insert(
             key.clone(),
             SubAccountEntry {
                 owner: owner.clone(),
@@ -238,7 +238,7 @@ impl TlaRegistry {
             expires_at: lease_until_ns,
             retraction_at: None,
         };
-        self.sub_accounts.insert(key, sub_entry);
+        self.sub_account_insert(key, sub_entry);
 
         Ok(ext_registrar::ext(tla_id.clone())
             .with_attached_deposit(NearToken::from_yoctonear(creation_deposit))
@@ -414,12 +414,11 @@ impl TlaRegistry {
         let sub_account: AccountId = key
             .parse()
             .map_err(|_| ContractError::InvalidSubAccountId)?;
-        Event::SubAccountRenewed {
+        self.emit_activity(Event::SubAccountRenewed {
             full_name: key,
             new_expires_at: U64(new_expires_at),
             paid_yocto: U128(rent_near),
-        }
-        .emit();
+        });
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_PUSH_LEASE)
             .push_lease(sub_account, U64(new_expires_at), OperatingState::Active))

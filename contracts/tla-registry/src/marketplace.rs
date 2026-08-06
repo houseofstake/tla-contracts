@@ -47,12 +47,11 @@ impl TlaRegistry {
                 seller: seller.clone(),
             },
         );
-        Event::SubAccountListed {
+        self.emit_activity(Event::SubAccountListed {
             full_name: key,
             price_yocto: price,
             seller,
-        }
-        .emit();
+        });
         Ok(())
     }
 
@@ -136,7 +135,7 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        let Some(sub) = self.sub_accounts.get_mut(&key) else {
+        if !self.sub_account_reassign(&key, &to, &to) {
             Event::TransferFailed {
                 full_name: key,
                 from,
@@ -144,18 +143,15 @@ impl TlaRegistry {
             }
             .emit();
             return;
-        };
-        sub.owner = to.clone();
-        sub.payout_account = to.clone();
+        }
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
-        Event::SubAccountRecovered {
+        self.emit_activity(Event::SubAccountRecovered {
             full_name: key,
             tla_id,
             from,
             to,
-        }
-        .emit();
+        });
     }
 
     #[private]
@@ -177,30 +173,23 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        match self.sub_accounts.get_mut(&key) {
-            Some(sub) => {
-                sub.owner = to.clone();
-                sub.payout_account = to.clone();
+        if !self.sub_account_reassign(&key, &to, &to) {
+            Event::TransferFailed {
+                full_name: key,
+                from,
+                to,
             }
-            None => {
-                Event::TransferFailed {
-                    full_name: key,
-                    from,
-                    to,
-                }
-                .emit();
-                return;
-            }
+            .emit();
+            return;
         }
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
-        Event::SubAccountTransferred {
+        self.emit_activity(Event::SubAccountTransferred {
             full_name: key,
             tla_id,
             from,
             to,
-        }
-        .emit();
+        });
     }
 
     #[handle_result]
@@ -223,11 +212,10 @@ impl TlaRegistry {
             return Err(ContractError::OnlyOwner);
         }
         self.listings.remove(&key);
-        Event::SubAccountUnlisted {
+        self.emit_activity(Event::SubAccountUnlisted {
             full_name: key,
             by: owner,
-        }
-        .emit();
+        });
         Ok(())
     }
 
@@ -252,13 +240,12 @@ impl TlaRegistry {
                 seller: seller.clone(),
             },
         );
-        Event::OfferAccepted {
+        self.emit_activity(Event::OfferAccepted {
             full_name: key,
             buyer,
             price_yocto: price,
             seller,
-        }
-        .emit();
+        });
         Ok(())
     }
 
@@ -278,11 +265,10 @@ impl TlaRegistry {
             return Err(ContractError::OnlyOwner);
         }
         self.accepted_offers.remove(&key);
-        Event::OfferRevoked {
+        self.emit_activity(Event::OfferRevoked {
             full_name: key,
             by: owner,
-        }
-        .emit();
+        });
         Ok(())
     }
 
@@ -405,13 +391,10 @@ impl TlaRegistry {
         self.total_revenue = self.total_revenue.saturating_add(commission);
         self.add_pending_refund(&seller, seller_proceeds);
         self.refund_excess(&buyer, deposit.0, price.0);
-        if let Some(sub) = self.sub_accounts.get_mut(&key) {
-            sub.owner = buyer.clone();
-            sub.payout_account = buyer.clone();
-        }
+        self.sub_account_reassign(&key, &buyer, &buyer);
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
-        Event::SubAccountSold {
+        self.emit_activity(Event::SubAccountSold {
             full_name: key,
             tla_id,
             seller,
@@ -419,8 +402,7 @@ impl TlaRegistry {
             price_yocto: price,
             commission_yocto: U128(commission),
             seller_proceeds_yocto: U128(seller_proceeds),
-        }
-        .emit();
+        });
     }
 
     #[private]
@@ -454,13 +436,10 @@ impl TlaRegistry {
                 return;
             }
         };
-        if let Some(sub) = self.sub_accounts.get_mut(&key) {
-            sub.owner = operator;
-            sub.payout_account = buyer.clone();
-        }
+        self.sub_account_reassign(&key, &operator, &buyer);
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
-        Event::SubAccountSold {
+        self.emit_activity(Event::SubAccountSold {
             full_name: key,
             tla_id,
             seller,
@@ -468,8 +447,7 @@ impl TlaRegistry {
             price_yocto: price,
             commission_yocto: U128(0),
             seller_proceeds_yocto: U128(0),
-        }
-        .emit();
+        });
     }
 
     #[private]

@@ -1,3 +1,4 @@
+mod activity;
 mod admin;
 mod asset_gate;
 mod business;
@@ -5,6 +6,7 @@ mod callbacks;
 mod error;
 mod events;
 mod fees;
+mod indexes;
 mod interfaces;
 mod lifecycle;
 mod marketplace;
@@ -21,7 +23,7 @@ use crate::events::Event;
 use crate::types::*;
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::json_types::{U128, U64};
-use near_sdk::store::{IterableMap, IterableSet, LookupMap};
+use near_sdk::store::{IterableMap, IterableSet, LookupMap, Vector};
 use near_sdk::{
     env, is_promise_success, near, require, AccountId, BorshStorageKey, Gas, NearToken,
     PanicOnDefault, Promise,
@@ -32,29 +34,44 @@ const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
+const ACTIVITY_CAPACITY: u32 = 256;
+
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
-enum StorageKey {
+#[allow(dead_code)]
+pub(crate) enum StorageKey {
     Tlas,
-    SubAccounts,
+    RetiredSubAccounts,
     Admins,
     PendingRefunds,
     FtAllowlist,
     BusinessSubCount,
     BusinessSubCapOverride,
-    Listings,
-    AcceptedOffers,
+    RetiredListings,
+    RetiredAcceptedOffers,
     ParkedNames,
     ReclaimPending,
     PaymentAuthorities,
     RecoveryAuthorities,
+    SubAccountsIndexed,
+    ListingsIndexed,
+    AcceptedOffersIndexed,
+    SubAccountsByOwner,
+    SubAccountsByOwnerInner { owner: AccountId },
+    SubAccountsByTla,
+    SubAccountsByTlaInner { tla: AccountId },
+    RecentActivity,
 }
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct TlaRegistry {
     pub(crate) tlas: IterableMap<AccountId, TlaEntry>,
-    pub(crate) sub_accounts: LookupMap<String, SubAccountEntry>,
+    pub(crate) sub_accounts: IterableMap<String, SubAccountEntry>,
+    pub(crate) sub_accounts_by_owner: LookupMap<AccountId, IterableSet<String>>,
+    pub(crate) sub_accounts_by_tla: LookupMap<AccountId, IterableSet<String>>,
+    pub(crate) recent_activity: Vector<ActivityRecord>,
+    pub(crate) activity_cursor: u32,
     pub(crate) admins: IterableSet<AccountId>,
     pub(crate) fee_config: FeeConfig,
     pub(crate) total_revenue: u128,
@@ -66,8 +83,8 @@ pub struct TlaRegistry {
     pub(crate) ft_allowlist: IterableSet<AccountId>,
     pub(crate) business_sub_count: LookupMap<AccountId, u32>,
     pub(crate) business_sub_cap_override: LookupMap<AccountId, u32>,
-    pub(crate) listings: LookupMap<String, Listing>,
-    pub(crate) accepted_offers: LookupMap<String, AcceptedOffer>,
+    pub(crate) listings: IterableMap<String, Listing>,
+    pub(crate) accepted_offers: IterableMap<String, AcceptedOffer>,
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) reclaim_pending: LookupMap<String, bool>,
     pub(crate) payment_authorities: IterableSet<AccountId>,
@@ -84,11 +101,53 @@ pub struct TlaRegistry {
 }
 
 #[near(serializers = [borsh])]
+pub struct LegacyFeeConfig {
+    tla_allocation_fee_usd_micro: U128,
+    rent_tier_5_usd_micro: U128,
+    rent_tier_8_usd_micro: U128,
+    rent_tier_10_usd_micro: U128,
+    rent_tier_12plus_usd_micro: U128,
+    sub_fee_per_account_usd_micro: U128,
+    account_creation_deposit_yocto: U128,
+    business_max_subs: u32,
+    retraction_notice_ns: U64,
+    resale_commission_bps: u16,
+    max_rate_move_bps: u16,
+    quote_slippage_bps: u16,
+    min_near_usd_rate_micro: U128,
+    max_near_usd_rate_micro: U128,
+    rate_update_cooldown_ns: U64,
+}
+
+impl LegacyFeeConfig {
+    fn into_current(self) -> FeeConfig {
+        FeeConfig {
+            tla_allocation_fee_usd_micro: self.tla_allocation_fee_usd_micro,
+            rent_tier_5_usd_micro: self.rent_tier_5_usd_micro,
+            rent_tier_8_usd_micro: self.rent_tier_8_usd_micro,
+            rent_tier_10_usd_micro: self.rent_tier_10_usd_micro,
+            rent_tier_12plus_usd_micro: self.rent_tier_12plus_usd_micro,
+            sub_fee_per_account_usd_micro: self.sub_fee_per_account_usd_micro,
+            account_creation_deposit_yocto: self.account_creation_deposit_yocto,
+            business_max_subs: self.business_max_subs,
+            retraction_notice_ns: self.retraction_notice_ns,
+            resale_commission_bps: self.resale_commission_bps,
+            max_rate_move_bps: self.max_rate_move_bps,
+            quote_slippage_bps: self.quote_slippage_bps,
+            min_near_usd_rate_micro: self.min_near_usd_rate_micro,
+            max_near_usd_rate_micro: self.max_near_usd_rate_micro,
+            rate_update_cooldown_ns: self.rate_update_cooldown_ns,
+            max_rate_age_ns: fees::default_fee_config().max_rate_age_ns,
+        }
+    }
+}
+
+#[near(serializers = [borsh])]
 pub struct LegacyTlaRegistry {
     tlas: IterableMap<AccountId, TlaEntry>,
     sub_accounts: LookupMap<String, SubAccountEntry>,
     admins: IterableSet<AccountId>,
-    fee_config: FeeConfig,
+    fee_config: LegacyFeeConfig,
     total_revenue: u128,
     sub_account_count: u64,
     paused: bool,
@@ -103,7 +162,6 @@ pub struct LegacyTlaRegistry {
     parked_names: LookupMap<String, ParkedEntry>,
     reclaim_pending: LookupMap<String, bool>,
     payment_authorities: IterableSet<AccountId>,
-    recovery_authorities: IterableSet<AccountId>,
     hos_extension: AccountId,
     grace_period_ns: u64,
     price_oracle: AccountId,
@@ -136,7 +194,11 @@ impl TlaRegistry {
 
         Self {
             tlas: IterableMap::new(StorageKey::Tlas),
-            sub_accounts: LookupMap::new(StorageKey::SubAccounts),
+            sub_accounts: IterableMap::new(StorageKey::SubAccountsIndexed),
+            sub_accounts_by_owner: LookupMap::new(StorageKey::SubAccountsByOwner),
+            sub_accounts_by_tla: LookupMap::new(StorageKey::SubAccountsByTla),
+            recent_activity: Vector::new(StorageKey::RecentActivity),
+            activity_cursor: 0,
             admins,
             fee_config: fees::default_fee_config(),
             total_revenue: 0,
@@ -148,8 +210,8 @@ impl TlaRegistry {
             ft_allowlist: IterableSet::new(StorageKey::FtAllowlist),
             business_sub_count: LookupMap::new(StorageKey::BusinessSubCount),
             business_sub_cap_override: LookupMap::new(StorageKey::BusinessSubCapOverride),
-            listings: LookupMap::new(StorageKey::Listings),
-            accepted_offers: LookupMap::new(StorageKey::AcceptedOffers),
+            listings: IterableMap::new(StorageKey::ListingsIndexed),
+            accepted_offers: IterableMap::new(StorageKey::AcceptedOffersIndexed),
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             reclaim_pending: LookupMap::new(StorageKey::ReclaimPending),
             payment_authorities: IterableSet::new(StorageKey::PaymentAuthorities),
@@ -171,11 +233,19 @@ impl TlaRegistry {
     pub fn migrate(treasury: AccountId, council: AccountId) -> Self {
         let old: LegacyTlaRegistry =
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        require!(
+            old.sub_account_count == 0,
+            "cannot migrate a registry that already holds sub accounts"
+        );
         Self {
             tlas: old.tlas,
-            sub_accounts: old.sub_accounts,
+            sub_accounts: IterableMap::new(StorageKey::SubAccountsIndexed),
+            sub_accounts_by_owner: LookupMap::new(StorageKey::SubAccountsByOwner),
+            sub_accounts_by_tla: LookupMap::new(StorageKey::SubAccountsByTla),
+            recent_activity: Vector::new(StorageKey::RecentActivity),
+            activity_cursor: 0,
             admins: old.admins,
-            fee_config: old.fee_config,
+            fee_config: old.fee_config.into_current(),
             total_revenue: old.total_revenue,
             sub_account_count: old.sub_account_count,
             paused: old.paused,
@@ -185,12 +255,12 @@ impl TlaRegistry {
             ft_allowlist: old.ft_allowlist,
             business_sub_count: old.business_sub_count,
             business_sub_cap_override: old.business_sub_cap_override,
-            listings: old.listings,
-            accepted_offers: old.accepted_offers,
+            listings: IterableMap::new(StorageKey::ListingsIndexed),
+            accepted_offers: IterableMap::new(StorageKey::AcceptedOffersIndexed),
             parked_names: old.parked_names,
             reclaim_pending: old.reclaim_pending,
             payment_authorities: old.payment_authorities,
-            recovery_authorities: old.recovery_authorities,
+            recovery_authorities: IterableSet::new(StorageKey::RecoveryAuthorities),
             hos_extension: old.hos_extension,
             grace_period_ns: old.grace_period_ns,
             price_oracle: old.price_oracle,

@@ -68,6 +68,7 @@ async fn tracer_mint_owner_path_rotate_patch() -> Result<()> {
         "nobody may bolt a key onto a leased account"
     );
 
+    arm_transfer(&fleet, &alice).await?;
     let outcome = fleet
         .extension
         .call(&alice, "hos_transfer_ownership")

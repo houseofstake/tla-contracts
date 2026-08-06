@@ -35,14 +35,13 @@ impl TlaRegistry {
                     settlement.rent_yocto,
                     settlement.attached_yocto,
                 );
-                Event::SubAccountRented {
+                self.emit_activity(Event::SubAccountRented {
                     full_name: key,
                     tla_id: settlement.tla_id,
                     owner: settlement.owner,
                     rent_yocto: settlement.rent_yocto,
                     expires_at: U64(expires_at),
-                }
-                .emit();
+                });
             }
             Ok(MintOutcome::CreationFailed) | Err(_) => {
                 self.settle_failed_mint(
@@ -67,14 +66,13 @@ impl TlaRegistry {
             Ok(MintOutcome::Active) => {
                 let expires_at =
                     self.record_paid_rental(&key, &settlement.payer, settlement.attached_yocto);
-                Event::SubAccountRented {
+                self.emit_activity(Event::SubAccountRented {
                     full_name: key,
                     tla_id: settlement.tla_id,
                     owner: settlement.owner,
                     rent_yocto: settlement.rent_yocto,
                     expires_at: U64(expires_at),
-                }
-                .emit();
+                });
             }
             Ok(MintOutcome::CreationFailed) | Err(_) => {
                 self.settle_failed_mint(
@@ -109,17 +107,16 @@ impl TlaRegistry {
             settlement.attached_yocto.0,
             settlement.rent_yocto.0,
         );
-        let Some(sub) = self.sub_accounts.get(&key) else {
+        let Some(expires_at) = self.sub_accounts.get(&key).map(|s| s.expires_at) else {
             return;
         };
-        Event::SubAccountReRented {
+        self.emit_activity(Event::SubAccountReRented {
             full_name: key,
             tla_id: settlement.tla_id,
             owner: settlement.owner,
             rent_yocto: settlement.rent_yocto,
-            expires_at: U64(sub.expires_at),
-        }
-        .emit();
+            expires_at: U64(expires_at),
+        });
     }
 }
 
@@ -164,7 +161,7 @@ impl TlaRegistry {
         attached: U128,
         reason: &str,
     ) {
-        self.sub_accounts.remove(key);
+        self.sub_account_remove(key);
         self.business_count_decrement_if_business(tla_id);
         self.add_pending_refund(payer, attached.0);
         Event::RefundPending {

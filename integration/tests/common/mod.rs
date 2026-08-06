@@ -153,6 +153,22 @@ pub async fn deploy_fleet() -> Result<Fleet> {
 }
 
 /// Mints a leased account owned by `fleet.bob`.
+pub async fn arm_transfer(fleet: &Fleet, tenant: &AccountId) -> Result<()> {
+    let out = fleet
+        .bob
+        .call(tenant, "hos_arm_transfer")
+        .args_json(json!({ "armed": true }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = out.receipt_failures().first() {
+        anyhow::bail!("arm receipt failed: {failure:?}");
+    }
+    Ok(())
+}
+
 pub async fn mint(fleet: &Fleet, name: &str, balance: NearToken) -> Result<AccountId> {
     let owner = fleet.bob.id().clone();
     mint_owned_by(fleet, name, &owner, balance, lease_until_ns()).await

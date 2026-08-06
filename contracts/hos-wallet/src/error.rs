@@ -1,6 +1,8 @@
 pub const ONLY_PARENT: &str = "init caller must be the direct parent account";
 pub const ONLY_AUTHORITY: &str = "only the lease authority may perform this operation";
 pub const ONLY_RENTER: &str = "only the renter may perform this operation";
+pub const ONLY_OWNER: &str = "only the owner may perform this operation";
+pub const NO_STATE: &str = "no state to migrate";
 pub const UNAUTHORIZED: &str = "unauthorized";
 pub const AUTHORITY_PROTECTED: &str = "the lease authority extension cannot be removed";
 pub const AUTHORITY_IS_SELF: &str = "authority must not be this account";

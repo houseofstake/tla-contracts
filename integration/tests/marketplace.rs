@@ -25,6 +25,8 @@ async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
             "admin": fleet.council.id(),
             "registry": fleet.registry.id(),
             "recovery": fleet.recovery.id(),
+            "treasury": fleet.council.id(),
+            "council": fleet.council.id(),
         }))
         .max_gas()
         .transact()
@@ -61,6 +63,8 @@ async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
             "admin": fleet.council.id(),
             "hos_extension": fleet.extension.id(),
             "grace_period_ns": U64(GRACE_NS),
+            "treasury": fleet.council.id(),
+            "council": fleet.council.id(),
         }))
         .max_gas()
         .transact()
@@ -240,6 +244,7 @@ async fn tla_registry_list_and_buy_rotates_wallet_owner() -> Result<()> {
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
 
     let price = NearToken::from_near(1).as_yoctonear();
     let listed = fleet
@@ -313,6 +318,7 @@ async fn tla_registry_transfer_rotates_wallet_owner_without_a_sale() -> Result<(
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
 
     let moved = fleet
         .bob
@@ -400,5 +406,146 @@ async fn tla_registry_transfer_rejects_a_stale_owner_key() -> Result<()> {
         fleet.bob.id().as_str(),
         "a refused transfer must leave the owner extension untouched"
     );
+    Ok(())
+}
+
+async fn detail_names(
+    registry: &Contract,
+    method: &str,
+    args: serde_json::Value,
+) -> Result<Vec<String>> {
+    let page: Vec<serde_json::Value> = registry.view(method).args_json(args).await?.json()?;
+    Ok(page
+        .into_iter()
+        .map(|d| {
+            d["sub_account"]["full_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect())
+}
+
+#[tokio::test]
+async fn tla_registry_paged_views_serve_the_catalogue_without_an_indexer() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+
+    rent(&fleet, &registry, &tla, "alice").await?;
+    rent(&fleet, &registry, &tla, "carol").await?;
+    let owner = fleet.bob.id().clone();
+
+    let browse = detail_names(
+        &registry,
+        "list_sub_accounts",
+        json!({ "from_index": 0, "limit": 10 }),
+    )
+    .await?;
+    assert_eq!(browse.len(), 2, "browse page must carry both rented names");
+    assert!(browse.contains(&format!("alice.{tla}")));
+    assert!(browse.contains(&format!("carol.{tla}")));
+
+    let owned = detail_names(
+        &registry,
+        "list_sub_accounts_by_owner",
+        json!({ "owner": owner, "from_index": 0, "limit": 10 }),
+    )
+    .await?;
+    assert_eq!(owned.len(), 2, "the owner index must hold both names");
+
+    let by_tla = detail_names(
+        &registry,
+        "list_sub_accounts_by_tla",
+        json!({ "tla_id": tla, "from_index": 0, "limit": 10 }),
+    )
+    .await?;
+    assert_eq!(by_tla.len(), 2, "the namespace index must hold both names");
+
+    let stranger = detail_names(
+        &registry,
+        "list_sub_accounts_by_owner",
+        json!({ "owner": fleet.council.id(), "from_index": 0, "limit": 10 }),
+    )
+    .await?;
+    assert!(
+        stranger.is_empty(),
+        "an owner with no names must page empty"
+    );
+
+    let paged = detail_names(
+        &registry,
+        "list_sub_accounts_by_owner",
+        json!({ "owner": owner, "from_index": 1, "limit": 10 }),
+    )
+    .await?;
+    assert_eq!(paged.len(), 1, "owner paging must respect from_index");
+
+    fleet
+        .bob
+        .call(registry.id(), "list_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": "alice", "price": U128(900) }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let listings: Vec<serde_json::Value> = registry
+        .view("list_listings")
+        .args_json(json!({ "from_index": 0, "limit": 10 }))
+        .await?
+        .json()?;
+    assert_eq!(listings.len(), 1, "the listing must be enumerable");
+    assert_eq!(listings[0]["full_name"], format!("alice.{tla}"));
+
+    let page: Vec<serde_json::Value> = registry
+        .view("list_sub_accounts_by_owner")
+        .args_json(json!({ "owner": owner, "from_index": 0, "limit": 10 }))
+        .await?
+        .json()?;
+    let listed = page
+        .iter()
+        .find(|d| d["sub_account"]["full_name"] == format!("alice.{tla}"))
+        .expect("the listed name is still in the owner page");
+    assert_eq!(
+        listed["listing"]["price_yocto"], "900",
+        "the page must carry the listing so no second view call is needed"
+    );
+
+    let scoped: Vec<serde_json::Value> = registry
+        .view("list_recent_activity")
+        .args_json(json!({
+            "from_index": 0,
+            "limit": 10,
+            "account": format!("carol.{tla}"),
+        }))
+        .await?
+        .json()?;
+    assert_eq!(
+        scoped.len(),
+        1,
+        "the registry scopes the feed, so the server never scans the ring"
+    );
+    assert_eq!(scoped[0]["account"], format!("carol.{tla}"));
+
+    let feed: Vec<serde_json::Value> = registry
+        .view("list_recent_activity")
+        .args_json(json!({ "from_index": 0, "limit": 10, "account": null }))
+        .await?
+        .json()?;
+    assert_eq!(
+        feed[0]["event"], "sub_account_listed",
+        "the feed is newest first"
+    );
+    assert_eq!(feed[0]["account"], format!("alice.{tla}"));
+    assert_eq!(
+        feed.iter()
+            .filter(|e| e["event"] == "sub_account_rented")
+            .count(),
+        2,
+        "both rents must be recorded on chain"
+    );
+
     Ok(())
 }

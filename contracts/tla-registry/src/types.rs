@@ -69,6 +69,24 @@ pub struct SubAccountEntry {
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
+pub struct ActivityRecord {
+    pub event: String,
+    pub account: String,
+    pub block_height: u64,
+    pub block_timestamp: u64,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct ActivityView {
+    pub event: String,
+    pub account: String,
+    pub block_height: U64,
+    pub block_timestamp: U64,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct Listing {
     pub price: u128,
     pub settling: bool,
@@ -164,6 +182,15 @@ pub struct AcceptedOfferView {
     pub buyer: AccountId,
     pub price_yocto: U128,
     pub settling: bool,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct SubAccountDetailView {
+    pub sub_account: SubAccountView,
+    pub listing: Option<ListingView>,
+    pub accepted_offer: Option<AcceptedOfferView>,
+    pub retraction_at: Option<U64>,
 }
 
 #[derive(Serialize)]

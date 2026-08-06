@@ -157,7 +157,7 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        let Some(_removed) = self.sub_accounts.remove(&key) else {
+        let Some(_removed) = self.sub_account_remove(&key) else {
             return;
         };
         self.listings.remove(&key);
@@ -172,12 +172,11 @@ impl TlaRegistry {
                 parked_at: now,
             },
         );
-        Event::SubAccountReclaimed {
+        self.emit_activity(Event::SubAccountReclaimed {
             full_name: key,
             tla_id,
             swept_to: destination,
-        }
-        .emit();
+        });
     }
 }
 

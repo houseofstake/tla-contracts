@@ -2075,3 +2075,398 @@ fn a_seller_can_still_unlist_while_the_marketplace_is_paused() {
     ctx(ALICE, 1, 3);
     assert!(c.unlist_sub_account(acc(TLA), "alice".to_string()).is_ok());
 }
+
+mod paged_views {
+    use super::*;
+    use crate::ACTIVITY_CAPACITY;
+
+    fn names(page: Vec<SubAccountDetailView>) -> Vec<String> {
+        page.into_iter().map(|d| d.sub_account.full_name).collect()
+    }
+
+    fn owned(c: &TlaRegistry, who: &str) -> Vec<String> {
+        names(c.list_sub_accounts_by_owner(acc(who), 0, 100))
+    }
+
+    fn list_at(c: &mut TlaRegistry, name: &str, price: u128) {
+        ctx(ALICE, 1, 2);
+        c.list_sub_account(acc(TLA), name.to_string(), U128(price))
+            .unwrap();
+    }
+
+    #[test]
+    fn sub_accounts_page_and_carry_their_name_and_tla() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        let page = names(c.list_sub_accounts(0, 10));
+        assert_eq!(page.len(), 2);
+        assert!(page.contains(&format!("alice.{TLA}")));
+        assert!(page.contains(&format!("bob.{TLA}")));
+    }
+
+    #[test]
+    fn sub_account_paging_respects_offset_and_limit() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        assert_eq!(c.list_sub_accounts(0, 1).len(), 1);
+        assert_eq!(c.list_sub_accounts(1, 10).len(), 1);
+        assert_eq!(c.list_sub_accounts(2, 10).len(), 0);
+    }
+
+    #[test]
+    fn listings_are_enumerable() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 10);
+        let page = c.list_listings(0, 10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].full_name, format!("alice.{TLA}"));
+        assert_eq!(page[0].price_yocto.0, 10);
+    }
+
+    #[test]
+    fn an_unlisted_name_leaves_the_listing_page() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 10);
+        ctx(ALICE, 1, 3);
+        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        assert_eq!(c.list_listings(0, 10).len(), 0);
+    }
+
+    #[test]
+    fn empty_registry_pages_are_empty_not_missing() {
+        let c = deploy_with_open_tla();
+        assert_eq!(c.list_sub_accounts(0, 10).len(), 0);
+        assert_eq!(c.list_listings(0, 10).len(), 0);
+        assert!(owned(&c, ALICE).is_empty());
+    }
+
+    #[test]
+    fn a_page_carries_the_market_state_so_no_second_call_is_needed() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 250);
+        let page = c.list_sub_accounts(0, 10);
+        let listing = page[0]
+            .listing
+            .as_ref()
+            .expect("listed name carries listing");
+        assert_eq!(listing.price_yocto.0, 250);
+        assert!(!listing.settling);
+        assert!(page[0].accepted_offer.is_none());
+        assert!(page[0].retraction_at.is_none());
+    }
+
+    #[test]
+    fn a_page_carries_an_accepted_offer() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        c.accept_offer(acc(TLA), "alice".to_string(), acc(BOB), U128(400))
+            .unwrap();
+        let page = c.list_sub_accounts(0, 10);
+        let offer = page[0].accepted_offer.as_ref().expect("offer is carried");
+        assert_eq!(offer.buyer, acc(BOB));
+        assert_eq!(offer.price_yocto.0, 400);
+    }
+
+    #[test]
+    fn renting_indexes_the_name_under_its_owner() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        assert_eq!(owned(&c, ALICE), vec![format!("alice.{TLA}")]);
+        assert!(owned(&c, BOB).is_empty());
+    }
+
+    #[test]
+    fn a_sponsored_rent_indexes_the_named_owner_not_the_payer() {
+        let mut c = deploy_with_open_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(ADMIN, 0, 1);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        ctx(BOB, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(acc(TLA), "alice".to_string(), acc(ALICE), acc(ALICE))
+            .unwrap();
+        c.on_sub_account_created_paid(
+            settled("alice", ALICE, BOB, rent, creation),
+            Ok(MintOutcome::Active),
+        );
+        assert_eq!(owned(&c, ALICE), vec![format!("alice.{TLA}")]);
+        assert!(owned(&c, BOB).is_empty());
+    }
+
+    #[test]
+    fn a_failed_mint_leaves_nothing_in_the_index() {
+        let mut c = deploy_with_open_tla();
+        let rent = rent_near_open(&c, "alice");
+        let deposit = c.get_fee_config().account_creation_deposit_yocto.0;
+        let total = rent + deposit;
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_created(
+            settled("alice", ALICE, ALICE, rent, total),
+            Ok(MintOutcome::CreationFailed),
+        );
+        assert!(owned(&c, ALICE).is_empty());
+    }
+
+    #[test]
+    fn reclaiming_a_name_drops_it_from_the_index() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert!(owned(&c, ALICE).is_empty());
+        assert!(c.list_sub_accounts(0, 10).is_empty());
+    }
+
+    #[test]
+    fn transferring_moves_the_name_between_owners() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        c.on_sub_account_transferred(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert!(owned(&c, ALICE).is_empty());
+        assert_eq!(owned(&c, BOB), vec![format!("alice.{TLA}")]);
+    }
+
+    #[test]
+    fn a_failed_transfer_leaves_the_index_with_the_original_owner() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        c.on_sub_account_transferred(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(false),
+        );
+        assert_eq!(owned(&c, ALICE), vec![format!("alice.{TLA}")]);
+        assert!(owned(&c, BOB).is_empty());
+    }
+
+    #[test]
+    fn recovering_moves_the_name_between_owners() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(CAROL, 0, 2);
+        c.on_sub_account_recovered(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert!(owned(&c, ALICE).is_empty());
+        assert_eq!(owned(&c, BOB), vec![format!("alice.{TLA}")]);
+    }
+
+    #[test]
+    fn a_sale_moves_the_name_to_the_buyer() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 100);
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_sold(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            U128(100),
+            U128(100),
+            Ok(true),
+        );
+        assert!(owned(&c, ALICE).is_empty());
+        assert_eq!(owned(&c, BOB), vec![format!("alice.{TLA}")]);
+    }
+
+    #[test]
+    fn a_custodial_sale_indexes_the_name_under_the_operator() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 100);
+        ctx(ADMIN, 0, 2);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        ctx(BOB, 0, 2);
+        let _ = c
+            .buy_sub_account_paid(acc(TLA), "alice".to_string(), acc(CAROL))
+            .unwrap();
+        c.on_sub_account_sold_paid(
+            acc(TLA),
+            "alice".to_string(),
+            acc(CAROL),
+            acc(BOB),
+            U128(100),
+            Ok(true),
+        );
+        assert!(owned(&c, ALICE).is_empty());
+        assert_eq!(
+            owned(&c, BOB),
+            vec![format!("alice.{TLA}")],
+            "a custodial buy leaves the operator holding the name"
+        );
+        assert!(owned(&c, CAROL).is_empty());
+    }
+
+    #[test]
+    fn owner_paging_respects_offset_and_limit() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        rent_alice_sub(&mut c, "carol");
+        assert_eq!(c.list_sub_accounts_by_owner(acc(ALICE), 0, 2).len(), 2);
+        assert_eq!(c.list_sub_accounts_by_owner(acc(ALICE), 2, 10).len(), 1);
+        assert_eq!(c.list_sub_accounts_by_owner(acc(ALICE), 3, 10).len(), 0);
+    }
+
+    #[test]
+    fn an_owner_with_no_names_pages_empty() {
+        let c = deploy_with_open_tla();
+        assert!(c.list_sub_accounts_by_owner(acc(BOB), 0, 10).is_empty());
+    }
+
+    #[test]
+    fn activity_records_newest_first() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 10);
+        let feed = c.list_recent_activity(0, 10, None);
+        assert_eq!(feed[0].event, "sub_account_listed");
+        assert_eq!(feed[0].account, format!("alice.{TLA}"));
+        assert_eq!(feed[1].event, "sub_account_rented");
+    }
+
+    #[test]
+    fn activity_paging_respects_offset_and_limit() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_at(&mut c, "alice", 10);
+        assert_eq!(c.list_recent_activity(0, 1, None).len(), 1);
+        assert_eq!(c.list_recent_activity(1, 10, None).len(), 1);
+        assert_eq!(c.list_recent_activity(2, 10, None).len(), 0);
+    }
+
+    #[test]
+    fn an_untouched_registry_has_an_empty_feed() {
+        let c = deploy_with_open_tla();
+        assert!(c.list_recent_activity(0, 10, None).is_empty());
+    }
+
+    #[test]
+    fn a_scoped_feed_returns_a_full_page_for_that_account() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        list_at(&mut c, "alice", 10);
+        let alice = format!("alice.{TLA}");
+        let scoped = c.list_recent_activity(0, 10, Some(alice.clone()));
+        assert_eq!(scoped.len(), 2, "both of alice's events, none of bob's");
+        assert!(scoped.iter().all(|e| e.account == alice));
+        assert_eq!(
+            c.list_recent_activity(0, 1, Some(alice)).len(),
+            1,
+            "the limit applies after filtering, so a page is never short"
+        );
+    }
+
+    #[test]
+    fn a_scoped_feed_for_an_unknown_account_is_empty() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        assert!(c
+            .list_recent_activity(0, 10, Some("nobody.near".to_string()))
+            .is_empty());
+    }
+
+    #[test]
+    fn the_feed_wraps_and_keeps_the_newest_entries() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        for i in 0..ACTIVITY_CAPACITY + 5 {
+            ctx(ALICE, 1, 2);
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(u128::from(i) + 1))
+                .unwrap();
+            ctx(ALICE, 1, 3);
+            c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        }
+        let feed = c.list_recent_activity(0, ACTIVITY_CAPACITY as u64 + 50, None);
+        assert_eq!(
+            feed.len(),
+            ACTIVITY_CAPACITY as usize,
+            "the buffer stays bounded"
+        );
+        assert_eq!(
+            feed[0].event, "sub_account_unlisted",
+            "the newest entry survives the wrap"
+        );
+        assert!(
+            !feed.iter().any(|e| e.event == "sub_account_rented"),
+            "the oldest entry is overwritten once the buffer wraps"
+        );
+    }
+
+    #[test]
+    fn names_are_indexed_under_their_namespace() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        let page = names(c.list_sub_accounts_by_tla(acc(TLA), 0, 10));
+        assert_eq!(page.len(), 2);
+        assert!(page.contains(&format!("alice.{TLA}")));
+    }
+
+    #[test]
+    fn a_transfer_leaves_the_namespace_index_alone() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        c.on_sub_account_transferred(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert_eq!(
+            names(c.list_sub_accounts_by_tla(acc(TLA), 0, 10)),
+            vec![format!("alice.{TLA}")],
+            "a name never leaves its namespace, only its owner changes"
+        );
+    }
+
+    #[test]
+    fn reclaiming_drops_the_name_from_the_namespace_index() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert!(c.list_sub_accounts_by_tla(acc(TLA), 0, 10).is_empty());
+    }
+
+    #[test]
+    fn namespace_paging_respects_offset_and_limit() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        assert_eq!(c.list_sub_accounts_by_tla(acc(TLA), 0, 1).len(), 1);
+        assert_eq!(c.list_sub_accounts_by_tla(acc(TLA), 2, 10).len(), 0);
+    }
+}

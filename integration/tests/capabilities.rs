@@ -526,8 +526,10 @@ async fn a_relay_drives_a_users_lease_through_the_provider_account_it_owns() -> 
     )
     .await?;
 
-    let provider_extensions: Vec<String> = fleet.worker.view(&provider, "w_extensions").await?.json()?;
-    let leased_extensions: Vec<String> = fleet.worker.view(&leased, "w_extensions").await?.json()?;
+    let provider_extensions: Vec<String> =
+        fleet.worker.view(&provider, "w_extensions").await?.json()?;
+    let leased_extensions: Vec<String> =
+        fleet.worker.view(&leased, "w_extensions").await?.json()?;
     assert!(
         provider_extensions.iter().any(|e| e == relay_id.as_str()),
         "the relay must own the provider wallet, got {provider_extensions:?}"
@@ -561,7 +563,7 @@ async fn a_relay_drives_a_users_lease_through_the_provider_account_it_owns() -> 
         outcome.is_success(),
         "the custodial two-hop failed: {outcome:#?}"
     );
-    for failure in outcome.receipt_failures() {
+    if let Some(failure) = outcome.receipt_failures().first() {
         panic!("a receipt in the two-hop chain failed: {failure:?}");
     }
 
