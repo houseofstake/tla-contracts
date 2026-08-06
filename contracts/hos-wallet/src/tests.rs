@@ -10,6 +10,7 @@ const PAYOUT: &str = "payout.testnet";
 const OWNER: &str = "renter.testnet";
 const BUYER: &str = "buyer.testnet";
 const YEAR_NS: u64 = 31_536_000_000_000_000;
+const HOUR_NS: u64 = 3_600_000_000_000;
 
 fn acc(s: &str) -> AccountId {
     s.parse().unwrap()
@@ -181,14 +182,122 @@ fn the_authority_cannot_add_an_extension_while_the_lease_runs() {
     c.w_execute_extension(request([add_co_owner(BUYER)]));
 }
 
+fn install_and_grant(c: &mut TenantWallet, cap: NearToken, receivers: &[&str]) {
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(OWNER, 1, now_ns());
+    c.hos_grant_spend(
+        acc(BUYER),
+        receivers.iter().map(|r| acc(r)).collect(),
+        U128(cap.as_yoctonear()),
+        U64(now_ns() + HOUR_NS),
+    );
+}
+
 #[test]
-fn an_installed_extension_may_spend() {
+#[should_panic(expected = "no spend grant")]
+fn an_installed_extension_cannot_spend_without_a_grant() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner(BUYER)]));
     ctx(BUYER, 1, now_ns());
     c.w_execute_extension(
         Request::new().external([send("carol.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+fn a_granted_extension_may_spend_within_its_scope() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "receiver is not in the spend grant")]
+fn a_granted_extension_cannot_pay_an_ungranted_receiver() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("attacker.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "exceeds the granted cap")]
+fn a_granted_extension_cannot_exceed_the_cap() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(1), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(2))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "spend grant expired")]
+fn a_grant_stops_working_once_it_expires() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns() + 2 * HOUR_NS);
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "no spend grant")]
+fn the_owner_can_revoke_a_grant() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(OWNER, 1, now_ns());
+    c.hos_revoke_spend(acc(BUYER));
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(1))]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "only the owner")]
+fn an_extension_cannot_grant_itself_spend() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(1), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.hos_grant_spend(
+        acc(BUYER),
+        vec![acc("attacker.testnet")],
+        U128(NearToken::from_near(5).as_yoctonear()),
+        U64(now_ns() + YEAR_NS),
+    );
+}
+
+#[test]
+fn evicting_an_extension_drops_its_grant() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    assert!(c.hos_spend_grant(acc(BUYER)).is_some());
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([WalletOp::RemoveExtension {
+        account_id: acc(BUYER),
+    }]));
+    assert!(c.hos_spend_grant(acc(BUYER)).is_none());
+}
+
+#[test]
+fn a_sale_clears_every_grant_the_previous_owner_made() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc("newowner.testnet")));
+    assert!(
+        c.hos_spend_grant(acc(BUYER)).is_none(),
+        "a buyer must not inherit the seller's spend grants"
     );
 }
 
@@ -679,6 +788,7 @@ fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
     LegacyTenantWallet {
         wallet: c.wallet,
         authority: acc(AUTHORITY),
+        owner: acc(OWNER),
         payout_account: acc(PAYOUT),
         lease_until_ns: c.lease_until_ns,
         state: OperatingState::Active,

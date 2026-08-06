@@ -2,7 +2,7 @@ mod error;
 mod events;
 mod state;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use defuse_wallet::contract::Wallet;
@@ -93,10 +93,19 @@ pub struct LeaseView {
     pub impl_version: u32,
 }
 
+#[near(serializers = [borsh, json])]
+#[derive(Clone)]
+pub struct SpendGrant {
+    pub receivers: BTreeSet<AccountId>,
+    pub max_yocto: U128,
+    pub expires_at: U64,
+}
+
 #[near(serializers = [borsh])]
 pub struct LegacyTenantWallet {
     wallet: State<NoPublicKey>,
     authority: AccountId,
+    owner: AccountId,
     payout_account: AccountId,
     lease_until_ns: u64,
     state: OperatingState,
@@ -124,6 +133,7 @@ pub struct TenantWallet {
     frozen: FreezeState,
     authority_freeze_until_ns: u64,
     transfer_armed: bool,
+    spend_grants: BTreeMap<AccountId, SpendGrant>,
 }
 
 #[near]
@@ -226,6 +236,7 @@ impl TenantWallet {
             frozen: FreezeState::Unfrozen,
             authority_freeze_until_ns: 0,
             transfer_armed: false,
+            spend_grants: BTreeMap::new(),
         }
     }
 
@@ -250,7 +261,48 @@ impl TenantWallet {
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
             transfer_armed: false,
+            spend_grants: BTreeMap::new(),
         }
+    }
+
+    #[payable]
+    pub fn hos_grant_spend(
+        &mut self,
+        extension: AccountId,
+        receivers: Vec<AccountId>,
+        max_yocto: U128,
+        expires_at: U64,
+    ) {
+        self.assert_owner_caller();
+        self.assert_renter_active();
+        require!(extension != self.owner, error::UNAUTHORIZED);
+        require!(extension != self.authority, error::UNAUTHORIZED);
+        require!(
+            self.wallet.extensions.contains(&extension),
+            error::UNAUTHORIZED
+        );
+        require!(!receivers.is_empty(), error::EMPTY_GRANT);
+        require!(expires_at.0 > env::block_timestamp(), error::GRANT_IN_PAST);
+        self.spend_grants.insert(
+            extension.clone(),
+            SpendGrant {
+                receivers: receivers.into_iter().collect(),
+                max_yocto,
+                expires_at,
+            },
+        );
+        Event::SpendGranted { extension }.emit();
+    }
+
+    #[payable]
+    pub fn hos_revoke_spend(&mut self, extension: AccountId) {
+        self.assert_owner_caller();
+        self.spend_grants.remove(&extension);
+        Event::SpendRevoked { extension }.emit();
+    }
+
+    pub fn hos_spend_grant(&self, extension: AccountId) -> Option<SpendGrant> {
+        self.spend_grants.get(&extension).cloned()
     }
 
     #[payable]
@@ -345,6 +397,7 @@ impl TenantWallet {
             require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
         }
         self.transfer_armed = false;
+        self.spend_grants.clear();
         if let Some(next) = to.as_ref() {
             require!(*next != env::current_account_id(), error::SELF_TARGET);
             require!(*next != self.authority, error::UNAUTHORIZED);
@@ -456,6 +509,7 @@ impl TenantWallet {
         if !request.external.is_empty() {
             self.assert_renter(actor);
             self.assert_renter_active();
+            self.assert_spend_allowed(actor, &request.external);
             self.assert_within_reserve(&request.external);
             for promise in request.external {
                 if promise.receiver_id == env::current_account_id() {
@@ -495,6 +549,7 @@ impl TenantWallet {
         if !self.wallet.extensions.remove(&account_id) {
             ContractError::ExtensionNotEnabled(account_id).panic();
         }
+        self.spend_grants.remove(&account_id);
         self.check_lockout();
         WalletEvent::ExtensionRemoved {
             account_id: account_id.into(),
@@ -581,6 +636,35 @@ impl TenantWallet {
         }
         self.assert_owner(actor);
         self.assert_renter_active();
+    }
+
+    fn assert_spend_allowed(&self, actor: &Actor<'_>, external: &[NearPromise]) {
+        let Actor::Extension(id) = actor else {
+            env::panic_str(error::NO_SPEND_GRANT);
+        };
+        if id.as_ref() == self.owner.as_str() {
+            return;
+        }
+        let grant = self
+            .spend_grants
+            .iter()
+            .find(|(held, _)| held.as_str() == id.as_ref().as_str())
+            .map(|(_, grant)| grant)
+            .unwrap_or_else(|| env::panic_str(error::NO_SPEND_GRANT));
+        require!(
+            env::block_timestamp() < grant.expires_at.0,
+            error::GRANT_EXPIRED
+        );
+        for promise in external {
+            require!(
+                grant.receivers.contains(&promise.receiver_id),
+                error::RECEIVER_NOT_GRANTED
+            );
+            require!(
+                promise.total_deposit().as_yoctonear() <= grant.max_yocto.0,
+                error::GRANT_CAP_EXCEEDED
+            );
+        }
     }
 
     fn assert_owner(&self, actor: &Actor<'_>) {

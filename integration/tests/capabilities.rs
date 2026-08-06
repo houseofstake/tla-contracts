@@ -454,6 +454,37 @@ async fn a_co_owner_can_be_granted_and_can_act() -> Result<()> {
         .json()?;
     assert!(enabled, "the co-owner was not enabled");
 
+    let ungranted = carol
+        .call(&t.id, "w_execute_extension")
+        .args_json(json!({ "request": Request::new().external([send(t.fleet.bob.id(), SdkToken::from_yoctonear(1))]) }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(60))
+        .transact()
+        .await?;
+    assert!(
+        ungranted.is_failure(),
+        "an extension must not spend before the owner grants a scope: {ungranted:#?}"
+    );
+
+    let scoped = t
+        .fleet
+        .bob
+        .call(&t.id, "hos_grant_spend")
+        .args_json(json!({
+            "extension": carol.id(),
+            "receivers": [t.fleet.bob.id()],
+            "max_yocto": "1000000000000000000000",
+            "expires_at": lease_until_ns().to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(40))
+        .transact()
+        .await?;
+    assert!(
+        scoped.is_success(),
+        "granting a spend scope failed: {scoped:#?}"
+    );
+
     let acted = carol
         .call(&t.id, "w_execute_extension")
         .args_json(json!({ "request": Request::new().external([send(t.fleet.bob.id(), SdkToken::from_yoctonear(1))]) }))

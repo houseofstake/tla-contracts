@@ -15,6 +15,10 @@ pub enum Event {
     #[event_version("1.0.0")]
     PayoutAccountSet { payout_account: AccountId },
     #[event_version("1.0.0")]
+    SpendGranted { extension: AccountId },
+    #[event_version("1.0.0")]
+    SpendRevoked { extension: AccountId },
+    #[event_version("1.0.0")]
     SweptNear {
         payout_account: AccountId,
         amount: U128,
