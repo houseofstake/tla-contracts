@@ -13,7 +13,7 @@ const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
 
-const SWEEP_ATTACHED_REQUIRED: NearToken =
+pub(crate) const SWEEP_ATTACHED_REQUIRED: NearToken =
     NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO + 1);
 
 #[near]
@@ -26,11 +26,10 @@ impl TlaRegistry {
         name: String,
     ) -> Result<Promise, ContractError> {
         crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
-        let (sub_account, _destination) = self.resolve_reclaimable(&tla_id, &key)?;
+        let (sub_account, _destination) = self.resolve_sweepable(&tla_id, &key)?;
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
             .sweep_near(sub_account))
@@ -44,17 +43,16 @@ impl TlaRegistry {
         name: String,
         ft: AccountId,
     ) -> Result<Promise, ContractError> {
-        self.assert_not_paused()?;
         validate_name(&name)?;
         if env::attached_deposit() < SWEEP_ATTACHED_REQUIRED {
             return Err(ContractError::InsufficientPayment);
         }
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
-        if !self.ft_allowlist.contains(&ft) {
+        if !self.sweepable_tokens.contains(&ft) {
             return Err(ContractError::TokenNotInAllowlist);
         }
-        let (sub_account, _destination) = self.resolve_reclaimable(&tla_id, &key)?;
+        let (sub_account, _destination) = self.resolve_sweepable(&tla_id, &key)?;
         let caller = env::predecessor_account_id();
         self.refund_excess(
             &caller,
@@ -203,10 +201,31 @@ impl TlaRegistry {
                 sub,
                 tla,
                 self.fee_config.retraction_notice_ns.0,
-                self.grace_period_ns,
+                &self.clock(),
             ),
             LifecycleStatus::Reclaimable
         ) {
+            return Err(ContractError::SubAccountNotReclaimable);
+        }
+        Ok((sub_account, sub.payout_account.clone()))
+    }
+
+    fn resolve_sweepable(
+        &self,
+        tla_id: &AccountId,
+        key: &str,
+    ) -> Result<(AccountId, AccountId), ContractError> {
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        let sub = self
+            .sub_accounts
+            .get(key)
+            .ok_or(ContractError::SubAccountNotFound)?;
+        if sub.tla_id != *tla_id {
+            return Err(ContractError::SubAccountTlaMismatch);
+        }
+        if !sub.sweepable() {
             return Err(ContractError::SubAccountNotReclaimable);
         }
         Ok((sub_account, sub.payout_account.clone()))

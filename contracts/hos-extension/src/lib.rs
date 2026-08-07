@@ -13,6 +13,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
+const MAX_PAUSE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_ROTATE: Gas = Gas::from_tgas(30);
@@ -77,6 +78,7 @@ pub struct HosExtension {
     pub(crate) approved_code_hash: Option<[u8; 32]>,
     pub(crate) approved_at: Option<u64>,
     pub(crate) council: AccountId,
+    pub(crate) paused_until_ns: u64,
 }
 
 #[near(serializers = [borsh])]
@@ -86,6 +88,10 @@ pub struct LegacyHosExtension {
     recovery: AccountId,
     paused: bool,
     version: u8,
+    treasury: AccountId,
+    approved_code_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
+    council: AccountId,
 }
 
 #[near]
@@ -110,12 +116,13 @@ impl HosExtension {
             approved_code_hash: None,
             approved_at: None,
             council,
+            paused_until_ns: 0,
         }
     }
 
     #[private]
     #[init(ignore_state)]
-    pub fn migrate(treasury: AccountId, council: AccountId) -> Self {
+    pub fn migrate() -> Self {
         let old: LegacyHosExtension =
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
         Self {
@@ -124,10 +131,15 @@ impl HosExtension {
             recovery: old.recovery,
             paused: old.paused,
             version: CONTRACT_VERSION,
-            treasury,
-            approved_code_hash: None,
-            approved_at: None,
-            council,
+            treasury: old.treasury,
+            approved_code_hash: old.approved_code_hash,
+            approved_at: old.approved_at,
+            council: old.council,
+            paused_until_ns: if old.paused {
+                env::block_timestamp().saturating_add(MAX_PAUSE_NS)
+            } else {
+                0
+            },
         }
     }
 
@@ -139,6 +151,7 @@ impl HosExtension {
     pub fn pause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         self.paused = true;
+        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_PAUSE_NS);
         Event::ContractPaused {
             by: env::predecessor_account_id(),
         }
@@ -150,6 +163,7 @@ impl HosExtension {
     pub fn unpause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         self.paused = false;
+        self.paused_until_ns = 0;
         Event::ContractUnpaused {
             by: env::predecessor_account_id(),
         }
@@ -341,7 +355,6 @@ impl HosExtension {
     #[handle_result]
     pub fn sweep_near(&mut self, wallet: AccountId) -> Result<Promise, ContractError> {
         self.assert_registry()?;
-        self.assert_not_paused()?;
         Event::NearSweepRequested {
             wallet: wallet.clone(),
             by: env::predecessor_account_id(),
@@ -357,7 +370,6 @@ impl HosExtension {
     #[handle_result]
     pub fn sweep_ft(&mut self, wallet: AccountId, ft: AccountId) -> Result<Promise, ContractError> {
         self.assert_registry()?;
-        self.assert_not_paused()?;
         if env::attached_deposit() != MIN_SWEEP_ATTACHED {
             return Err(ContractError::InsufficientDeposit);
         }
@@ -503,7 +515,7 @@ impl HosExtension {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.paused
+        self.effective_paused()
     }
 
     pub fn get_admins(&self) -> Vec<AccountId> {
@@ -553,10 +565,14 @@ impl HosExtension {
     }
 
     fn assert_not_paused(&self) -> Result<(), ContractError> {
-        if self.paused {
+        if self.effective_paused() {
             return Err(ContractError::Paused);
         }
         Ok(())
+    }
+
+    fn effective_paused(&self) -> bool {
+        self.paused && env::block_timestamp() < self.paused_until_ns
     }
 
     fn abort_and_refund(&self, event: Event) -> PromiseOrValue<bool> {

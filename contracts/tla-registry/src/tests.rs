@@ -2063,6 +2063,169 @@ mod marketplace_pause {
     }
 }
 
+mod a_pause_never_costs_a_user_their_name {
+    use super::*;
+
+    const WEEK_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+
+    fn refresh_rate(c: &mut TlaRegistry, at: u64) {
+        ctx(ADMIN, 0, at);
+        c.set_near_usd_rate(U128(NEAR_USD_MICRO)).unwrap();
+    }
+
+    fn expired_and_paused(name: &str) -> (TlaRegistry, u64) {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, name);
+        let expires = c
+            .get_sub_account(acc(TLA), name.to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(ADMIN, 0, expires + GRACE_NS);
+        c.pause().unwrap();
+        (c, expires)
+    }
+
+    fn status_of(c: &TlaRegistry, name: &str) -> LifecycleStatus {
+        c.get_sub_account(acc(TLA), name.to_string())
+            .unwrap()
+            .lifecycle
+    }
+
+    #[test]
+    fn a_name_cannot_lapse_while_the_contract_is_paused() {
+        let (c, expires) = expired_and_paused("alice");
+        ctx(ALICE, 0, expires + GRACE_NS + 1);
+        assert!(
+            matches!(status_of(&c, "alice"), LifecycleStatus::Grace),
+            "a pause must hold a name in grace rather than let it become reclaimable"
+        );
+    }
+
+    #[test]
+    fn a_holder_gets_a_fresh_grace_window_after_the_pause_lifts() {
+        let (mut c, expires) = expired_and_paused("alice");
+        let long_after = expires + GRACE_NS + 2;
+        ctx(ADMIN, 0, long_after);
+        c.unpause().unwrap();
+        ctx(ALICE, 0, long_after + 1);
+        assert!(
+            matches!(status_of(&c, "alice"), LifecycleStatus::Grace),
+            "the grace window must restart when the pause lifts"
+        );
+        ctx(ALICE, 0, long_after + GRACE_NS + 2);
+        assert!(matches!(
+            status_of(&c, "alice"),
+            LifecycleStatus::Reclaimable
+        ));
+    }
+
+    #[test]
+    fn a_pause_lapses_by_itself_at_the_ceiling() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 0, 1);
+        c.pause().unwrap();
+        assert!(c.is_paused());
+        ctx(ALICE, 0, 1 + WEEK_NS + 1);
+        assert!(
+            !c.is_paused(),
+            "an admin must not be able to hold a pause open indefinitely"
+        );
+    }
+
+    #[test]
+    fn a_suspension_lapses_by_itself_at_the_ceiling() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 0, 1);
+        c.suspend_tla(acc(TLA)).unwrap();
+        ctx(BOB, rent_total(&c, "bob"), 2);
+        assert!(matches!(
+            c.rent_sub_account(acc(TLA), "bob".to_string(), None),
+            Err(ContractError::TlaNotAcceptingRentals)
+        ));
+        let after = 1 + WEEK_NS + 1;
+        refresh_rate(&mut c, after);
+        ctx(BOB, rent_total(&c, "bob"), after);
+        assert!(
+            c.rent_sub_account(acc(TLA), "bob".to_string(), None).is_ok(),
+            "a suspension must not block a namespace indefinitely"
+        );
+    }
+}
+
+mod a_pause_never_traps_a_user {
+    use super::*;
+
+    #[test]
+    fn a_holder_can_still_renew_and_keep_their_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(ADMIN, 0, 2);
+        c.pause().unwrap();
+        ctx(ALICE, rent, 2);
+        assert!(
+            c.renew_sub_account(acc(TLA), "alice".to_string()).is_ok(),
+            "a pause must never let a name lapse that its holder is paying to keep"
+        );
+    }
+
+    #[test]
+    fn a_holder_can_still_sweep_their_own_balance_home() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(ADMIN, 0, 2);
+        c.pause().unwrap();
+        ctx(ALICE, 1, expires + GRACE_NS + 1);
+        assert!(
+            c.reclaim_sweep_near(acc(TLA), "alice".to_string()).is_ok(),
+            "a pause must never hold a user's own balance in an expired account"
+        );
+    }
+
+    #[test]
+    fn a_delisted_token_is_still_sweepable_home() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let token = acc("usdc.testnet");
+        ctx(ADMIN, 0, 1);
+        c.add_ft_allowlist(token.clone()).unwrap();
+        c.remove_ft_allowlist(token.clone()).unwrap();
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(ALICE, crate::reclaim::SWEEP_ATTACHED_REQUIRED.as_yoctonear(), expires + 1);
+        assert!(
+            c.reclaim_sweep_ft(acc(TLA), "alice".to_string(), token)
+                .is_ok(),
+            "de-listing a token must not strand balances already held in accounts"
+        );
+    }
+
+    #[test]
+    fn a_pause_still_stops_new_rentals() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 0, 1);
+        c.pause().unwrap();
+        ctx(BOB, rent_total(&c, "bob"), 1);
+        assert!(matches!(
+            c.rent_sub_account(acc(TLA), "bob".to_string(), None),
+            Err(ContractError::Paused)
+        ));
+    }
+}
+
 #[test]
 fn a_seller_can_still_unlist_while_the_marketplace_is_paused() {
     let mut c = deploy_with_open_tla();

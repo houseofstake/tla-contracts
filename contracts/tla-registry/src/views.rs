@@ -12,7 +12,7 @@ impl TlaRegistry {
     pub fn get_tla(&self, tla_id: AccountId) -> Option<TlaView> {
         self.tlas
             .get(&tla_id)
-            .map(|e| to_tla_view(&tla_id, e, &self.fee_config, self.grace_period_ns))
+            .map(|e| to_tla_view(&tla_id, e, &self.fee_config, &self.clock()))
     }
 
     pub fn get_sub_account(&self, tla_id: AccountId, name: String) -> Option<SubAccountView> {
@@ -26,7 +26,7 @@ impl TlaRegistry {
             &tla_id,
             &name,
             &self.fee_config,
-            self.grace_period_ns,
+            &self.clock(),
         ))
     }
 
@@ -93,7 +93,7 @@ impl TlaRegistry {
             .iter()
             .skip(from_index as usize)
             .take(limit as usize)
-            .map(|(id, entry)| to_tla_view(id, entry, &self.fee_config, self.grace_period_ns))
+            .map(|(id, entry)| to_tla_view(id, entry, &self.fee_config, &self.clock()))
             .collect()
     }
 
@@ -222,7 +222,7 @@ impl TlaRegistry {
                 &sub.tla_id,
                 name,
                 &self.fee_config,
-                self.grace_period_ns,
+                &self.clock(),
             ),
             listing: self.listings.get(key).map(|l| ListingView {
                 full_name: key.to_string(),
@@ -244,14 +244,14 @@ pub(crate) fn to_tla_view(
     tla_id: &AccountId,
     entry: &TlaEntry,
     config: &FeeConfig,
-    grace_period_ns: u64,
+    clock: &LifecycleClock,
 ) -> TlaView {
     let tla_len = tla_id.as_str().len() as u8;
     let rent = fees::base_rent(tla_len, config);
     TlaView {
         tla_id: tla_id.clone(),
         tla_type: entry.tla_type.clone(),
-        lifecycle: entry.lifecycle(grace_period_ns),
+        lifecycle: entry.lifecycle(clock),
         licensee: entry.licensee.clone(),
         premium_category: entry.premium_category.clone(),
         activated_at: U64(entry.activated_at),
@@ -267,7 +267,7 @@ pub(crate) fn to_sub_view(
     tla_id: &AccountId,
     name: &str,
     config: &FeeConfig,
-    grace_period_ns: u64,
+    clock: &LifecycleClock,
 ) -> SubAccountView {
     let rent = fees::calculate_rent(tla, tla_id, name, config);
     SubAccountView {
@@ -275,7 +275,7 @@ pub(crate) fn to_sub_view(
         owner: entry.owner.clone(),
         tla_id: entry.tla_id.clone(),
         payout_account: entry.payout_account.clone(),
-        lifecycle: entry.lifecycle(grace_period_ns),
+        lifecycle: entry.lifecycle(clock),
         rented_at: U64(entry.rented_at),
         expires_at: U64(entry.expires_at),
         annual_rent: U128(rent),

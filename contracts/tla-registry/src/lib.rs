@@ -31,6 +31,8 @@ use near_sdk::{
 
 const CONTRACT_VERSION: u8 = 1;
 const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const MAX_PAUSE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+const MAX_SUSPENSION_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
@@ -61,6 +63,8 @@ pub(crate) enum StorageKey {
     SubAccountsByTla,
     SubAccountsByTlaInner { tla: AccountId },
     RecentActivity,
+    SweepableTokens,
+    SuspendedUntil,
 }
 
 #[near(contract_state)]
@@ -98,56 +102,22 @@ pub struct TlaRegistry {
     pub(crate) treasury: AccountId,
     pub(crate) council: AccountId,
     pub(crate) marketplace_paused: bool,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyFeeConfig {
-    tla_allocation_fee_usd_micro: U128,
-    rent_tier_5_usd_micro: U128,
-    rent_tier_8_usd_micro: U128,
-    rent_tier_10_usd_micro: U128,
-    rent_tier_12plus_usd_micro: U128,
-    sub_fee_per_account_usd_micro: U128,
-    account_creation_deposit_yocto: U128,
-    business_max_subs: u32,
-    retraction_notice_ns: U64,
-    resale_commission_bps: u16,
-    max_rate_move_bps: u16,
-    quote_slippage_bps: u16,
-    min_near_usd_rate_micro: U128,
-    max_near_usd_rate_micro: U128,
-    rate_update_cooldown_ns: U64,
-}
-
-impl LegacyFeeConfig {
-    fn into_current(self) -> FeeConfig {
-        FeeConfig {
-            tla_allocation_fee_usd_micro: self.tla_allocation_fee_usd_micro,
-            rent_tier_5_usd_micro: self.rent_tier_5_usd_micro,
-            rent_tier_8_usd_micro: self.rent_tier_8_usd_micro,
-            rent_tier_10_usd_micro: self.rent_tier_10_usd_micro,
-            rent_tier_12plus_usd_micro: self.rent_tier_12plus_usd_micro,
-            sub_fee_per_account_usd_micro: self.sub_fee_per_account_usd_micro,
-            account_creation_deposit_yocto: self.account_creation_deposit_yocto,
-            business_max_subs: self.business_max_subs,
-            retraction_notice_ns: self.retraction_notice_ns,
-            resale_commission_bps: self.resale_commission_bps,
-            max_rate_move_bps: self.max_rate_move_bps,
-            quote_slippage_bps: self.quote_slippage_bps,
-            min_near_usd_rate_micro: self.min_near_usd_rate_micro,
-            max_near_usd_rate_micro: self.max_near_usd_rate_micro,
-            rate_update_cooldown_ns: self.rate_update_cooldown_ns,
-            max_rate_age_ns: fees::default_fee_config().max_rate_age_ns,
-        }
-    }
+    pub(crate) paused_until_ns: u64,
+    pub(crate) unpaused_at: u64,
+    pub(crate) sweepable_tokens: IterableSet<AccountId>,
+    pub(crate) suspended_until: LookupMap<AccountId, u64>,
 }
 
 #[near(serializers = [borsh])]
 pub struct LegacyTlaRegistry {
     tlas: IterableMap<AccountId, TlaEntry>,
-    sub_accounts: LookupMap<String, SubAccountEntry>,
+    sub_accounts: IterableMap<String, SubAccountEntry>,
+    sub_accounts_by_owner: LookupMap<AccountId, IterableSet<String>>,
+    sub_accounts_by_tla: LookupMap<AccountId, IterableSet<String>>,
+    recent_activity: Vector<ActivityRecord>,
+    activity_cursor: u32,
     admins: IterableSet<AccountId>,
-    fee_config: LegacyFeeConfig,
+    fee_config: FeeConfig,
     total_revenue: u128,
     sub_account_count: u64,
     paused: bool,
@@ -157,17 +127,21 @@ pub struct LegacyTlaRegistry {
     ft_allowlist: IterableSet<AccountId>,
     business_sub_count: LookupMap<AccountId, u32>,
     business_sub_cap_override: LookupMap<AccountId, u32>,
-    listings: LookupMap<String, Listing>,
-    accepted_offers: LookupMap<String, AcceptedOffer>,
+    listings: IterableMap<String, Listing>,
+    accepted_offers: IterableMap<String, AcceptedOffer>,
     parked_names: LookupMap<String, ParkedEntry>,
     reclaim_pending: LookupMap<String, bool>,
     payment_authorities: IterableSet<AccountId>,
+    recovery_authorities: IterableSet<AccountId>,
     hos_extension: AccountId,
     grace_period_ns: u64,
     price_oracle: AccountId,
     near_usd_rate_micro: u128,
     rate_updated_at: u64,
     rate_sequence: u64,
+    treasury: AccountId,
+    council: AccountId,
+    marketplace_paused: bool,
 }
 
 #[near]
@@ -225,27 +199,31 @@ impl TlaRegistry {
             treasury,
             council,
             marketplace_paused: false,
+            paused_until_ns: 0,
+            unpaused_at: 0,
+            sweepable_tokens: IterableSet::new(StorageKey::SweepableTokens),
+            suspended_until: LookupMap::new(StorageKey::SuspendedUntil),
         }
     }
 
     #[private]
     #[init(ignore_state)]
-    pub fn migrate(treasury: AccountId, council: AccountId) -> Self {
+    pub fn migrate() -> Self {
         let old: LegacyTlaRegistry =
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
-        require!(
-            old.sub_account_count == 0,
-            "cannot migrate a registry that already holds sub accounts"
-        );
+        let mut sweepable_tokens = IterableSet::new(StorageKey::SweepableTokens);
+        for token in old.ft_allowlist.iter() {
+            sweepable_tokens.insert(token.clone());
+        }
         Self {
             tlas: old.tlas,
-            sub_accounts: IterableMap::new(StorageKey::SubAccountsIndexed),
-            sub_accounts_by_owner: LookupMap::new(StorageKey::SubAccountsByOwner),
-            sub_accounts_by_tla: LookupMap::new(StorageKey::SubAccountsByTla),
-            recent_activity: Vector::new(StorageKey::RecentActivity),
-            activity_cursor: 0,
+            sub_accounts: old.sub_accounts,
+            sub_accounts_by_owner: old.sub_accounts_by_owner,
+            sub_accounts_by_tla: old.sub_accounts_by_tla,
+            recent_activity: old.recent_activity,
+            activity_cursor: old.activity_cursor,
             admins: old.admins,
-            fee_config: old.fee_config.into_current(),
+            fee_config: old.fee_config,
             total_revenue: old.total_revenue,
             sub_account_count: old.sub_account_count,
             paused: old.paused,
@@ -255,21 +233,29 @@ impl TlaRegistry {
             ft_allowlist: old.ft_allowlist,
             business_sub_count: old.business_sub_count,
             business_sub_cap_override: old.business_sub_cap_override,
-            listings: IterableMap::new(StorageKey::ListingsIndexed),
-            accepted_offers: IterableMap::new(StorageKey::AcceptedOffersIndexed),
+            listings: old.listings,
+            accepted_offers: old.accepted_offers,
             parked_names: old.parked_names,
             reclaim_pending: old.reclaim_pending,
             payment_authorities: old.payment_authorities,
-            recovery_authorities: IterableSet::new(StorageKey::RecoveryAuthorities),
+            recovery_authorities: old.recovery_authorities,
             hos_extension: old.hos_extension,
             grace_period_ns: old.grace_period_ns,
             price_oracle: old.price_oracle,
             near_usd_rate_micro: old.near_usd_rate_micro,
             rate_updated_at: old.rate_updated_at,
             rate_sequence: old.rate_sequence,
-            treasury,
-            council,
-            marketplace_paused: false,
+            treasury: old.treasury,
+            council: old.council,
+            marketplace_paused: old.marketplace_paused,
+            paused_until_ns: if old.paused {
+                env::block_timestamp().saturating_add(MAX_PAUSE_NS)
+            } else {
+                0
+            },
+            unpaused_at: 0,
+            sweepable_tokens,
+            suspended_until: LookupMap::new(StorageKey::SuspendedUntil),
         }
     }
 
@@ -359,6 +345,7 @@ impl TlaRegistry {
     pub fn pause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         self.paused = true;
+        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_PAUSE_NS);
         Event::ContractPaused {
             by: env::predecessor_account_id(),
         }
@@ -369,7 +356,7 @@ impl TlaRegistry {
     #[handle_result]
     pub fn unpause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
-        self.paused = false;
+        self.end_pause();
         Event::ContractUnpaused {
             by: env::predecessor_account_id(),
         }
@@ -450,7 +437,15 @@ impl TlaRegistry {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.paused
+        self.effective_paused()
+    }
+
+    pub fn get_pause_expiry(&self) -> U64 {
+        U64(if self.effective_paused() {
+            self.paused_until_ns
+        } else {
+            0
+        })
     }
 
     pub fn get_pending_refund(&self, account_id: AccountId) -> U128 {
@@ -544,10 +539,42 @@ impl TlaRegistry {
     }
 
     pub(crate) fn assert_not_paused(&self) -> Result<(), ContractError> {
-        if self.paused {
+        if self.effective_paused() {
             return Err(ContractError::Paused);
         }
         Ok(())
+    }
+
+    pub(crate) fn effective_paused(&self) -> bool {
+        self.paused && env::block_timestamp() < self.paused_until_ns
+    }
+
+    fn pause_ended_at(&self) -> u64 {
+        if self.effective_paused() {
+            0
+        } else if self.paused {
+            self.paused_until_ns
+        } else {
+            self.unpaused_at
+        }
+    }
+
+    fn end_pause(&mut self) {
+        self.paused = false;
+        self.paused_until_ns = 0;
+        self.unpaused_at = env::block_timestamp();
+    }
+
+    pub(crate) fn suspension_expiry(&self, tla_id: &AccountId) -> u64 {
+        self.suspended_until.get(tla_id).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn clock(&self) -> LifecycleClock {
+        LifecycleClock {
+            grace_period_ns: self.grace_period_ns,
+            paused: self.effective_paused(),
+            pause_ended_at: self.pause_ended_at(),
+        }
     }
 
     pub(crate) fn add_pending_refund(&mut self, account: &AccountId, amount: u128) {
