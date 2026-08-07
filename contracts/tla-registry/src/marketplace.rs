@@ -609,7 +609,7 @@ impl TlaRegistry {
                 sub,
                 tla,
                 self.fee_config.retraction_notice_ns.0,
-                self.grace_period_ns,
+                &self.clock(),
             ),
             LifecycleStatus::Active
         ) {

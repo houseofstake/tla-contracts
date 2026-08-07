@@ -28,7 +28,7 @@ const IMPL_VERSION: u32 = 3;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
-const AUTHORITY_FREEZE_MAX_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 #[ext_contract(ext_ft)]
 pub trait Ft {
@@ -445,7 +445,7 @@ impl TenantWallet {
             FreezeState::SelfFrozen
         } else {
             self.authority_freeze_until_ns =
-                env::block_timestamp().saturating_add(AUTHORITY_FREEZE_MAX_NS);
+                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS);
             FreezeState::AuthorityFrozen
         };
         Event::Frozen { self_initiated }.emit();

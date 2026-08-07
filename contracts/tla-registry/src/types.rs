@@ -226,12 +226,23 @@ pub struct BusinessRenewalCostView {
     pub sub_count: u32,
 }
 
-fn time_lifecycle(expires_at: u64, grace_period_ns: u64) -> LifecycleStatus {
+pub struct LifecycleClock {
+    pub grace_period_ns: u64,
+    pub reclaim_floor_ns: u64,
+}
+
+impl LifecycleClock {
+    pub fn reclaimable_at(&self, from: u64) -> u64 {
+        from.saturating_add(self.grace_period_ns)
+            .max(self.reclaim_floor_ns)
+    }
+}
+
+fn time_lifecycle(expires_at: u64, clock: &LifecycleClock) -> LifecycleStatus {
     let now = env::block_timestamp();
-    let grace_end = expires_at.saturating_add(grace_period_ns);
     if now < expires_at {
         LifecycleStatus::Active
-    } else if now < grace_end {
+    } else if now < clock.reclaimable_at(expires_at) {
         LifecycleStatus::Grace
     } else {
         LifecycleStatus::Reclaimable
@@ -239,22 +250,33 @@ fn time_lifecycle(expires_at: u64, grace_period_ns: u64) -> LifecycleStatus {
 }
 
 impl TlaEntry {
-    pub fn lifecycle(&self, grace_period_ns: u64) -> LifecycleStatus {
+    pub fn lifecycle(&self, clock: &LifecycleClock) -> LifecycleStatus {
         match self.status {
             TlaStatus::Registered => LifecycleStatus::Registered,
             TlaStatus::Suspended => LifecycleStatus::Suspended,
-            TlaStatus::Active => time_lifecycle(self.expires_at, grace_period_ns),
+            TlaStatus::Active => time_lifecycle(self.expires_at, clock),
         }
     }
 
-    pub fn is_accepting_rentals(&self) -> bool {
-        self.status == TlaStatus::Active && env::block_timestamp() < self.expires_at
+    pub fn accepting_rentals(&self, suspended_until: u64) -> bool {
+        if env::block_timestamp() >= self.expires_at {
+            return false;
+        }
+        match self.status {
+            TlaStatus::Active => true,
+            TlaStatus::Suspended => env::block_timestamp() >= suspended_until,
+            TlaStatus::Registered => false,
+        }
     }
 }
 
 impl SubAccountEntry {
-    pub fn lifecycle(&self, grace_period_ns: u64) -> LifecycleStatus {
-        time_lifecycle(self.expires_at, grace_period_ns)
+    pub fn lifecycle(&self, clock: &LifecycleClock) -> LifecycleStatus {
+        time_lifecycle(self.expires_at, clock)
+    }
+
+    pub fn sweepable(&self) -> bool {
+        env::block_timestamp() >= self.expires_at
     }
 }
 

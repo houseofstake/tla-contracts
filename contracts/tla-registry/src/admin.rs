@@ -6,6 +6,7 @@ use near_sdk::json_types::{U128, U64};
 use near_sdk::{env, near, AccountId};
 
 const MAX_ALLOWLIST_SIZE: u32 = 16;
+const MAX_SWEEPABLE_SIZE: u32 = 64;
 const MIN_RETRACTION_NOTICE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 #[near]
@@ -57,6 +58,8 @@ impl TlaRegistry {
             return Err(ContractError::TlaNotActive);
         }
         entry.status = TlaStatus::Suspended;
+        let until = env::block_timestamp().saturating_add(hos_common::MAX_AUTHORITY_HOLD_NS);
+        self.suspended_until.insert(tla_id.clone(), until);
         Event::TlaSuspended {
             tla_id,
             by: env::predecessor_account_id(),
@@ -79,6 +82,7 @@ impl TlaRegistry {
             return Err(ContractError::BusinessTlaMissingLicensee);
         }
         entry.status = TlaStatus::Active;
+        self.suspended_until.remove(&tla_id);
         Event::TlaUnsuspended {
             tla_id,
             by: env::predecessor_account_id(),
@@ -272,10 +276,13 @@ impl TlaRegistry {
         if self.ft_allowlist.contains(&token) {
             return Ok(());
         }
-        if self.ft_allowlist.len() >= MAX_ALLOWLIST_SIZE {
+        if self.ft_allowlist.len() >= MAX_ALLOWLIST_SIZE
+            || self.sweepable_tokens.len() >= MAX_SWEEPABLE_SIZE
+        {
             return Err(ContractError::AllowlistFull);
         }
         self.ft_allowlist.insert(token.clone());
+        self.sweepable_tokens.insert(token.clone());
         Event::FtAllowlistAdded {
             token,
             by: env::predecessor_account_id(),

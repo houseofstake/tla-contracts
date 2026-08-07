@@ -714,7 +714,7 @@ fn an_authority_freeze_lapses_on_its_own() {
     ctx(AUTHORITY, 1, now_ns());
     c.hos_freeze();
     assert_eq!(c.hos_lease().frozen, FreezeState::AuthorityFrozen);
-    ctx(OWNER, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS);
+    ctx(OWNER, 1, now_ns() + MAX_AUTHORITY_HOLD_NS);
     assert_eq!(
         c.hos_lease().frozen,
         FreezeState::Unfrozen,
@@ -727,7 +727,7 @@ fn a_renter_freeze_does_not_lapse() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.hos_freeze();
-    ctx(OWNER, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS * 4);
+    ctx(OWNER, 1, now_ns() + MAX_AUTHORITY_HOLD_NS * 4);
     assert_eq!(c.hos_lease().frozen, FreezeState::SelfFrozen);
 }
 
@@ -736,7 +736,7 @@ fn the_authority_can_refreeze_after_a_lapse() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
     c.hos_freeze();
-    ctx(AUTHORITY, 1, now_ns() + AUTHORITY_FREEZE_MAX_NS);
+    ctx(AUTHORITY, 1, now_ns() + MAX_AUTHORITY_HOLD_NS);
     c.hos_freeze();
     assert_eq!(c.hos_lease().frozen, FreezeState::AuthorityFrozen);
 }

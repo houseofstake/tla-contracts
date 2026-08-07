@@ -3,6 +3,8 @@ use near_sdk::{env, near, CurveType, PublicKey};
 
 pub const FT_STORAGE_DEPOSIT_YOCTO: u128 = 1_250_000_000_000_000_000_000;
 
+pub const MAX_AUTHORITY_HOLD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+
 #[near(serializers = [borsh, json])]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum OperatingState {

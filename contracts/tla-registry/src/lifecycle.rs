@@ -5,16 +5,18 @@ pub(crate) fn effective_sub_lifecycle(
     sub: &SubAccountEntry,
     tla: &TlaEntry,
     retraction_notice_ns: u64,
-    grace_period_ns: u64,
+    clock: &LifecycleClock,
 ) -> LifecycleStatus {
-    if matches!(tla.lifecycle(grace_period_ns), LifecycleStatus::Reclaimable) {
+    if matches!(tla.lifecycle(clock), LifecycleStatus::Reclaimable) {
         return LifecycleStatus::Reclaimable;
     }
     if let Some(retraction_at) = sub.retraction_at {
-        let elapsed_at = retraction_at.saturating_add(retraction_notice_ns);
+        let elapsed_at = retraction_at
+            .saturating_add(retraction_notice_ns)
+            .max(clock.reclaim_floor_ns);
         if env::block_timestamp() >= elapsed_at {
             return LifecycleStatus::Reclaimable;
         }
     }
-    sub.lifecycle(grace_period_ns)
+    sub.lifecycle(clock)
 }

@@ -197,8 +197,9 @@ impl TlaRegistry {
 
         let is_business;
         {
+            let suspended_until = self.suspension_expiry(&tla_id);
             let entry = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if !entry.is_accepting_rentals() {
+            if !entry.accepting_rentals(suspended_until) {
                 return Err(ContractError::TlaNotAcceptingRentals);
             }
             is_business = entry.tla_type == TlaType::Business;
@@ -357,7 +358,6 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
     ) -> Result<Promise, ContractError> {
-        self.assert_not_paused()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
@@ -379,10 +379,7 @@ impl TlaRegistry {
                 return Err(ContractError::RetractionPending);
             }
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if matches!(
-                tla.lifecycle(self.grace_period_ns),
-                LifecycleStatus::Reclaimable
-            ) {
+            if matches!(tla.lifecycle(&self.clock()), LifecycleStatus::Reclaimable) {
                 return Err(ContractError::TlaPastGracePeriod);
             }
             rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);
@@ -468,8 +465,9 @@ impl TlaRegistry {
         name: &str,
         owner: &AccountId,
     ) -> Result<(u128, bool), ContractError> {
+        let suspended_until = self.suspension_expiry(tla_id);
         let entry = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
-        if !entry.is_accepting_rentals() {
+        if !entry.accepting_rentals(suspended_until) {
             return Err(ContractError::TlaNotAcceptingRentals);
         }
         let is_business = entry.tla_type == TlaType::Business;
