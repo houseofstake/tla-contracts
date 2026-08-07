@@ -97,7 +97,8 @@ pub struct LeaseView {
 #[derive(Clone)]
 pub struct SpendGrant {
     pub receivers: BTreeSet<AccountId>,
-    pub max_yocto: U128,
+    pub budget_yocto: U128,
+    pub spent_yocto: U128,
     pub expires_at: U64,
 }
 
@@ -270,7 +271,7 @@ impl TenantWallet {
         &mut self,
         extension: AccountId,
         receivers: Vec<AccountId>,
-        max_yocto: U128,
+        budget_yocto: U128,
         expires_at: U64,
     ) {
         self.assert_owner_caller();
@@ -287,7 +288,8 @@ impl TenantWallet {
             extension.clone(),
             SpendGrant {
                 receivers: receivers.into_iter().collect(),
-                max_yocto,
+                budget_yocto,
+                spent_yocto: U128(0),
                 expires_at,
             },
         );
@@ -509,7 +511,7 @@ impl TenantWallet {
         if !request.external.is_empty() {
             self.assert_renter(actor);
             self.assert_renter_active();
-            self.assert_spend_allowed(actor, &request.external);
+            self.charge_spend(actor, &request.external);
             self.assert_within_reserve(&request.external);
             for promise in request.external {
                 if promise.receiver_id == env::current_account_id() {
@@ -638,19 +640,29 @@ impl TenantWallet {
         self.assert_renter_active();
     }
 
-    fn assert_spend_allowed(&self, actor: &Actor<'_>, external: &[NearPromise]) {
+    fn charge_spend(&mut self, actor: &Actor<'_>, external: &[NearPromise]) {
         let Actor::Extension(id) = actor else {
             env::panic_str(error::NO_SPEND_GRANT);
         };
         if id.as_ref() == self.owner.as_str() {
             return;
         }
+        let holder = self
+            .spend_grants
+            .keys()
+            .find(|held| held.as_str() == id.as_ref().as_str())
+            .cloned()
+            .unwrap_or_else(|| env::panic_str(error::NO_SPEND_GRANT));
+        let mut total: u128 = 0;
+        for promise in external {
+            total = total
+                .checked_add(promise.total_deposit().as_yoctonear())
+                .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
+        }
         let grant = self
             .spend_grants
-            .iter()
-            .find(|(held, _)| held.as_str() == id.as_ref().as_str())
-            .map(|(_, grant)| grant)
-            .unwrap_or_else(|| env::panic_str(error::NO_SPEND_GRANT));
+            .get_mut(&holder)
+            .unwrap_or_else(|| unreachable!());
         require!(
             env::block_timestamp() < grant.expires_at.0,
             error::GRANT_EXPIRED
@@ -660,11 +672,14 @@ impl TenantWallet {
                 grant.receivers.contains(&promise.receiver_id),
                 error::RECEIVER_NOT_GRANTED
             );
-            require!(
-                promise.total_deposit().as_yoctonear() <= grant.max_yocto.0,
-                error::GRANT_CAP_EXCEEDED
-            );
         }
+        let spent = grant
+            .spent_yocto
+            .0
+            .checked_add(total)
+            .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
+        require!(spent <= grant.budget_yocto.0, error::GRANT_CAP_EXCEEDED);
+        grant.spent_yocto = U128(spent);
     }
 
     fn assert_owner(&self, actor: &Actor<'_>) {

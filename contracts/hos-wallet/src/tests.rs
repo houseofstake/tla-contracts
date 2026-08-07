@@ -833,3 +833,47 @@ fn migrate_refuses_an_owner_outside_the_extension_set() {
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
     TenantWallet::hos_migrate(acc("stranger.testnet"));
 }
+
+#[test]
+#[should_panic(expected = "exceeds the granted cap")]
+fn a_grant_cannot_be_split_across_promises_in_one_request() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(2), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([
+        send("carol.testnet", NearToken::from_millinear(2)),
+        send("carol.testnet", NearToken::from_millinear(2)),
+    ]));
+}
+
+#[test]
+#[should_panic(expected = "exceeds the granted cap")]
+fn a_grant_is_consumed_and_does_not_reset_between_calls() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(3), &["carol.testnet"]);
+    for _ in 0..2 {
+        ctx(BUYER, 1, now_ns());
+        c.w_execute_extension(
+            Request::new().external([send("carol.testnet", NearToken::from_millinear(2))]),
+        );
+    }
+}
+
+#[test]
+fn the_remaining_budget_is_visible_to_anyone() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(5), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(
+        Request::new().external([send("carol.testnet", NearToken::from_millinear(2))]),
+    );
+    let grant = c.hos_spend_grant(acc(BUYER)).unwrap();
+    assert_eq!(
+        grant.spent_yocto.0,
+        NearToken::from_millinear(2).as_yoctonear()
+    );
+    assert_eq!(
+        grant.budget_yocto.0,
+        NearToken::from_millinear(5).as_yoctonear()
+    );
+}

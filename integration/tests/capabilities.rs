@@ -473,7 +473,7 @@ async fn a_co_owner_can_be_granted_and_can_act() -> Result<()> {
         .args_json(json!({
             "extension": carol.id(),
             "receivers": [t.fleet.bob.id()],
-            "max_yocto": "1000000000000000000000",
+            "budget_yocto": "1000000000000000000000",
             "expires_at": lease_until_ns().to_string(),
         }))
         .deposit(NearToken::from_yoctonear(1))
