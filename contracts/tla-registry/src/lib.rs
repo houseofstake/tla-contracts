@@ -31,8 +31,7 @@ use near_sdk::{
 
 const CONTRACT_VERSION: u8 = 1;
 const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
-const MAX_PAUSE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
-const MAX_SUSPENSION_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
@@ -249,7 +248,7 @@ impl TlaRegistry {
             council: old.council,
             marketplace_paused: old.marketplace_paused,
             paused_until_ns: if old.paused {
-                env::block_timestamp().saturating_add(MAX_PAUSE_NS)
+                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS)
             } else {
                 0
             },
@@ -345,7 +344,7 @@ impl TlaRegistry {
     pub fn pause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         self.paused = true;
-        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_PAUSE_NS);
+        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS);
         Event::ContractPaused {
             by: env::predecessor_account_id(),
         }
@@ -455,6 +454,18 @@ impl TlaRegistry {
     pub fn get_total_pending_refunds(&self) -> U128 {
         U128(self.total_pending_refunds)
     }
+
+    pub fn get_council(&self) -> AccountId {
+        self.council.clone()
+    }
+
+    pub fn get_treasury(&self) -> AccountId {
+        self.treasury.clone()
+    }
+
+    pub fn get_suspension_expiry(&self, tla_id: AccountId) -> U64 {
+        U64(self.suspension_expiry(&tla_id))
+    }
 }
 
 impl TlaRegistry {
@@ -470,14 +481,6 @@ impl TlaRegistry {
             return Err(ContractError::OnlyCouncil);
         }
         Ok(())
-    }
-
-    pub fn get_council(&self) -> AccountId {
-        self.council.clone()
-    }
-
-    pub fn get_treasury(&self) -> AccountId {
-        self.treasury.clone()
     }
 
     pub(crate) fn convert_usd_to_near(&self, usd_micro: u128) -> Result<u128, ContractError> {
@@ -549,14 +552,16 @@ impl TlaRegistry {
         self.paused && env::block_timestamp() < self.paused_until_ns
     }
 
-    fn pause_ended_at(&self) -> u64 {
+    fn reclaim_floor_ns(&self) -> u64 {
         if self.effective_paused() {
-            0
-        } else if self.paused {
+            return u64::MAX;
+        }
+        let ended_at = if self.paused {
             self.paused_until_ns
         } else {
             self.unpaused_at
-        }
+        };
+        ended_at.saturating_add(self.grace_period_ns)
     }
 
     fn end_pause(&mut self) {
@@ -572,8 +577,7 @@ impl TlaRegistry {
     pub(crate) fn clock(&self) -> LifecycleClock {
         LifecycleClock {
             grace_period_ns: self.grace_period_ns,
-            paused: self.effective_paused(),
-            pause_ended_at: self.pause_ended_at(),
+            reclaim_floor_ns: self.reclaim_floor_ns(),
         }
     }
 

@@ -2147,7 +2147,8 @@ mod a_pause_never_costs_a_user_their_name {
         refresh_rate(&mut c, after);
         ctx(BOB, rent_total(&c, "bob"), after);
         assert!(
-            c.rent_sub_account(acc(TLA), "bob".to_string(), None).is_ok(),
+            c.rent_sub_account(acc(TLA), "bob".to_string(), None)
+                .is_ok(),
             "a suspension must not block a namespace indefinitely"
         );
     }
@@ -2205,7 +2206,11 @@ mod a_pause_never_traps_a_user {
             .unwrap()
             .expires_at
             .0;
-        ctx(ALICE, crate::reclaim::SWEEP_ATTACHED_REQUIRED.as_yoctonear(), expires + 1);
+        ctx(
+            ALICE,
+            crate::reclaim::SWEEP_ATTACHED_REQUIRED.as_yoctonear(),
+            expires + 1,
+        );
         assert!(
             c.reclaim_sweep_ft(acc(TLA), "alice".to_string(), token)
                 .is_ok(),

@@ -379,10 +379,7 @@ impl TlaRegistry {
                 return Err(ContractError::RetractionPending);
             }
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if matches!(
-                tla.lifecycle(&self.clock()),
-                LifecycleStatus::Reclaimable
-            ) {
+            if matches!(tla.lifecycle(&self.clock()), LifecycleStatus::Reclaimable) {
                 return Err(ContractError::TlaPastGracePeriod);
             }
             rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);

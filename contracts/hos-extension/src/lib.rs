@@ -13,7 +13,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const MAX_PAUSE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+use hos_common::MAX_AUTHORITY_HOLD_NS;
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_ROTATE: Gas = Gas::from_tgas(30);
@@ -136,7 +136,7 @@ impl HosExtension {
             approved_at: old.approved_at,
             council: old.council,
             paused_until_ns: if old.paused {
-                env::block_timestamp().saturating_add(MAX_PAUSE_NS)
+                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS)
             } else {
                 0
             },
@@ -151,7 +151,7 @@ impl HosExtension {
     pub fn pause(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         self.paused = true;
-        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_PAUSE_NS);
+        self.paused_until_ns = env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS);
         Event::ContractPaused {
             by: env::predecessor_account_id(),
         }

@@ -10,14 +10,12 @@ pub(crate) fn effective_sub_lifecycle(
     if matches!(tla.lifecycle(clock), LifecycleStatus::Reclaimable) {
         return LifecycleStatus::Reclaimable;
     }
-    if !clock.paused {
-        if let Some(retraction_at) = sub.retraction_at {
-            let elapsed_at = retraction_at
-                .saturating_add(retraction_notice_ns)
-                .max(clock.pause_ended_at.saturating_add(retraction_notice_ns));
-            if env::block_timestamp() >= elapsed_at {
-                return LifecycleStatus::Reclaimable;
-            }
+    if let Some(retraction_at) = sub.retraction_at {
+        let elapsed_at = retraction_at
+            .saturating_add(retraction_notice_ns)
+            .max(clock.reclaim_floor_ns);
+        if env::block_timestamp() >= elapsed_at {
+            return LifecycleStatus::Reclaimable;
         }
     }
     sub.lifecycle(clock)

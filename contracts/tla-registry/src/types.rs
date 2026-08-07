@@ -228,22 +228,21 @@ pub struct BusinessRenewalCostView {
 
 pub struct LifecycleClock {
     pub grace_period_ns: u64,
-    pub paused: bool,
-    pub pause_ended_at: u64,
+    pub reclaim_floor_ns: u64,
+}
+
+impl LifecycleClock {
+    pub fn reclaimable_at(&self, from: u64) -> u64 {
+        from.saturating_add(self.grace_period_ns)
+            .max(self.reclaim_floor_ns)
+    }
 }
 
 fn time_lifecycle(expires_at: u64, clock: &LifecycleClock) -> LifecycleStatus {
     let now = env::block_timestamp();
     if now < expires_at {
-        return LifecycleStatus::Active;
-    }
-    if clock.paused {
-        return LifecycleStatus::Grace;
-    }
-    let grace_end = expires_at
-        .saturating_add(clock.grace_period_ns)
-        .max(clock.pause_ended_at.saturating_add(clock.grace_period_ns));
-    if now < grace_end {
+        LifecycleStatus::Active
+    } else if now < clock.reclaimable_at(expires_at) {
         LifecycleStatus::Grace
     } else {
         LifecycleStatus::Reclaimable

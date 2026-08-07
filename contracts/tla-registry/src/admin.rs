@@ -58,7 +58,7 @@ impl TlaRegistry {
             return Err(ContractError::TlaNotActive);
         }
         entry.status = TlaStatus::Suspended;
-        let until = env::block_timestamp().saturating_add(crate::MAX_SUSPENSION_NS);
+        let until = env::block_timestamp().saturating_add(hos_common::MAX_AUTHORITY_HOLD_NS);
         self.suspended_until.insert(tla_id.clone(), until);
         Event::TlaSuspended {
             tla_id,
