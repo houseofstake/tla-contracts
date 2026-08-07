@@ -20,6 +20,7 @@ use near_sdk::{
 
 use crate::events::Event;
 pub use crate::state::{FreezeState, OperatingState};
+use hos_common::RotationCause;
 
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
@@ -391,9 +392,10 @@ impl TenantWallet {
         .emit();
     }
 
-    /// Moves payout with ownership and evicts co-owners.
+    /// Moves payout with ownership, evicts co-owners, and returns any balance
+    /// above the reserve to the outgoing payout account.
     #[payable]
-    pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>) {
+    pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause) {
         self.assert_authority();
         if !self.lease_expired() {
             require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
@@ -404,6 +406,8 @@ impl TenantWallet {
             require!(*next != env::current_account_id(), error::SELF_TARGET);
             require!(*next != self.authority, error::UNAUTHORIZED);
         }
+        let outgoing = self.payout_account.clone();
+        let sweepable = cause.sweeps() && to.as_ref() != Some(&outgoing);
         let authority = self.authority.clone();
         self.wallet.extensions.retain(|held| *held == authority);
         if let Some(next) = to {
@@ -414,6 +418,9 @@ impl TenantWallet {
                 payout_account: next,
             }
             .emit();
+        }
+        if sweepable {
+            self.sweep_to(outgoing);
         }
     }
 
@@ -619,6 +626,27 @@ impl TenantWallet {
     fn assert_sweepable(&self) {
         self.assert_authority();
         require!(self.lease_expired(), error::LEASE_ACTIVE);
+    }
+
+    fn sweep_to(&self, outgoing: AccountId) {
+        if outgoing == env::current_account_id() {
+            return;
+        }
+        let amount = env::account_balance()
+            .as_yoctonear()
+            .saturating_sub(env::attached_deposit().as_yoctonear())
+            .saturating_sub(self.reserve());
+        if amount == 0 {
+            return;
+        }
+        Event::SweptNear {
+            payout_account: outgoing.clone(),
+            amount: U128(amount),
+        }
+        .emit();
+        Promise::new(outgoing)
+            .transfer(NearToken::from_yoctonear(amount))
+            .detach();
     }
 
     fn assert_renter(&self, actor: &Actor<'_>) {

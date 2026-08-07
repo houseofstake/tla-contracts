@@ -6,7 +6,7 @@ use crate::fees;
 use crate::interfaces::{ext_hos_extension, ext_registrar};
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
-use hos_common::OperatingState;
+use hos_common::{OperatingState, RotationCause};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
@@ -87,11 +87,6 @@ impl TlaRegistry {
         Ok(())
     }
 
-    #[handle_result]
-    #[payable]
-    /// Only an allowlisted payment authority may name an `owner_account` other
-    /// than itself. Authority over a lease is an `AccountId`, so naming the
-    /// wrong one hands the lease away.
     #[handle_result]
     #[payable]
     pub fn rent_sub_account(
@@ -509,7 +504,11 @@ impl TlaRegistry {
 fn re_rent_transfer(hos_extension: &AccountId, pending: PendingReRent) -> Promise {
     ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_RERENT_FORCE)
-        .force_transfer(pending.sub_account, Some(pending.owner.clone()), false)
+        .force_transfer(
+            pending.sub_account,
+            Some(pending.owner.clone()),
+            RotationCause::ReRent,
+        )
         .then(
             TlaRegistry::ext(env::current_account_id())
                 .with_static_gas(GAS_FOR_CALLBACK)

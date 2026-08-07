@@ -30,6 +30,32 @@ pub enum MintOutcome {
     Active,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub enum RotationCause {
+    Sale,
+    Transfer,
+    ReRent,
+    Reclaim,
+    Recovery,
+}
+
+impl RotationCause {
+    pub fn parks(self) -> bool {
+        match self {
+            Self::Reclaim => true,
+            Self::Sale | Self::Transfer | Self::ReRent | Self::Recovery => false,
+        }
+    }
+
+    pub fn sweeps(self) -> bool {
+        match self {
+            Self::Sale | Self::Transfer | Self::ReRent | Self::Reclaim => true,
+            Self::Recovery => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -124,7 +124,7 @@ async fn the_renter_cannot_reach_the_authority_only_methods() -> Result<()> {
     assert_defended(
         renter
             .call(&alice, "hos_transfer_ownership")
-            .args_json(json!({ "to": fleet.relay.id() }))
+            .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
             .deposit(NearToken::from_yoctonear(1))
             .gas(Gas::from_tgas(30))
             .transact()

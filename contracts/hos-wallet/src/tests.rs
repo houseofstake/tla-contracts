@@ -294,7 +294,7 @@ fn a_sale_clears_every_grant_the_previous_owner_made() {
     install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc("newowner.testnet")));
+    c.hos_transfer_ownership(Some(acc("newowner.testnet")), RotationCause::Sale);
     assert!(
         c.hos_spend_grant(acc(BUYER)).is_none(),
         "a buyer must not inherit the seller's spend grants"
@@ -399,7 +399,7 @@ fn a_transfer_moves_ownership_and_payout_together() {
     let mut c = deploy();
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
     assert!(c.w_is_extension_enabled(acc(BUYER)));
     assert!(!c.w_is_extension_enabled(acc(OWNER)));
     assert_eq!(c.hos_payout_account(), acc(BUYER));
@@ -412,7 +412,7 @@ fn a_transfer_evicts_co_owners() {
     c.w_execute_extension(request([add_co_owner("carol.testnet")]));
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
     assert!(!c.w_is_extension_enabled(acc("carol.testnet")));
     assert!(!c.w_is_extension_enabled(acc(OWNER)));
 }
@@ -422,7 +422,7 @@ fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
     let mut c = deploy();
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(None);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim);
     assert_eq!(c.w_extensions().len(), 1);
     assert!(c.w_is_extension_enabled(acc(AUTHORITY)));
     assert_eq!(c.hos_payout_account(), acc(PAYOUT));
@@ -433,7 +433,7 @@ fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
 fn the_renter_cannot_transfer_ownership() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
 }
 
 #[test]
@@ -655,7 +655,7 @@ fn resolve_auth_is_invalid_once_the_account_is_parked() {
     let mut c = deploy();
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(None);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim);
     assert!(matches!(
         c.w_resolve_auth(
             "PROVE_OWNERSHIP".to_string(),
@@ -746,14 +746,14 @@ fn the_authority_can_refreeze_after_a_lapse() {
 fn the_authority_cannot_move_a_live_lease_the_owner_has_not_armed() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
 }
 
 #[test]
 fn reclaim_after_expiry_needs_no_arming() {
     let mut c = init(now_ns(), now_ns() + 1);
     ctx(AUTHORITY, 1, now_ns() + 2);
-    c.hos_transfer_ownership(None);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim);
     assert_eq!(c.w_extensions().len(), 1);
 }
 
@@ -763,7 +763,7 @@ fn arming_is_consumed_by_a_transfer() {
     arm(&mut c);
     assert!(c.hos_transfer_armed());
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
     assert!(!c.hos_transfer_armed());
 }
 
@@ -876,4 +876,102 @@ fn the_remaining_budget_is_visible_to_anyone() {
         grant.budget_yocto.0,
         NearToken::from_millinear(5).as_yoctonear()
     );
+}
+
+fn transfers() -> Vec<(AccountId, u128)> {
+    near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| {
+            let receiver = receipt.receiver_id.clone();
+            receipt
+                .actions
+                .into_iter()
+                .filter_map(move |action| match action {
+                    near_sdk::mock::MockAction::Transfer { deposit, .. } => {
+                        Some((receiver.clone(), deposit.as_yoctonear()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
+fn sweepable_from(balance: NearToken, c: &TenantWallet) -> u128 {
+    balance.as_yoctonear().saturating_sub(c.reserve())
+}
+
+#[test]
+fn a_sale_returns_the_balance_to_the_seller_not_the_buyer() {
+    let mut c = deploy();
+    arm(&mut c);
+    let balance = NearToken::from_near(4);
+    ctx_bal(AUTHORITY, 1, now_ns(), balance);
+    let expected = sweepable_from(balance, &c);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    assert_eq!(transfers(), vec![(acc(PAYOUT), expected)]);
+    assert_eq!(c.hos_payout_account(), acc(BUYER));
+}
+
+#[test]
+fn the_authority_cannot_redirect_the_sweep() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    let sent = transfers();
+    assert!(
+        sent.iter().all(|(to, _)| *to == acc(PAYOUT)),
+        "the sweep destination is the wallet's own payout account, never the caller's choice"
+    );
+}
+
+#[test]
+fn a_recovery_leaves_the_balance_with_the_account() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery);
+    assert!(
+        transfers().is_empty(),
+        "a recovered account keeps its balance for the recovered owner"
+    );
+}
+
+#[test]
+fn a_reclaim_returns_the_balance_to_the_payout_account() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    let balance = NearToken::from_near(6);
+    ctx_bal(AUTHORITY, 1, now_ns() + 2, balance);
+    let expected = sweepable_from(balance, &c);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim);
+    assert_eq!(transfers(), vec![(acc(PAYOUT), expected)]);
+}
+
+#[test]
+fn a_sweep_never_dips_into_the_reserve() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_millinear(1));
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    assert!(transfers().is_empty());
+}
+
+#[test]
+fn a_rotation_onto_the_payout_account_moves_nothing() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
+    c.hos_transfer_ownership(Some(acc(PAYOUT)), RotationCause::Sale);
+    assert!(transfers().is_empty());
+}
+
+#[test]
+fn the_sweep_leaves_the_account_able_to_pay_for_its_own_storage() {
+    let mut c = deploy();
+    arm(&mut c);
+    let balance = NearToken::from_near(4);
+    ctx_bal(AUTHORITY, 1, now_ns(), balance);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    let swept: u128 = transfers().iter().map(|(_, amount)| amount).sum();
+    assert!(balance.as_yoctonear() - swept >= c.reserve());
 }

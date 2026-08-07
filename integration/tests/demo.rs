@@ -96,7 +96,7 @@ async fn demonstrate_account_id_ownership_and_hos_reclaim() -> Result<()> {
     let rotate = fleet
         .extension
         .call(&alice, "hos_transfer_ownership")
-        .args_json(json!({ "to": fleet.relay.id() }))
+        .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()

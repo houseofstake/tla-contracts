@@ -6,6 +6,7 @@ use crate::interfaces::ext_hos_extension;
 use crate::lifecycle::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
+use hos_common::RotationCause;
 use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near, AccountId, Gas, Promise, PromiseOrValue};
@@ -66,7 +67,11 @@ impl TlaRegistry {
         let (sub_account, from) = self.assert_transferable(&tla_id, &name, &new_owner)?;
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-            .force_transfer(sub_account, Some(new_owner.clone()), false)
+            .force_transfer(
+                sub_account,
+                Some(new_owner.clone()),
+                RotationCause::Transfer,
+            )
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
@@ -108,7 +113,11 @@ impl TlaRegistry {
         }
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-            .force_transfer(sub_account, Some(new_owner.clone()), false)
+            .force_transfer(
+                sub_account,
+                Some(new_owner.clone()),
+                RotationCause::Recovery,
+            )
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
@@ -711,7 +720,7 @@ fn settle_transfer(hos_extension: &AccountId, settlement: PendingBuy) -> Promise
         .force_transfer(
             settlement.sub_account.clone(),
             Some(settlement.buyer.clone()),
-            false,
+            RotationCause::Sale,
         )
         .then(
             TlaRegistry::ext(env::current_account_id())
@@ -736,7 +745,7 @@ fn settle_transfer_paid(
         .force_transfer(
             settlement.sub_account.clone(),
             Some(settlement.buyer.clone()),
-            false,
+            RotationCause::Sale,
         )
         .then(
             TlaRegistry::ext(env::current_account_id())

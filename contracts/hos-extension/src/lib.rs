@@ -3,7 +3,7 @@ mod events;
 
 use crate::error::ContractError;
 use crate::events::Event;
-use hos_common::OperatingState;
+use hos_common::{OperatingState, RotationCause};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::store::IterableSet;
@@ -44,7 +44,7 @@ trait FungibleToken {
 #[ext_contract(ext_wallet)]
 trait TenantWallet {
     fn hos_set_lease(&mut self, lease_until_ns: U64, state: OperatingState);
-    fn hos_transfer_ownership(&mut self, to: Option<AccountId>);
+    fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause);
     fn hos_sweep_near(&mut self);
     fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128);
     fn hos_payout_account(&self) -> AccountId;
@@ -288,27 +288,27 @@ impl HosExtension {
         &mut self,
         wallet: AccountId,
         new_owner: Option<AccountId>,
-        park: bool,
+        cause: RotationCause,
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
-        if park && new_owner.is_some() {
+        if cause.parks() && new_owner.is_some() {
             return Err(ContractError::ParkTakesNoOwner);
         }
-        if !park && new_owner.is_none() {
+        if !cause.parks() && new_owner.is_none() {
             return Err(ContractError::TransferNeedsOwner);
         }
         Event::ForceTransferRequested {
             wallet: wallet.clone(),
             new_owner: new_owner.clone(),
-            park,
+            park: cause.parks(),
             by: env::predecessor_account_id(),
         }
         .emit();
         Ok(ext_wallet::ext(wallet.clone())
             .with_static_gas(GAS_FOR_ROTATE)
             .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
-            .hos_transfer_ownership(new_owner)
+            .hos_transfer_ownership(new_owner, cause)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_ROTATE_CB)

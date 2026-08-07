@@ -44,7 +44,7 @@ fn registry_sells_via_force_transfer() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(c
-        .force_transfer(acc(WALLET), Some(acc(BUYER)), false)
+        .force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale)
         .is_ok());
 }
 
@@ -52,7 +52,9 @@ fn registry_sells_via_force_transfer() {
 fn registry_parks_via_force_transfer() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
-    assert!(c.force_transfer(acc(WALLET), None, true).is_ok());
+    assert!(c
+        .force_transfer(acc(WALLET), None, RotationCause::Reclaim)
+        .is_ok());
 }
 
 #[test]
@@ -60,7 +62,7 @@ fn park_with_new_owner_rejected() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), true),
+        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Reclaim),
         Err(ContractError::ParkTakesNoOwner)
     ));
 }
@@ -70,7 +72,7 @@ fn transfer_without_new_owner_rejected() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), None, false),
+        c.force_transfer(acc(WALLET), None, RotationCause::Sale),
         Err(ContractError::TransferNeedsOwner)
     ));
 }
@@ -80,7 +82,7 @@ fn non_registry_cannot_force_transfer() {
     let mut c = deploy();
     ctx(ADMIN, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), false),
+        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale),
         Err(ContractError::OnlyRegistry)
     ));
 }
@@ -92,7 +94,7 @@ fn paused_blocks_force_transfer() {
     c.pause().unwrap();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), false),
+        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale),
         Err(ContractError::Paused)
     ));
 }

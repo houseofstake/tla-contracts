@@ -311,6 +311,71 @@ async fn tla_registry_list_and_buy_rotates_wallet_owner() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_sale_pays_the_sellers_balance_out_with_the_name() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fleet
+        .council
+        .transfer_near(&tenant, NearToken::from_near(3))
+        .await?
+        .into_result()?;
+    arm_transfer(&fleet, &tenant).await?;
+
+    let price = NearToken::from_near(1).as_yoctonear();
+    fleet
+        .bob
+        .call(registry.id(), "list_sub_account")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": name,
+            "price": price.to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let held = balance_of(&fleet.worker, &tenant).await?;
+    let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
+
+    let bought = fleet
+        .relay
+        .call(registry.id(), "buy_sub_account")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": name,
+        }))
+        .deposit(NearToken::from_yoctonear(
+            price + NearToken::from_millinear(100).as_yoctonear(),
+        ))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = bought.receipt_failures().first() {
+        bail!("buy receipt failed: {failure:?}");
+    }
+
+    let left = balance_of(&fleet.worker, &tenant).await?;
+    assert!(
+        left < NearToken::from_millinear(500).as_yoctonear(),
+        "the sold account must not carry the seller's funds to the buyer, found {left} yocto"
+    );
+    let seller_after = balance_of(&fleet.worker, fleet.bob.id()).await?;
+    assert!(
+        seller_after - seller_before > held - NearToken::from_millinear(500).as_yoctonear(),
+        "the seller must receive the account balance on top of the sale proceeds: \
+         {seller_before} -> {seller_after} with {held} yocto held"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tla_registry_transfer_rotates_wallet_owner_without_a_sale() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;

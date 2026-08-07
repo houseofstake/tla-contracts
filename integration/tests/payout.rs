@@ -135,10 +135,13 @@ async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
     let tenant = mint(&fleet, "sold", NearToken::from_near(5)).await?;
     arm_transfer(&fleet, &tenant).await?;
 
+    let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
+    let buyer_before = balance_of(&fleet.worker, fleet.relay.id()).await?;
+
     let moved = fleet
         .extension
         .call(&tenant, "hos_transfer_ownership")
-        .args_json(json!({ "to": fleet.relay.id() }))
+        .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
         .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(30))
         .transact()
@@ -146,11 +149,57 @@ async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
     if !moved.is_success() {
         bail!("the authority must be able to transfer ownership: {moved:#?}");
     }
+    if let Some(failure) = moved.receipt_failures().first() {
+        bail!("transfer receipt failed: {failure:?}");
+    }
 
     assert_eq!(
         payout_account_of(&fleet, &tenant).await?,
         fleet.relay.id().to_string(),
         "the payout must follow the new owner"
+    );
+
+    let seller_after = balance_of(&fleet.worker, fleet.bob.id()).await?;
+    let buyer_after = balance_of(&fleet.worker, fleet.relay.id()).await?;
+    assert!(
+        seller_after > seller_before + NearToken::from_near(4).as_yoctonear(),
+        "the outgoing owner must receive the balance: {seller_before} -> {seller_after}"
+    );
+    assert_eq!(
+        buyer_after, buyer_before,
+        "the incoming owner must inherit the name, never the previous owner's funds"
+    );
+    let left = balance_of(&fleet.worker, &tenant).await?;
+    assert!(
+        left < NearToken::from_millinear(100).as_yoctonear(),
+        "the account must be left at roughly the storage floor, found {left} yocto"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recovery_leaves_the_balance_with_the_recovered_account() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let tenant = mint(&fleet, "lostkeys", NearToken::from_near(5)).await?;
+    arm_transfer(&fleet, &tenant).await?;
+
+    let before = balance_of(&fleet.worker, &tenant).await?;
+    let moved = fleet
+        .extension
+        .call(&tenant, "hos_transfer_ownership")
+        .args_json(json!({ "to": fleet.relay.id(), "cause": "Recovery" }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?;
+    if !moved.is_success() {
+        bail!("recovery must be able to rotate ownership: {moved:#?}");
+    }
+
+    let after = balance_of(&fleet.worker, &tenant).await?;
+    assert!(
+        after > before - NearToken::from_millinear(100).as_yoctonear(),
+        "a recovery must not move funds to an account the user has lost: {before} -> {after}"
     );
     Ok(())
 }

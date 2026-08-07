@@ -5,6 +5,7 @@ use crate::interfaces::ext_hos_extension;
 use crate::lifecycle::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
+use hos_common::RotationCause;
 use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
 
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
@@ -223,7 +224,7 @@ impl TlaRegistry {
             .on_reclaim_finalized(tla_id, name, destination);
         ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_FORCE_TRANSFER)
-            .force_transfer(sub_account, None, true)
+            .force_transfer(sub_account, None, RotationCause::Reclaim)
             .then(finalize)
     }
 }
