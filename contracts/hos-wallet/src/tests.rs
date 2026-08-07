@@ -723,6 +723,48 @@ fn an_authority_freeze_lapses_on_its_own() {
 }
 
 #[test]
+fn agent_status_answers_the_same_as_the_calls_it_replaces() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    let lease = c.hos_lease();
+    let status = c.hos_agent_status(acc(BUYER));
+    assert!(status.extension_enabled);
+    assert_eq!(
+        status.grant.map(|g| g.budget_yocto),
+        c.hos_spend_grant(acc(BUYER)).map(|g| g.budget_yocto)
+    );
+    assert_eq!(status.state, lease.state);
+    assert_eq!(status.frozen, lease.frozen);
+    assert_eq!(status.lease_until_ns, lease.lease_until_ns);
+    assert_eq!(status.impl_version, lease.impl_version);
+}
+
+#[test]
+fn agent_status_reports_an_uninstalled_extension_without_a_grant() {
+    let c = deploy();
+    let status = c.hos_agent_status(acc(BUYER));
+    assert!(!status.extension_enabled);
+    assert!(status.grant.is_none());
+}
+
+#[test]
+fn agent_status_sees_an_authority_freeze_lapse() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    assert_eq!(
+        c.hos_agent_status(acc(BUYER)).frozen,
+        FreezeState::AuthorityFrozen
+    );
+    ctx(OWNER, 1, now_ns() + MAX_AUTHORITY_HOLD_NS);
+    assert_eq!(
+        c.hos_agent_status(acc(BUYER)).frozen,
+        FreezeState::Unfrozen,
+        "an agent must not be told it is frozen after the hold lapses"
+    );
+}
+
+#[test]
 fn a_renter_freeze_does_not_lapse() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());

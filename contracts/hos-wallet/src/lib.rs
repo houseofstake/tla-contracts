@@ -94,6 +94,16 @@ pub struct LeaseView {
     pub impl_version: u32,
 }
 
+#[near(serializers = [json])]
+pub struct AgentStatusView {
+    pub extension_enabled: bool,
+    pub grant: Option<SpendGrant>,
+    pub state: OperatingState,
+    pub frozen: FreezeState,
+    pub lease_until_ns: U64,
+    pub impl_version: u32,
+}
+
 #[near(serializers = [borsh, json])]
 #[derive(Clone)]
 pub struct SpendGrant {
@@ -306,6 +316,17 @@ impl TenantWallet {
 
     pub fn hos_spend_grant(&self, extension: AccountId) -> Option<SpendGrant> {
         self.spend_grants.get(&extension).cloned()
+    }
+
+    pub fn hos_agent_status(&self, extension: AccountId) -> AgentStatusView {
+        AgentStatusView {
+            extension_enabled: self.wallet.has_extension(&extension),
+            grant: self.spend_grants.get(&extension).cloned(),
+            state: self.state,
+            frozen: self.effective_frozen(),
+            lease_until_ns: U64(self.lease_until_ns),
+            impl_version: IMPL_VERSION,
+        }
     }
 
     #[payable]
