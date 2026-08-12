@@ -32,4 +32,10 @@ pub enum Event {
     PolicyReset { account: AccountId },
     #[event_version("1.0.0")]
     PolicyResetDeferred { account: AccountId, round: U64 },
+    #[event_version("1.0.0")]
+    UpgradeApproved { hash: String, by: AccountId },
+    #[event_version("1.0.0")]
+    Upgraded { hash: String },
+    #[event_version("1.0.0")]
+    WatchersChanged { threshold: u32, count: u32 },
 }

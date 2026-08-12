@@ -928,3 +928,128 @@ fn the_owner_can_still_replace_an_existing_policy() {
     c.install_policy(account_id(), mpc_public_key(), next_pk, 259_200);
     assert_eq!(c.timelock_of(account_id()), Some(259_200));
 }
+
+fn ctx_paying(predecessor: &str, ts: u64, deposit: u128) {
+    let acct = AccountId::from_str(predecessor).unwrap();
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .predecessor_account_id(acct)
+        .attached_deposit(NearToken::from_yoctonear(deposit))
+        .block_timestamp(ts)
+        .build());
+}
+
+fn code() -> Vec<u8> {
+    vec![7u8; 64]
+}
+
+fn code_hash() -> Base58CryptoHash {
+    Base58CryptoHash::from(env::sha256_array(code()))
+}
+
+const AFTER_UPGRADE_DELAY: u64 = UPGRADE_DELAY_NS + 1;
+
+#[test]
+fn owner_approves_then_upgrades_after_the_delay() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_upgrade(code_hash());
+    assert_eq!(c.approved_upgrade_hash(), Some(code_hash()));
+    ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
+    let _ = c.upgrade(code());
+    assert_eq!(c.approved_upgrade_hash(), None);
+    assert_eq!(c.approved_upgrade_at(), None);
+}
+
+#[test]
+#[should_panic(expected = "approved code must wait out the delay")]
+fn upgrade_before_the_delay_is_rejected() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_upgrade(code_hash());
+    ctx_paying(OWNER, UPGRADE_DELAY_NS - 1, 1);
+    let _ = c.upgrade(code());
+}
+
+#[test]
+#[should_panic(expected = "code does not match the approved hash")]
+fn upgrade_with_different_code_is_rejected() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_upgrade(code_hash());
+    ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
+    let _ = c.upgrade(vec![8u8; 64]);
+}
+
+#[test]
+#[should_panic(expected = "no approved code hash")]
+fn upgrade_without_an_approval_is_rejected() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
+    let _ = c.upgrade(code());
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn a_non_owner_cannot_approve_an_upgrade() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying("attacker.testnet", 0, 1);
+    c.approve_upgrade(code_hash());
+}
+
+#[test]
+#[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+fn a_restricted_key_cannot_approve_an_upgrade() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 0);
+    c.approve_upgrade(code_hash());
+}
+
+#[test]
+fn the_owner_can_rotate_the_watcher_set() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    let (_, wk3) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.set_watchers(vec![wk2.clone(), wk3.clone()], 2);
+    assert_eq!(c.watchers(), vec![wk2, wk3]);
+    assert_eq!(c.threshold(), 2);
+}
+
+#[test]
+#[should_panic(expected = "threshold must be at least 2")]
+fn the_watcher_set_cannot_be_rotated_down_to_one() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.set_watchers(vec![wk2], 1);
+}
+
+#[test]
+#[should_panic(expected = "duplicate watcher key")]
+fn the_watcher_set_rejects_a_duplicate_key() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying(OWNER, 0, 1);
+    c.set_watchers(vec![wk2.clone(), wk2], 2);
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn a_non_owner_cannot_rotate_the_watcher_set() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    let (_, wk3) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx_paying("attacker.testnet", 0, 1);
+    c.set_watchers(vec![wk2, wk3], 2);
+}

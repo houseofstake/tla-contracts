@@ -23,6 +23,12 @@ const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const MIN_TIMELOCK_SECS: u32 = 60;
 const MAX_TIMELOCK_SECS: u32 = 2_592_000;
+/// Code changes wait longer than the wallet publish delay, because this
+/// contract decides when the MPC signs for someone else's account.
+const UPGRADE_DELAY_NS: u64 = 72 * 60 * 60 * 1_000_000_000;
+/// Once the watcher set is set through governance it cannot drop to one, so no
+/// single watcher can carry a recovery on its own.
+const MIN_WATCHER_THRESHOLD: u32 = 2;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -35,11 +41,16 @@ pub struct MpcRecovery {
     threshold: u32,
     accounts: LookupMap<AccountId, Account>,
     round_floor: LookupMap<AccountId, u64>,
+    approved_code_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
 }
 
+/// The shape written before this contract could upgrade itself. Only read by
+/// `migrate`.
 #[near(serializers = [borsh])]
 struct LegacyMpcRecovery {
     owner: AccountId,
+    installer: AccountId,
     signer: AccountId,
     transfer_authority: AccountId,
     watchers: Vec<PublicKey>,
@@ -94,6 +105,8 @@ impl MpcRecovery {
             threshold,
             accounts: LookupMap::new(b"a"),
             round_floor: LookupMap::new(b"r"),
+            approved_code_hash: None,
+            approved_at: None,
         }
     }
 
@@ -103,15 +116,75 @@ impl MpcRecovery {
         let old: LegacyMpcRecovery =
             env::state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE));
         Self {
-            installer: old.owner.clone(),
             owner: old.owner,
+            installer: old.installer,
             signer: old.signer,
             transfer_authority: old.transfer_authority,
             watchers: old.watchers,
             threshold: old.threshold,
             accounts: old.accounts,
             round_floor: old.round_floor,
+            approved_code_hash: None,
+            approved_at: None,
         }
+    }
+
+    #[payable]
+    pub fn approve_upgrade(&mut self, code_hash: Base58CryptoHash) {
+        self.assert_one_yocto();
+        self.assert_owner();
+        self.approved_code_hash = Some(code_hash.into());
+        self.approved_at = Some(env::block_timestamp());
+        Event::UpgradeApproved {
+            hash: (&code_hash).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn upgrade(&mut self, code: Vec<u8>) -> Promise {
+        self.assert_one_yocto();
+        self.assert_owner();
+        require!(!code.is_empty(), error::EMPTY_CODE);
+        let approved = self
+            .approved_code_hash
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
+        require!(env::sha256_array(&code) == approved, error::HASH_MISMATCH);
+        let approved_at = self
+            .approved_at
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(UPGRADE_DELAY_NS),
+            error::APPROVAL_TOO_YOUNG
+        );
+        self.approved_code_hash = None;
+        self.approved_at = None;
+        Event::Upgraded {
+            hash: (&Base58CryptoHash::from(approved)).into(),
+        }
+        .emit();
+        Promise::new(env::current_account_id()).deploy_contract(code)
+    }
+
+    /// Rotating the watcher set is the only way to replace a compromised
+    /// watcher without redeploying. The floor of two is what stops any single
+    /// watcher, including one of ours, from carrying a recovery alone.
+    #[payable]
+    pub fn set_watchers(&mut self, watchers: Vec<PublicKey>, threshold: u32) {
+        self.assert_one_yocto();
+        self.assert_owner();
+        require!(threshold >= MIN_WATCHER_THRESHOLD, error::THRESHOLD_TOO_LOW);
+        require!((threshold as usize) <= watchers.len(), error::BAD_THRESHOLD);
+        let mut seen = BTreeSet::new();
+        for watcher in &watchers {
+            require!(hos_common::is_ed25519(watcher), error::WATCHER_NOT_ED25519);
+            require!(seen.insert(watcher.clone()), error::DUPLICATE_WATCHER);
+        }
+        let count = watchers.len() as u32;
+        self.watchers = watchers;
+        self.threshold = threshold;
+        Event::WatchersChanged { threshold, count }.emit();
     }
 
     pub fn set_installer(&mut self, installer: AccountId) {
@@ -408,6 +481,18 @@ impl MpcRecovery {
         self.threshold
     }
 
+    pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
+        self.approved_code_hash.map(Base58CryptoHash::from)
+    }
+
+    pub fn approved_upgrade_at(&self) -> Option<U64> {
+        self.approved_at.map(U64)
+    }
+
+    pub fn upgrade_delay_ns(&self) -> U64 {
+        U64(UPGRADE_DELAY_NS)
+    }
+
     pub fn on_wallet_transferred(&mut self, wallet: AccountId) {
         require!(
             env::predecessor_account_id() == self.transfer_authority,
@@ -433,6 +518,20 @@ impl MpcRecovery {
     fn is_installer(&self) -> bool {
         let caller = env::predecessor_account_id();
         caller == self.installer || caller == self.owner
+    }
+
+    fn assert_owner(&self) {
+        require!(
+            env::predecessor_account_id() == self.owner,
+            error::ONLY_OWNER
+        );
+    }
+
+    fn assert_one_yocto(&self) {
+        require!(
+            env::attached_deposit() == NearToken::from_yoctonear(1),
+            error::REQUIRES_ONE_YOCTO
+        );
     }
 
     fn sign_add_key(&self, req: &AddKeyRequest) -> Promise {
