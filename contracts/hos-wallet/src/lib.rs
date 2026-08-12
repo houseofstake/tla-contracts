@@ -35,43 +35,32 @@ pub trait Ft {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
 }
 
-/// NEP-641 resolution result. Wire shape is internally tagged on `status`.
+/// NEP-641 resolution result. A leaf omits `pending`; this account never does,
+/// because it always delegates.
 #[near(serializers = [json])]
-#[serde(tag = "status", rename_all = "SCREAMING_SNAKE_CASE")]
 #[derive(Debug)]
-pub enum AuthorizationResolution {
-    Resolved {
-        payload: String,
-    },
-    Pending {
-        payload: String,
-        pending_authorizations: Vec<PendingAuthorization>,
-    },
-    Invalid {
-        error_kind: ErrorKind,
-        error_message: String,
-    },
+pub struct AuthorizationResolution {
+    pub payload: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PendingAuthorization>,
 }
 
 #[near(serializers = [json])]
 #[derive(Debug)]
 pub struct PendingAuthorization {
     pub account_id: AccountId,
-    pub purpose: String,
     pub authorization: String,
+    pub expect: String,
 }
 
-#[near(serializers = [json])]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ErrorKind {
-    InvalidInput,
-    InvalidSignature,
-}
-
+/// The blob this account accepts. It names which owner is authorising, because
+/// every entry in `pending` has to resolve: returning all of them would mean a
+/// co-owner had to sign before anyone could log in.
 #[near(serializers = [json])]
 pub struct AuthorizationBlob {
-    pub message: String,
+    pub payload: String,
+    pub owner: AccountId,
+    pub authorization: String,
 }
 
 #[near(serializers = [json])]
@@ -341,43 +330,33 @@ impl TenantWallet {
         self.transfer_armed
     }
 
-    /// NEP-641. Always delegates: the account holds no key, so its owner
-    /// accounts resolve the authorization instead.
+    /// NEP-641. Always delegates: the account holds no key, so the owner named
+    /// in the blob resolves the authorization instead. The lease authority is
+    /// never an eligible owner, so House of Stake cannot prove ownership of a
+    /// renter's account.
     ///
-    /// `recipient` is unread but must keep its name, which is the JSON field.
+    /// `path` is unread. This resolver verifies no signature, so it has no
+    /// envelope to bind it against.
     #[allow(unused_variables)]
     pub fn w_resolve_auth(
         &self,
-        purpose: String,
-        recipient: String,
+        path: Vec<AccountId>,
         authorization: String,
     ) -> AuthorizationResolution {
-        let Ok(blob) = near_sdk::serde_json::from_str::<AuthorizationBlob>(&authorization) else {
-            return AuthorizationResolution::Invalid {
-                error_kind: ErrorKind::InvalidInput,
-                error_message: "authorization is not valid json".to_string(),
-            };
-        };
-        let owners: Vec<PendingAuthorization> = self
-            .wallet
-            .extensions
-            .iter()
-            .filter(|held| **held != self.authority)
-            .map(|owner| PendingAuthorization {
-                account_id: owner.clone(),
-                purpose: purpose.clone(),
-                authorization: authorization.clone(),
-            })
-            .collect();
-        if owners.is_empty() {
-            return AuthorizationResolution::Invalid {
-                error_kind: ErrorKind::InvalidSignature,
-                error_message: "no owner can authorise this account".to_string(),
-            };
-        }
-        AuthorizationResolution::Pending {
-            payload: blob.message,
-            pending_authorizations: owners,
+        let blob = near_sdk::serde_json::from_str::<AuthorizationBlob>(&authorization)
+            .unwrap_or_else(|_| env::panic_str(error::AUTHORIZATION_NOT_JSON));
+        require!(blob.owner != self.authority, error::AUTHORITY_NOT_OWNER);
+        require!(
+            self.wallet.extensions.contains(&blob.owner),
+            error::NOT_AN_OWNER
+        );
+        AuthorizationResolution {
+            payload: blob.payload.clone(),
+            pending: vec![PendingAuthorization {
+                account_id: blob.owner,
+                authorization: blob.authorization,
+                expect: blob.payload,
+            }],
         }
     }
 
