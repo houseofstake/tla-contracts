@@ -32,3 +32,6 @@ pub const RECEIVER_NOT_GRANTED: &str = "receiver is not in the spend grant";
 pub const GRANT_CAP_EXCEEDED: &str = "spend exceeds the granted cap";
 pub const EMPTY_GRANT: &str = "a spend grant needs at least one receiver";
 pub const GRANT_IN_PAST: &str = "grant expiry must be in the future";
+pub const AUTHORIZATION_NOT_JSON: &str = "authorization is not valid json";
+pub const AUTHORITY_NOT_OWNER: &str = "the lease authority cannot authorise as an owner";
+pub const NOT_AN_OWNER: &str = "named account is not an owner of this account";

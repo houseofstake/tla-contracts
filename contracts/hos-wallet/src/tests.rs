@@ -73,7 +73,16 @@ fn send(to: &str, amount: NearToken) -> NearPromise {
 }
 
 fn auth_blob(message: &str) -> String {
-    near_sdk::serde_json::json!({ "message": message }).to_string()
+    auth_blob_for(message, OWNER)
+}
+
+fn auth_blob_for(message: &str, owner: &str) -> String {
+    near_sdk::serde_json::json!({
+        "payload": message,
+        "owner": owner,
+        "authorization": "owner-blob",
+    })
+    .to_string()
 }
 
 #[test]
@@ -587,125 +596,76 @@ fn init_rejects_an_owner_that_is_also_the_authority() {
 }
 
 #[test]
-fn resolve_auth_always_delegates_to_the_owner_account() {
+fn resolve_auth_delegates_to_the_named_owner() {
     let c = deploy();
-    match c.w_resolve_auth(
-        "PROVE_OWNERSHIP".to_string(),
-        "app.example.com".to_string(),
-        auth_blob("login"),
-    ) {
-        AuthorizationResolution::Pending {
-            payload,
-            pending_authorizations,
-        } => {
-            assert_eq!(payload, "login");
-            assert_eq!(pending_authorizations.len(), 1);
-            assert_eq!(pending_authorizations[0].account_id, acc(OWNER));
-            assert_eq!(pending_authorizations[0].purpose, "PROVE_OWNERSHIP");
-        }
-        other => panic!("expected delegation to the owner account, got {other:?}"),
-    }
+    let out = c.w_resolve_auth(vec![], auth_blob("login"));
+    assert_eq!(out.payload, "login");
+    assert_eq!(out.pending.len(), 1);
+    assert_eq!(out.pending[0].account_id, acc(OWNER));
+    assert_eq!(out.pending[0].authorization, "owner-blob");
 }
 
+/// Every entry in `pending` has to resolve, so naming both owners would mean a
+/// co-owner had to sign before the renter could log in.
 #[test]
-fn resolve_auth_delegates_to_every_co_owner() {
+fn resolve_auth_names_one_owner_even_when_a_co_owner_exists() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner(BUYER)]));
-    let AuthorizationResolution::Pending {
-        pending_authorizations,
-        ..
-    } = c.w_resolve_auth(
-        "PROVE_OWNERSHIP".to_string(),
-        "app.example.com".to_string(),
-        auth_blob("login"),
-    )
-    else {
-        panic!("expected delegation");
-    };
-    let mut owners: Vec<_> = pending_authorizations
-        .iter()
-        .map(|p| p.account_id.to_string())
-        .collect();
-    owners.sort();
-    assert_eq!(owners, vec![BUYER.to_string(), OWNER.to_string()]);
+    let out = c.w_resolve_auth(vec![], auth_blob_for("login", BUYER));
+    assert_eq!(out.pending.len(), 1);
+    assert_eq!(out.pending[0].account_id, acc(BUYER));
 }
 
 #[test]
-fn resolve_auth_never_names_the_authority_as_an_owner() {
+fn resolve_auth_binds_the_expected_payload_to_the_edge() {
     let c = deploy();
-    let AuthorizationResolution::Pending {
-        pending_authorizations,
-        ..
-    } = c.w_resolve_auth(
-        "PROVE_OWNERSHIP".to_string(),
-        "app.example.com".to_string(),
-        auth_blob("login"),
-    )
-    else {
-        panic!("expected delegation");
-    };
-    assert!(pending_authorizations
-        .iter()
-        .all(|p| p.account_id != acc(AUTHORITY)));
+    let out = c.w_resolve_auth(vec![], auth_blob("login"));
+    assert_eq!(out.pending[0].expect, out.payload);
 }
 
 #[test]
-fn resolve_auth_is_invalid_once_the_account_is_parked() {
+#[should_panic(expected = "the lease authority cannot authorise as an owner")]
+fn resolve_auth_refuses_to_name_the_authority() {
+    let c = deploy();
+    let _ = c.w_resolve_auth(vec![], auth_blob_for("login", AUTHORITY));
+}
+
+#[test]
+#[should_panic(expected = "named account is not an owner")]
+fn resolve_auth_refuses_an_account_that_is_not_an_owner() {
+    let c = deploy();
+    let _ = c.w_resolve_auth(vec![], auth_blob_for("login", "stranger.testnet"));
+}
+
+#[test]
+#[should_panic(expected = "named account is not an owner")]
+fn resolve_auth_panics_once_the_account_is_parked() {
     let mut c = deploy();
     arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
     c.hos_transfer_ownership(None, RotationCause::Reclaim);
-    assert!(matches!(
-        c.w_resolve_auth(
-            "PROVE_OWNERSHIP".to_string(),
-            "app.example.com".to_string(),
-            auth_blob("login"),
-        ),
-        AuthorizationResolution::Invalid {
-            error_kind: ErrorKind::InvalidSignature,
-            ..
-        }
-    ));
+    let _ = c.w_resolve_auth(vec![], auth_blob("login"));
 }
 
 #[test]
-fn resolve_auth_rejects_malformed_input_without_panicking() {
+#[should_panic(expected = "authorization is not valid json")]
+fn resolve_auth_panics_on_a_malformed_blob() {
     let c = deploy();
-    assert!(matches!(
-        c.w_resolve_auth(
-            "PROVE_OWNERSHIP".to_string(),
-            "app.example.com".to_string(),
-            "not json".to_string(),
-        ),
-        AuthorizationResolution::Invalid {
-            error_kind: ErrorKind::InvalidInput,
-            ..
-        }
-    ));
+    let _ = c.w_resolve_auth(vec![], "not json".to_string());
 }
 
 #[test]
 fn resolve_auth_serialises_to_the_nep641_wire_format() {
     let c = deploy();
-    let pending = near_sdk::serde_json::to_value(c.w_resolve_auth(
-        "PROVE_OWNERSHIP".to_string(),
-        "app.example.com".to_string(),
-        auth_blob("login"),
-    ))
-    .unwrap();
-    assert_eq!(pending["status"], "PENDING");
-    assert_eq!(pending["payload"], "login");
-    assert_eq!(pending["pending_authorizations"][0]["account_id"], OWNER);
-
-    let bad = near_sdk::serde_json::to_value(c.w_resolve_auth(
-        "PROVE_OWNERSHIP".to_string(),
-        "app.example.com".to_string(),
-        "not json".to_string(),
-    ))
-    .unwrap();
-    assert_eq!(bad["status"], "INVALID");
-    assert_eq!(bad["error_kind"], "INVALID_INPUT");
+    let out = near_sdk::serde_json::to_value(c.w_resolve_auth(vec![], auth_blob("login"))).unwrap();
+    assert_eq!(out["payload"], "login");
+    assert_eq!(out["pending"][0]["account_id"], OWNER);
+    assert_eq!(out["pending"][0]["expect"], "login");
+    assert!(
+        out.get("status").is_none(),
+        "the tagged status field is gone"
+    );
 }
 
 #[test]
