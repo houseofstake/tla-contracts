@@ -593,85 +593,6 @@ mod rental {
 mod marketplace {
     use super::*;
 
-    fn list_alice(c: &mut TlaRegistry, price: u128) {
-        ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(price))
-            .unwrap();
-    }
-
-    #[test]
-    fn list_requires_owner() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(BOB, 1, 2);
-        assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
-            Err(ContractError::OnlyOwner)
-        ));
-    }
-
-    #[test]
-    fn list_and_unlist_roundtrip() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 10);
-        assert_eq!(
-            c.get_listing(acc(TLA), "alice".to_string())
-                .unwrap()
-                .price_yocto
-                .0,
-            10
-        );
-        ctx(ALICE, 1, 2);
-        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
-    }
-
-    #[test]
-    fn zero_price_rejected() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(0)),
-            Err(ContractError::InvalidPrice)
-        ));
-    }
-
-    #[test]
-    fn buy_unlisted_rejected() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(BOB, 10, 2);
-        assert!(matches!(
-            c.buy_sub_account(acc(TLA), "alice".to_string()),
-            Err(ContractError::NotListed)
-        ));
-    }
-
-    #[test]
-    fn buy_below_price_rejected() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 10);
-        ctx(BOB, 9, 2);
-        assert!(matches!(
-            c.buy_sub_account(acc(TLA), "alice".to_string()),
-            Err(ContractError::PriceNotMet)
-        ));
-    }
-
-    #[test]
-    fn buy_rejects_dotted_name() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(BOB, 10, 2);
-        assert!(matches!(
-            c.buy_sub_account(acc(TLA), "ali.ce".to_string()),
-            Err(ContractError::InvalidName { .. })
-        ));
-    }
-
     #[test]
     fn every_name_entrypoint_rejects_a_dotted_name() {
         let mut c = deploy_with_open_tla();
@@ -699,239 +620,6 @@ mod marketplace {
             c.cancel_retraction(acc(TLA), "ali.ce".to_string()),
             Err(ContractError::InvalidName { .. })
         ));
-    }
-
-    #[test]
-    fn relisting_during_settlement_is_refused() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 10);
-        ctx(BOB, 10, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(20)),
-            Err(ContractError::SaleInProgress)
-        ));
-        assert!(
-            c.get_listing(acc(TLA), "alice".to_string())
-                .unwrap()
-                .settling
-        );
-    }
-
-    #[test]
-    fn reaccepting_during_settlement_is_refused() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        accept_alice(&mut c, acc(BOB), 10);
-        ctx(BOB, 10, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.accept_offer(acc(TLA), "alice".to_string(), acc(BOB), U128(10)),
-            Err(ContractError::SaleInProgress)
-        ));
-        assert!(
-            c.get_accepted_offer(acc(TLA), "alice".to_string())
-                .unwrap()
-                .settling
-        );
-    }
-
-    #[test]
-    fn listing_after_an_owner_change_is_refused() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        let key = format!("alice.{TLA}");
-        if let Some(sub) = c.sub_accounts.get_mut(&key) {
-            sub.owner = acc(BOB);
-        }
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
-            Err(ContractError::OnlyOwner)
-        ));
-        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
-    }
-
-    #[test]
-    fn buy_locks_sale_against_relist() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 10);
-        ctx(BOB, 10, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.unlist_sub_account(acc(TLA), "alice".to_string()),
-            Err(ContractError::SaleInProgress)
-        ));
-    }
-
-    #[test]
-    fn sold_callback_pays_seller_and_swaps_owner() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 100);
-        ctx(ADMIN, 0, 2);
-        let mut config = c.get_fee_config();
-        config.resale_commission_bps = 500;
-        c.update_fee_config(config).unwrap();
-        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_sub_account_sold(
-            acc(TLA),
-            "alice".to_string(),
-            acc(BOB),
-            U128(100),
-            U128(120),
-            Ok(true),
-        );
-        assert_eq!(c.get_pending_refund(acc(ALICE)).0, 95);
-        assert_eq!(c.get_pending_refund(acc(BOB)).0, 20);
-        let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        assert_eq!(view.owner, acc(BOB));
-        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
-    }
-
-    #[test]
-    fn sale_proceeds_follow_the_payout_account_not_the_owner() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(ALICE, 1, 2);
-        c.set_payout_account(acc(TLA), "alice".to_string(), acc(CAROL))
-            .unwrap();
-        list_alice(&mut c, 100);
-        ctx(ADMIN, 0, 2);
-        let mut config = c.get_fee_config();
-        config.resale_commission_bps = 500;
-        c.update_fee_config(config).unwrap();
-        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_sub_account_sold(
-            acc(TLA),
-            "alice".to_string(),
-            acc(BOB),
-            U128(100),
-            U128(100),
-            Ok(true),
-        );
-        assert_eq!(
-            c.get_pending_refund(acc(CAROL)).0,
-            95,
-            "proceeds must go to the account the seller nominated"
-        );
-        assert_eq!(
-            c.get_pending_refund(acc(ALICE)).0,
-            0,
-            "the owner account must not receive proceeds once a payout account is set"
-        );
-    }
-
-    #[test]
-    fn paid_buy_skips_near_proceeds_and_sets_payout_account_to_buyer() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 100);
-        let revenue_before = c.get_stats().total_revenue_yocto.0;
-
-        ctx(ADMIN, 0, 2);
-        c.add_payment_authority(acc(BOB)).unwrap();
-        ctx(BOB, 0, 2);
-        let _ = c
-            .buy_sub_account_paid(acc(TLA), "alice".to_string(), acc(CAROL))
-            .unwrap();
-        assert!(
-            c.get_listing(acc(TLA), "alice".to_string())
-                .unwrap()
-                .settling
-        );
-
-        c.on_sub_account_sold_paid(
-            acc(TLA),
-            "alice".to_string(),
-            acc(CAROL),
-            acc(BOB),
-            U128(100),
-            Ok(true),
-        );
-
-        assert_eq!(c.get_stats().total_revenue_yocto.0, revenue_before);
-        assert_eq!(c.get_pending_refund(acc(ALICE)).0, 0);
-        assert_eq!(c.get_pending_refund(acc(CAROL)).0, 0);
-        let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        assert_eq!(view.owner, acc(BOB));
-        assert_eq!(view.payout_account, acc(CAROL));
-        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
-    }
-
-    #[test]
-    fn failed_sale_refunds_buyer_and_unlocks() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 100);
-        ctx(BOB, 100, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx_callback(near_sdk::PromiseResult::Failed);
-        c.on_sub_account_sold(
-            acc(TLA),
-            "alice".to_string(),
-            acc(BOB),
-            U128(100),
-            U128(100),
-            Err(near_sdk::PromiseError::Failed),
-        );
-        assert_eq!(c.get_pending_refund(acc(BOB)).0, 100);
-        assert_eq!(
-            c.get_sub_account(acc(TLA), "alice".to_string())
-                .unwrap()
-                .owner,
-            acc(ALICE)
-        );
-        ctx(ALICE, 1, 2);
-        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
-    }
-
-    #[test]
-    fn voided_swap_refunds_buyer_and_unlocks() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 100);
-        ctx(BOB, 100, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        c.on_sub_account_sold(
-            acc(TLA),
-            "alice".to_string(),
-            acc(BOB),
-            U128(100),
-            U128(100),
-            Ok(false),
-        );
-        assert_eq!(c.get_pending_refund(acc(BOB)).0, 100);
-        assert_eq!(
-            c.get_sub_account(acc(TLA), "alice".to_string())
-                .unwrap()
-                .owner,
-            acc(ALICE)
-        );
-        ctx(ALICE, 1, 2);
-        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
-    }
-
-    fn accept_alice(c: &mut TlaRegistry, buyer: AccountId, price: u128) {
-        ctx(ALICE, 1, 2);
-        c.accept_offer(acc(TLA), "alice".to_string(), buyer, U128(price))
-            .unwrap();
-    }
-
-    #[test]
-    fn accepted_offer_settles_at_offer_price() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        accept_alice(&mut c, acc(BOB), 50);
-        ctx(BOB, 50, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        let offer = c.get_accepted_offer(acc(TLA), "alice".to_string()).unwrap();
-        assert!(offer.settling);
     }
 
     #[test]
@@ -975,20 +663,6 @@ mod marketplace {
         assert!(matches!(
             c.transfer_sub_account(acc(TLA), "alice".to_string(), acc(&format!("alice.{TLA}"))),
             Err(ContractError::TransferToSubAccount)
-        ));
-    }
-
-    #[test]
-    fn transfer_is_locked_out_while_a_sale_settles() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_alice(&mut c, 10);
-        ctx(BOB, 10, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx(ALICE, 1, 2);
-        assert!(matches!(
-            c.transfer_sub_account(acc(TLA), "alice".to_string(), acc(BOB)),
-            Err(ContractError::SaleInProgress)
         ));
     }
 
@@ -1124,12 +798,9 @@ mod recovery {
     }
 
     #[test]
-    fn recovery_callback_moves_owner_and_payout_and_clears_any_listing() {
+    fn recovery_callback_moves_owner_and_payout() {
         let mut c = deploy_with_recovery();
         rent_alice_sub(&mut c, "alice");
-        ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(1_000))
-            .unwrap();
         ctx(CAROL, 0, 2);
         c.on_sub_account_recovered(
             acc(TLA),
@@ -1142,9 +813,10 @@ mod recovery {
         let sub = c.sub_accounts.get(&key).unwrap();
         assert_eq!(sub.owner, acc(BOB));
         assert_eq!(sub.payout_account, acc(BOB));
-        assert!(
-            c.get_listing(acc(TLA), "alice".to_string()).is_none(),
-            "a recovered name must not stay listed by the lost owner"
+        assert_eq!(
+            c.nft_token(key).unwrap().owner_id,
+            acc(BOB),
+            "a recovered name must read as owned by the recovered account"
         );
     }
 
@@ -1227,27 +899,6 @@ mod reclaim {
     }
 
     #[test]
-    fn reclaim_finalize_rejected_while_sale_settling() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        let expires = c
-            .get_sub_account(acc(TLA), "alice".to_string())
-            .unwrap()
-            .expires_at
-            .0;
-        ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(10))
-            .unwrap();
-        ctx(BOB, 10, 2);
-        let _ = c.buy_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
-        assert!(matches!(
-            c.reclaim_finalize(acc(TLA), "alice".to_string()),
-            Err(ContractError::SaleInProgress)
-        ));
-    }
-
-    #[test]
     fn double_reclaim_does_not_double_decrement() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
@@ -1310,19 +961,24 @@ mod reclaim {
     }
 
     #[test]
-    fn a_pending_reclaim_blocks_listing_and_buying() {
+    fn a_pending_reclaim_blocks_every_transfer_path() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         let key = format!("alice.{TLA}");
-        c.reclaim_pending.insert(key, true);
+        c.reclaim_pending.insert(key.clone(), true);
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            c.nft_transfer(acc(BOB), key.clone(), None, None),
             Err(ContractError::ReclaimInProgress)
         ));
-        ctx(BOB, 10, 2);
+        ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.buy_sub_account(acc(TLA), "alice".to_string()),
+            c.nft_transfer_call(acc(BOB), key, None, None, String::new()),
+            Err(ContractError::ReclaimInProgress)
+        ));
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.transfer_sub_account(acc(TLA), "alice".to_string(), acc(BOB)),
             Err(ContractError::ReclaimInProgress)
         ));
     }
@@ -1529,34 +1185,23 @@ mod business {
     }
 
     #[test]
-    fn business_sub_cannot_be_listed() {
+    fn a_business_sub_cannot_be_traded_by_any_path() {
         let mut c = deploy_with_business_tla();
         rent_business_sub(&mut c, "staff");
+        let key = format!("staff.{TLA}");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "staff".to_string(), U128(10)),
+            c.nft_transfer(acc(BOB), key.clone(), None, None),
             Err(ContractError::BusinessSubNotResellable)
         ));
-    }
-
-    #[test]
-    fn business_sub_cannot_be_bought() {
-        let mut c = deploy_with_business_tla();
-        rent_business_sub(&mut c, "staff");
-        ctx(BOB, 10, 2);
-        assert!(matches!(
-            c.buy_sub_account(acc(TLA), "staff".to_string()),
-            Err(ContractError::BusinessSubNotResellable)
-        ));
-    }
-
-    #[test]
-    fn business_sub_offer_cannot_be_accepted() {
-        let mut c = deploy_with_business_tla();
-        rent_business_sub(&mut c, "staff");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.accept_offer(acc(TLA), "staff".to_string(), acc(BOB), U128(10)),
+            c.nft_transfer_call(acc(BOB), key, None, None, String::new()),
+            Err(ContractError::BusinessSubNotResellable)
+        ));
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.transfer_sub_account(acc(TLA), "staff".to_string(), acc(BOB)),
             Err(ContractError::BusinessSubNotResellable)
         ));
     }
@@ -2000,27 +1645,28 @@ mod marketplace_pause {
     }
 
     #[test]
-    fn a_paused_marketplace_refuses_listing() {
+    fn a_paused_marketplace_refuses_an_nft_transfer() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            c.nft_transfer(acc(BOB), format!("alice.{TLA}"), None, None),
             Err(ContractError::MarketplacePaused)
         ));
     }
 
     #[test]
-    fn a_paused_marketplace_refuses_buying() {
+    fn a_paused_marketplace_still_refuses_the_legacy_transfer_path() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
-        ctx(BOB, 10, 3);
-        assert!(matches!(
-            c.buy_sub_account(acc(TLA), "alice".to_string()),
-            Err(ContractError::MarketplacePaused)
-        ));
+        ctx(ALICE, 1, 2);
+        assert!(
+            c.transfer_sub_account(acc(TLA), "alice".to_string(), acc(BOB))
+                .is_ok(),
+            "the registry pause, not the market pause, gates a direct transfer"
+        );
     }
 
     #[test]
@@ -2032,7 +1678,7 @@ mod marketplace_pause {
     }
 
     #[test]
-    fn unpausing_restores_listing() {
+    fn unpausing_restores_trading() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
@@ -2040,7 +1686,7 @@ mod marketplace_pause {
         c.unpause_marketplace().unwrap();
         ctx(ALICE, 1, 2);
         assert!(c
-            .list_sub_account(acc(TLA), "alice".to_string(), U128(10))
+            .nft_transfer(acc(BOB), format!("alice.{TLA}"), None, None)
             .is_ok());
     }
 
@@ -2231,19 +1877,6 @@ mod a_pause_never_traps_a_user {
     }
 }
 
-#[test]
-fn a_seller_can_still_unlist_while_the_marketplace_is_paused() {
-    let mut c = deploy_with_open_tla();
-    rent_alice_sub(&mut c, "alice");
-    ctx(ALICE, 1, 2);
-    c.list_sub_account(acc(TLA), "alice".to_string(), U128(10))
-        .unwrap();
-    ctx(ADMIN, 0, 2);
-    c.pause_marketplace().unwrap();
-    ctx(ALICE, 1, 3);
-    assert!(c.unlist_sub_account(acc(TLA), "alice".to_string()).is_ok());
-}
-
 mod paged_views {
     use super::*;
     use crate::ACTIVITY_CAPACITY;
@@ -2256,10 +1889,16 @@ mod paged_views {
         names(c.list_sub_accounts_by_owner(acc(who), 0, 100))
     }
 
-    fn list_at(c: &mut TlaRegistry, name: &str, price: u128) {
-        ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), name.to_string(), U128(price))
-            .unwrap();
+    fn settle_transfer(c: &mut TlaRegistry, name: &str, from: &str, to: &str) {
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.nft_on_rotation_resolved(
+            acc(TLA),
+            name.to_string(),
+            acc(from),
+            acc(to),
+            None,
+            Ok(true),
+        );
     }
 
     #[test]
@@ -2284,61 +1923,45 @@ mod paged_views {
     }
 
     #[test]
-    fn listings_are_enumerable() {
+    fn tokens_are_enumerable_by_owner() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 10);
-        let page = c.list_listings(0, 10);
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].full_name, format!("alice.{TLA}"));
-        assert_eq!(page[0].price_yocto.0, 10);
+        rent_alice_sub(&mut c, "bob");
+        assert_eq!(c.nft_total_supply().0, 2);
+        assert_eq!(c.nft_supply_for_owner(acc(ALICE)).0, 2);
+        let held = c.nft_tokens_for_owner(acc(ALICE), None, None);
+        assert_eq!(held.len(), 2);
+        assert!(held.iter().all(|t| t.owner_id == acc(ALICE)));
     }
 
     #[test]
-    fn an_unlisted_name_leaves_the_listing_page() {
+    fn token_enumeration_respects_offset_and_limit() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 10);
-        ctx(ALICE, 1, 3);
-        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
-        assert_eq!(c.list_listings(0, 10).len(), 0);
+        rent_alice_sub(&mut c, "bob");
+        assert_eq!(c.nft_tokens(None, Some(1)).len(), 1);
+        assert_eq!(c.nft_tokens(Some(U128(1)), Some(10)).len(), 1);
+        assert_eq!(c.nft_tokens(Some(U128(2)), Some(10)).len(), 0);
     }
 
     #[test]
     fn empty_registry_pages_are_empty_not_missing() {
         let c = deploy_with_open_tla();
         assert_eq!(c.list_sub_accounts(0, 10).len(), 0);
-        assert_eq!(c.list_listings(0, 10).len(), 0);
+        assert_eq!(c.nft_total_supply().0, 0);
+        assert!(c.nft_tokens(None, None).is_empty());
+        assert!(c.nft_tokens_for_owner(acc(ALICE), None, None).is_empty());
         assert!(owned(&c, ALICE).is_empty());
     }
 
     #[test]
-    fn a_page_carries_the_market_state_so_no_second_call_is_needed() {
+    fn a_page_carries_the_lifecycle_state_so_no_second_call_is_needed() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 250);
         let page = c.list_sub_accounts(0, 10);
-        let listing = page[0]
-            .listing
-            .as_ref()
-            .expect("listed name carries listing");
-        assert_eq!(listing.price_yocto.0, 250);
-        assert!(!listing.settling);
-        assert!(page[0].accepted_offer.is_none());
+        assert_eq!(page[0].sub_account.full_name, format!("alice.{TLA}"));
+        assert_eq!(page[0].sub_account.owner, acc(ALICE));
         assert!(page[0].retraction_at.is_none());
-    }
-
-    #[test]
-    fn a_page_carries_an_accepted_offer() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        ctx(ALICE, 1, 2);
-        c.accept_offer(acc(TLA), "alice".to_string(), acc(BOB), U128(400))
-            .unwrap();
-        let page = c.list_sub_accounts(0, 10);
-        let offer = page[0].accepted_offer.as_ref().expect("offer is carried");
-        assert_eq!(offer.buyer, acc(BOB));
-        assert_eq!(offer.price_yocto.0, 400);
     }
 
     #[test]
@@ -2449,49 +2072,24 @@ mod paged_views {
     }
 
     #[test]
-    fn a_sale_moves_the_name_to_the_buyer() {
+    fn a_settled_nft_transfer_moves_the_name_to_the_buyer() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 100);
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_sub_account_sold(
+        c.nft_on_rotation_resolved(
             acc(TLA),
             "alice".to_string(),
+            acc(ALICE),
             acc(BOB),
-            U128(100),
-            U128(100),
+            None,
             Ok(true),
         );
         assert!(owned(&c, ALICE).is_empty());
         assert_eq!(owned(&c, BOB), vec![format!("alice.{TLA}")]);
-    }
-
-    #[test]
-    fn a_custodial_sale_indexes_the_name_under_the_operator() {
-        let mut c = deploy_with_open_tla();
-        rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 100);
-        ctx(ADMIN, 0, 2);
-        c.add_payment_authority(acc(BOB)).unwrap();
-        ctx(BOB, 0, 2);
-        let _ = c
-            .buy_sub_account_paid(acc(TLA), "alice".to_string(), acc(CAROL))
-            .unwrap();
-        c.on_sub_account_sold_paid(
-            acc(TLA),
-            "alice".to_string(),
-            acc(CAROL),
-            acc(BOB),
-            U128(100),
-            Ok(true),
-        );
-        assert!(owned(&c, ALICE).is_empty());
         assert_eq!(
-            owned(&c, BOB),
-            vec![format!("alice.{TLA}")],
-            "a custodial buy leaves the operator holding the name"
+            c.nft_token(format!("alice.{TLA}")).unwrap().owner_id,
+            acc(BOB)
         );
-        assert!(owned(&c, CAROL).is_empty());
     }
 
     #[test]
@@ -2515,9 +2113,9 @@ mod paged_views {
     fn activity_records_newest_first() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 10);
+        settle_transfer(&mut c, "alice", ALICE, BOB);
         let feed = c.list_recent_activity(0, 10, None);
-        assert_eq!(feed[0].event, "sub_account_listed");
+        assert_eq!(feed[0].event, "sub_account_transferred");
         assert_eq!(feed[0].account, format!("alice.{TLA}"));
         assert_eq!(feed[1].event, "sub_account_rented");
     }
@@ -2526,7 +2124,7 @@ mod paged_views {
     fn activity_paging_respects_offset_and_limit() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        list_at(&mut c, "alice", 10);
+        settle_transfer(&mut c, "alice", ALICE, BOB);
         assert_eq!(c.list_recent_activity(0, 1, None).len(), 1);
         assert_eq!(c.list_recent_activity(1, 10, None).len(), 1);
         assert_eq!(c.list_recent_activity(2, 10, None).len(), 0);
@@ -2543,7 +2141,7 @@ mod paged_views {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         rent_alice_sub(&mut c, "bob");
-        list_at(&mut c, "alice", 10);
+        settle_transfer(&mut c, "alice", ALICE, BOB);
         let alice = format!("alice.{TLA}");
         let scoped = c.list_recent_activity(0, 10, Some(alice.clone()));
         assert_eq!(scoped.len(), 2, "both of alice's events, none of bob's");
@@ -2569,11 +2167,12 @@ mod paged_views {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         for i in 0..ACTIVITY_CAPACITY + 5 {
-            ctx(ALICE, 1, 2);
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(u128::from(i) + 1))
-                .unwrap();
-            ctx(ALICE, 1, 3);
-            c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
+            let (from, to) = if i % 2 == 0 {
+                (ALICE, BOB)
+            } else {
+                (BOB, ALICE)
+            };
+            settle_transfer(&mut c, "alice", from, to);
         }
         let feed = c.list_recent_activity(0, ACTIVITY_CAPACITY as u64 + 50, None);
         assert_eq!(
@@ -2582,7 +2181,7 @@ mod paged_views {
             "the buffer stays bounded"
         );
         assert_eq!(
-            feed[0].event, "sub_account_unlisted",
+            feed[0].event, "sub_account_transferred",
             "the newest entry survives the wrap"
         );
         assert!(

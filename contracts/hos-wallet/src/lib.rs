@@ -700,6 +700,10 @@ impl TenantWallet {
                 grant.receivers.contains(&promise.receiver_id),
                 error::RECEIVER_NOT_GRANTED
             );
+            require!(
+                promise.refund_to.is_none(),
+                error::REFUND_TARGET_NOT_ALLOWED
+            );
         }
         let spent = grant
             .spent_yocto

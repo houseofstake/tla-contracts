@@ -62,22 +62,24 @@ async fn demonstrate_account_id_ownership_and_hos_reclaim() -> Result<()> {
         .worker
         .view(&alice, "w_resolve_auth")
         .args_json(json!({
-            "purpose": "PROVE_OWNERSHIP",
-            "recipient": "app.example.com",
-            "authorization": json!({ "message": "login" }).to_string(),
+            "path": [],
+            "authorization": json!({
+                "payload": "login",
+                "owner": fleet.bob.id(),
+                "authorization": json!({ "message": "login" }).to_string(),
+            })
+            .to_string(),
         }))
         .await?
         .json()?;
-    assert_eq!(resolution["status"], "PENDING");
+    assert_eq!(resolution["payload"], "login");
     assert_eq!(
-        resolution["pending_authorizations"][0]["account_id"],
+        resolution["pending"][0]["account_id"],
         fleet.bob.id().as_str()
     );
-    println!("  status      : {}", resolution["status"]);
-    println!(
-        "  resolve via : {}",
-        resolution["pending_authorizations"][0]["account_id"]
-    );
+    assert_eq!(resolution["pending"][0]["expect"], "login");
+    println!("  payload     : {}", resolution["payload"]);
+    println!("  resolve via : {}", resolution["pending"][0]["account_id"]);
     println!("  the lease never checks a signature; it names the account that can");
 
     let thief = SecretKey::from_seed(KeyType::ED25519, "thief").public_key();

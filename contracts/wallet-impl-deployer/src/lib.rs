@@ -20,6 +20,10 @@ mod error {
     pub const EMPTY_CODE: &str = "code must not be empty";
     pub const COST_OVERFLOW: &str = "storage cost overflow";
     pub const REQUIRES_ONE_YOCTO: &str = "requires an attached deposit of exactly 1 yoctoNEAR";
+    pub const NO_APPROVED_UPGRADE: &str = "no approved upgrade hash";
+    pub const UPGRADE_HASH_MISMATCH: &str = "code does not match the approved upgrade hash";
+    pub const UPGRADE_TOO_YOUNG: &str =
+        "an approved upgrade must wait out the delay before it installs";
 }
 
 #[near(event_json(standard = "hos_tla_impl_deployer"))]
@@ -32,6 +36,10 @@ pub enum Event {
     DeployFailed { hash: String },
     #[event_version("1.0.0")]
     SelfUpgraded {},
+    #[event_version("1.0.0")]
+    UpgradeApproved { hash: String, by: AccountId },
+    #[event_version("1.0.0")]
+    KeyDeleted { public_key: String, by: AccountId },
 }
 
 #[near(serializers = [json])]
@@ -48,6 +56,8 @@ pub struct ImplDeployer {
     approved_at: Option<u64>,
     approval_delay_ns: u64,
     deploy_in_flight: bool,
+    approved_upgrade_hash: Option<[u8; 32]>,
+    approved_upgrade_at: Option<u64>,
 }
 
 /// Shape of the state written before the approval delay existed. Only read by
@@ -77,6 +87,8 @@ impl ImplDeployer {
             approved_at: None,
             approval_delay_ns: DEFAULT_APPROVAL_DELAY_NS,
             deploy_in_flight: old.deploy_in_flight,
+            approved_upgrade_hash: None,
+            approved_upgrade_at: None,
         }
     }
 
@@ -94,6 +106,8 @@ impl ImplDeployer {
                 .map(|value| value.0)
                 .unwrap_or(DEFAULT_APPROVAL_DELAY_NS),
             deploy_in_flight: false,
+            approved_upgrade_hash: None,
+            approved_upgrade_at: None,
         }
     }
 
@@ -188,6 +202,21 @@ impl ImplDeployer {
     }
 
     #[payable]
+    pub fn approve_self_upgrade(&mut self, hash: Base58CryptoHash) {
+        assert_one_yocto();
+        let caller = env::predecessor_account_id();
+        require!(caller == self.council, error::ONLY_COUNCIL);
+        let raw: [u8; 32] = hash.into();
+        self.approved_upgrade_hash = Some(raw);
+        self.approved_upgrade_at = Some(env::block_timestamp());
+        Event::UpgradeApproved {
+            hash: (&hash).into(),
+            by: caller,
+        }
+        .emit();
+    }
+
+    #[payable]
     pub fn upgrade_self(&mut self, code: Vec<u8>) -> Promise {
         assert_one_yocto();
         require!(
@@ -195,8 +224,45 @@ impl ImplDeployer {
             error::ONLY_COUNCIL
         );
         require!(!code.is_empty(), error::EMPTY_CODE);
+        let approved = self
+            .approved_upgrade_hash
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_UPGRADE));
+        require!(
+            env::sha256_array(&code) == approved,
+            error::UPGRADE_HASH_MISMATCH
+        );
+        let approved_at = self
+            .approved_upgrade_at
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_UPGRADE));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(self.approval_delay_ns),
+            error::UPGRADE_TOO_YOUNG
+        );
+        self.approved_upgrade_hash = None;
+        self.approved_upgrade_at = None;
         Event::SelfUpgraded {}.emit();
         Promise::new(env::current_account_id()).deploy_contract(code)
+    }
+
+    #[payable]
+    pub fn gd_delete_key(&mut self, public_key: near_sdk::PublicKey) -> Promise {
+        assert_one_yocto();
+        let caller = env::predecessor_account_id();
+        require!(caller == self.council, error::ONLY_COUNCIL);
+        Event::KeyDeleted {
+            public_key: String::from(&public_key),
+            by: caller,
+        }
+        .emit();
+        Promise::new(env::current_account_id()).delete_key(public_key)
+    }
+
+    pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
+        self.approved_upgrade_hash.map(Base58CryptoHash::from)
+    }
+
+    pub fn approved_upgrade_at(&self) -> Option<near_sdk::json_types::U64> {
+        self.approved_upgrade_at.map(near_sdk::json_types::U64)
     }
 
     pub fn current_hash(&self) -> Option<Base58CryptoHash> {
@@ -427,6 +493,72 @@ mod tests {
         assert_eq!(
             c.deploy_cost(200_000).as_yoctonear(),
             200_000u128 * GLOBAL_CODE_COST_PER_BYTE
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "no approved upgrade hash")]
+    fn a_self_upgrade_without_an_approval_is_refused() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1);
+        let _ = c.upgrade_self(code());
+    }
+
+    #[test]
+    #[should_panic(expected = "must wait out the delay")]
+    fn a_self_upgrade_inside_the_window_is_refused() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_self_upgrade(code_hash());
+        ctx_at(COUNCIL, 1, DEFAULT_APPROVAL_DELAY_NS - 1);
+        let _ = c.upgrade_self(code());
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match the approved upgrade hash")]
+    fn a_self_upgrade_of_different_code_is_refused() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_self_upgrade(code_hash());
+        ctx_at(COUNCIL, 1, AFTER_DELAY);
+        let _ = c.upgrade_self(vec![9u8; 64]);
+    }
+
+    #[test]
+    fn an_approved_self_upgrade_installs_once_the_window_passes() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_self_upgrade(code_hash());
+        assert_eq!(c.approved_upgrade_hash(), Some(code_hash()));
+        ctx_at(COUNCIL, 1, AFTER_DELAY);
+        let _ = c.upgrade_self(code());
+        assert!(
+            c.approved_upgrade_hash().is_none(),
+            "the approval is spent by the upgrade it authorised"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only council")]
+    fn only_the_council_may_remove_a_key() {
+        let mut c = deploy();
+        ctx("anyone.testnet", 1);
+        let _ = c.gd_delete_key(
+            "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+                .parse()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn removing_a_key_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        let _ = c.gd_delete_key(
+            "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+                .parse()
+                .unwrap(),
         );
     }
 }

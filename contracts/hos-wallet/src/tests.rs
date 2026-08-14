@@ -237,6 +237,26 @@ fn a_granted_extension_cannot_pay_an_ungranted_receiver() {
 }
 
 #[test]
+#[should_panic(expected = "cannot redirect refunds")]
+fn a_granted_extension_cannot_redirect_refunds_past_the_allowlist() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([
+        send("carol.testnet", NearToken::from_millinear(1)).refund_to(acc("attacker.testnet")),
+    ]));
+}
+
+#[test]
+fn the_owner_may_still_direct_refunds() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([
+        send("carol.testnet", NearToken::from_millinear(1)).refund_to(acc("carol.testnet")),
+    ]));
+}
+
+#[test]
 #[should_panic(expected = "exceeds the granted cap")]
 fn a_granted_extension_cannot_exceed_the_cap() {
     let mut c = deploy();

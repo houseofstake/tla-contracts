@@ -1,11 +1,59 @@
 use crate::error::{ContractError, NameInvalidReason};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, AccountId};
 
 pub const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 pub const ONE_YEAR_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
+pub const NFT_SPEC: &str = "nft-1.0.0";
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub struct TokenMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_hash: Option<Base64VecU8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copies: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_hash: Option<Base64VecU8>,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub struct NftContractMetadata {
+    pub spec: String,
+    pub name: String,
+    pub symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_hash: Option<Base64VecU8>,
+}
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, PartialEq)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -169,27 +217,8 @@ pub struct SubAccountView {
 
 #[derive(Serialize)]
 #[serde(crate = "near_sdk::serde")]
-pub struct ListingView {
-    pub full_name: String,
-    pub price_yocto: U128,
-    pub settling: bool,
-}
-
-#[derive(Serialize)]
-#[serde(crate = "near_sdk::serde")]
-pub struct AcceptedOfferView {
-    pub full_name: String,
-    pub buyer: AccountId,
-    pub price_yocto: U128,
-    pub settling: bool,
-}
-
-#[derive(Serialize)]
-#[serde(crate = "near_sdk::serde")]
 pub struct SubAccountDetailView {
     pub sub_account: SubAccountView,
-    pub listing: Option<ListingView>,
-    pub accepted_offer: Option<AcceptedOfferView>,
     pub retraction_at: Option<U64>,
 }
 

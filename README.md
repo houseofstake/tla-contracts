@@ -146,7 +146,27 @@ one deploy runs at a time.
 promised. `migrate` carries pre-delay state forward and drops any approval pending at the time, so it
 has to be re-approved and serve the delay.
 
-`upgrade_self` is council only.
+Two things would otherwise let the delay be skipped, and both are closed in the contract.
+
+A full access key on the deployer account can publish with a `DeployGlobalContract` action and never
+touch `gd_approve`, because tenant wallets follow `use_global_contract_by_account_id` and the whole
+fleet moves the moment that account publishes. No contract can refuse a protocol action taken with its
+own account's key, but it can drop the key: `gd_delete_key` is council only and removes one from the
+deployer account.
+
+`upgrade_self` would have been the other way round it, since the council could install a build with no
+delay and publish immediately after. It now serves the same window as the code it governs, through
+`approve_self_upgrade` and then a wait, and the approval is spent by the upgrade it authorises.
+
+Together those make the window enforceable: once the keys are off, the only way to change the account
+is a governed upgrade that waits out the delay itself.
+
+There is deliberately no `locked` view. A contract cannot enumerate its own access keys, so a flag
+would assert something it cannot check. `view_access_key_list` on the deployer account is the signal,
+and an empty result is the proof.
+
+Keys are still present on testnet so the fleet can be iterated without waiting out the window. Removing
+them is a mainnet step, and until it happens the delay binds the contract path only.
 
 ## Trust boundaries
 

@@ -130,19 +130,6 @@ impl TlaRegistry {
         self.page_details(keys, from_index, limit)
     }
 
-    pub fn list_listings(&self, from_index: u64, limit: u64) -> Vec<ListingView> {
-        self.listings
-            .iter()
-            .skip(from_index as usize)
-            .take(limit as usize)
-            .map(|(key, listing)| ListingView {
-                full_name: key.clone(),
-                price_yocto: U128(listing.price),
-                settling: listing.settling,
-            })
-            .collect()
-    }
-
     pub fn list_recent_activity(
         &self,
         from_index: u64,
@@ -224,17 +211,6 @@ impl TlaRegistry {
                 &self.fee_config,
                 &self.clock(),
             ),
-            listing: self.listings.get(key).map(|l| ListingView {
-                full_name: key.to_string(),
-                price_yocto: U128(l.price),
-                settling: l.settling,
-            }),
-            accepted_offer: self.accepted_offers.get(key).map(|o| AcceptedOfferView {
-                full_name: key.to_string(),
-                buyer: o.buyer.clone(),
-                price_yocto: U128(o.price),
-                settling: o.settling,
-            }),
             retraction_at: sub.retraction_at.map(U64),
         })
     }

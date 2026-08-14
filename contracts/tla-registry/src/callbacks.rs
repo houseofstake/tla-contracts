@@ -35,6 +35,7 @@ impl TlaRegistry {
                     settlement.rent_yocto,
                     settlement.attached_yocto,
                 );
+                crate::nft::emit_nft_mint(&settlement.owner, &key);
                 self.emit_activity(Event::SubAccountRented {
                     full_name: key,
                     tla_id: settlement.tla_id,
@@ -66,6 +67,7 @@ impl TlaRegistry {
             Ok(MintOutcome::Active) => {
                 let expires_at =
                     self.record_paid_rental(&key, &settlement.payer, settlement.attached_yocto);
+                crate::nft::emit_nft_mint(&settlement.owner, &key);
                 self.emit_activity(Event::SubAccountRented {
                     full_name: key,
                     tla_id: settlement.tla_id,

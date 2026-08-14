@@ -1,61 +1,17 @@
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
-use crate::fees;
 use crate::interfaces::ext_hos_extension;
 use crate::lifecycle::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use hos_common::RotationCause;
-use near_sdk::json_types::U128;
-use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, near, AccountId, Gas, Promise, PromiseOrValue};
+use near_sdk::{env, near, AccountId, Gas, Promise};
 
-const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
-const GAS_FOR_SOLD_CALLBACK: Gas = Gas::from_tgas(20);
-const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(85);
-const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(20);
-
-#[derive(Serialize, Deserialize)]
-#[serde(crate = "near_sdk::serde")]
-pub struct PendingBuy {
-    pub tla_id: AccountId,
-    pub name: String,
-    pub buyer: AccountId,
-    pub price: U128,
-    pub deposit: U128,
-    pub sub_account: AccountId,
-}
+pub(crate) const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
+pub(crate) const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(20);
 
 #[near]
 impl TlaRegistry {
-    #[handle_result]
-    #[payable]
-    pub fn list_sub_account(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-        price: U128,
-    ) -> Result<(), ContractError> {
-        self.assert_marketplace_open()?;
-        let seller = self.assert_listable(&tla_id, &name, price)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.listings.insert(
-            key.clone(),
-            Listing {
-                price: price.0,
-                settling: false,
-                seller: seller.clone(),
-            },
-        );
-        self.emit_activity(Event::SubAccountListed {
-            full_name: key,
-            price_yocto: price,
-            seller,
-        });
-        Ok(())
-    }
-
     #[handle_result]
     #[payable]
     pub fn transfer_sub_account(
@@ -95,7 +51,6 @@ impl TlaRegistry {
         if self.reclaim_pending.contains_key(&key) {
             return Err(ContractError::ReclaimInProgress);
         }
-        self.assert_sale_idle(&key)?;
         let from = self
             .sub_accounts
             .get(&key)
@@ -153,8 +108,6 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        self.listings.remove(&key);
-        self.accepted_offers.remove(&key);
         self.emit_activity(Event::SubAccountRecovered {
             full_name: key,
             tla_id,
@@ -191,8 +144,6 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        self.listings.remove(&key);
-        self.accepted_offers.remove(&key);
         self.emit_activity(Event::SubAccountTransferred {
             full_name: key,
             tla_id,
@@ -201,345 +152,7 @@ impl TlaRegistry {
         });
     }
 
-    #[handle_result]
-    #[payable]
-    pub fn unlist_sub_account(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-    ) -> Result<(), ContractError> {
-        crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
-        validate_name(&name)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        if !self.listings.contains_key(&key) {
-            return Err(ContractError::NotListed);
-        }
-        let owner = self.sub_account_owner(&key)?;
-        if env::predecessor_account_id() != owner {
-            return Err(ContractError::OnlyOwner);
-        }
-        self.listings.remove(&key);
-        self.emit_activity(Event::SubAccountUnlisted {
-            full_name: key,
-            by: owner,
-        });
-        Ok(())
-    }
-
-    #[handle_result]
-    #[payable]
-    pub fn accept_offer(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-        buyer: AccountId,
-        price: U128,
-    ) -> Result<(), ContractError> {
-        self.assert_marketplace_open()?;
-        let seller = self.assert_listable(&tla_id, &name, price)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.accepted_offers.insert(
-            key.clone(),
-            AcceptedOffer {
-                buyer: buyer.clone(),
-                price: price.0,
-                settling: false,
-                seller: seller.clone(),
-            },
-        );
-        self.emit_activity(Event::OfferAccepted {
-            full_name: key,
-            buyer,
-            price_yocto: price,
-            seller,
-        });
-        Ok(())
-    }
-
-    #[handle_result]
-    #[payable]
-    pub fn revoke_offer(&mut self, tla_id: AccountId, name: String) -> Result<(), ContractError> {
-        crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
-        validate_name(&name)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        if !self.accepted_offers.contains_key(&key) {
-            return Err(ContractError::NoAcceptedOffer);
-        }
-        let owner = self.sub_account_owner(&key)?;
-        if env::predecessor_account_id() != owner {
-            return Err(ContractError::OnlyOwner);
-        }
-        self.accepted_offers.remove(&key);
-        self.emit_activity(Event::OfferRevoked {
-            full_name: key,
-            by: owner,
-        });
-        Ok(())
-    }
-
-    #[handle_result]
-    #[payable]
-    pub fn buy_sub_account(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-    ) -> Result<Promise, ContractError> {
-        self.assert_not_paused()?;
-        self.assert_marketplace_open()?;
-        validate_name(&name)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        self.assert_sellable(&key, &tla_id)?;
-        let buyer = env::predecessor_account_id();
-        let deposit = env::attached_deposit().as_yoctonear();
-        let price = self.resolve_and_lock_sale(&key, &buyer, deposit)?;
-        let sub_account: AccountId = key
-            .parse()
-            .map_err(|_| ContractError::InvalidSubAccountId)?;
-        let settlement = PendingBuy {
-            tla_id,
-            name,
-            buyer,
-            price: U128(price),
-            deposit: U128(deposit),
-            sub_account,
-        };
-        let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
-        let Some(chain) = ft_balance_fanout(&allowlist, &settlement.sub_account) else {
-            return Ok(settle_transfer(&self.hos_extension, settlement));
-        };
-        Ok(chain.then(
-            Self::ext(env::current_account_id())
-                .with_static_gas(GAS_FOR_BUY_BALANCES_CB)
-                .on_buy_balances_checked(settlement, allowlist),
-        ))
-    }
-
-    #[handle_result]
-    pub fn buy_sub_account_paid(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-        buyer: AccountId,
-    ) -> Result<PromiseOrValue<()>, ContractError> {
-        self.assert_not_paused()?;
-        self.assert_marketplace_open()?;
-        let operator = self.assert_payment_authority()?;
-        validate_name(&name)?;
-        let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        self.assert_sellable(&key, &tla_id)?;
-        let price = self.resolve_and_lock_paid_sale(&key, &buyer)?;
-        let sub_account: AccountId = key
-            .parse()
-            .map_err(|_| ContractError::InvalidSubAccountId)?;
-        let settlement = PendingBuy {
-            tla_id,
-            name,
-            buyer,
-            price: U128(price),
-            deposit: U128(0),
-            sub_account,
-        };
-        let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
-        let Some(chain) = ft_balance_fanout(&allowlist, &settlement.sub_account) else {
-            return Ok(PromiseOrValue::Promise(settle_transfer_paid(
-                &self.hos_extension,
-                settlement,
-                operator,
-            )));
-        };
-        Ok(PromiseOrValue::Promise(
-            chain.then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_FOR_BUY_BALANCES_CB)
-                    .on_buy_paid_balances_checked(settlement, allowlist, operator),
-            ),
-        ))
-    }
-
-    #[private]
-    pub fn on_sub_account_sold(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-        buyer: AccountId,
-        price: U128,
-        deposit: U128,
-        #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
-    ) {
-        let key = sub_account_key(&tla_id, &name);
-        if !matches!(swapped, Ok(true)) {
-            self.add_pending_refund(&buyer, deposit.0);
-            self.clear_settling(&key);
-            Event::SubAccountSaleFailed {
-                full_name: key,
-                buyer,
-            }
-            .emit();
-            return;
-        }
-        let seller = match self
-            .sub_accounts
-            .get(&key)
-            .map(|s| s.payout_account.clone())
-        {
-            Some(payout_account) => payout_account,
-            None => {
-                self.add_pending_refund(&buyer, deposit.0);
-                self.clear_settling(&key);
-                return;
-            }
-        };
-        let (commission, seller_proceeds) =
-            fees::split_resale(price.0, self.fee_config.resale_commission_bps);
-        self.total_revenue = self.total_revenue.saturating_add(commission);
-        self.add_pending_refund(&seller, seller_proceeds);
-        self.refund_excess(&buyer, deposit.0, price.0);
-        self.sub_account_reassign(&key, &buyer, &buyer);
-        self.listings.remove(&key);
-        self.accepted_offers.remove(&key);
-        self.emit_activity(Event::SubAccountSold {
-            full_name: key,
-            tla_id,
-            seller,
-            buyer,
-            price_yocto: price,
-            commission_yocto: U128(commission),
-            seller_proceeds_yocto: U128(seller_proceeds),
-        });
-    }
-
-    #[private]
-    pub fn on_sub_account_sold_paid(
-        &mut self,
-        tla_id: AccountId,
-        name: String,
-        buyer: AccountId,
-        operator: AccountId,
-        price: U128,
-        #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
-    ) {
-        let key = sub_account_key(&tla_id, &name);
-        if !matches!(swapped, Ok(true)) {
-            self.clear_settling(&key);
-            Event::SubAccountSaleFailed {
-                full_name: key,
-                buyer,
-            }
-            .emit();
-            return;
-        }
-        let seller = match self
-            .sub_accounts
-            .get(&key)
-            .map(|s| s.payout_account.clone())
-        {
-            Some(owner) => owner,
-            None => {
-                self.clear_settling(&key);
-                return;
-            }
-        };
-        self.sub_account_reassign(&key, &operator, &buyer);
-        self.listings.remove(&key);
-        self.accepted_offers.remove(&key);
-        self.emit_activity(Event::SubAccountSold {
-            full_name: key,
-            tla_id,
-            seller,
-            buyer,
-            price_yocto: price,
-            commission_yocto: U128(0),
-            seller_proceeds_yocto: U128(0),
-        });
-    }
-
-    #[private]
-    pub fn on_buy_balances_checked(
-        &mut self,
-        settlement: PendingBuy,
-        allowlist: Vec<AccountId>,
-    ) -> PromiseOrValue<()> {
-        let key = sub_account_key(&settlement.tla_id, &settlement.name);
-        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
-            return self.abort_sale(&key, &settlement, token, &reason);
-        }
-        PromiseOrValue::Promise(settle_transfer(&self.hos_extension, settlement))
-    }
-
-    #[private]
-    pub fn on_buy_paid_balances_checked(
-        &mut self,
-        settlement: PendingBuy,
-        allowlist: Vec<AccountId>,
-        operator: AccountId,
-    ) -> PromiseOrValue<()> {
-        let key = sub_account_key(&settlement.tla_id, &settlement.name);
-        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
-            self.clear_settling(&key);
-            Event::SubAccountSaleBlocked {
-                full_name: key,
-                token,
-                reason,
-            }
-            .emit();
-            return PromiseOrValue::Value(());
-        }
-        PromiseOrValue::Promise(settle_transfer_paid(
-            &self.hos_extension,
-            settlement,
-            operator,
-        ))
-    }
-
-    pub fn get_listing(&self, tla_id: AccountId, name: String) -> Option<ListingView> {
-        let key = sub_account_key(&tla_id, &name);
-        self.listings.get(&key).map(|l| ListingView {
-            full_name: key.clone(),
-            price_yocto: U128(l.price),
-            settling: l.settling,
-        })
-    }
-
-    pub fn get_accepted_offer(&self, tla_id: AccountId, name: String) -> Option<AcceptedOfferView> {
-        let key = sub_account_key(&tla_id, &name);
-        self.accepted_offers.get(&key).map(|o| AcceptedOfferView {
-            full_name: key.clone(),
-            buyer: o.buyer.clone(),
-            price_yocto: U128(o.price),
-            settling: o.settling,
-        })
-    }
-}
-
-impl TlaRegistry {
-    fn assert_listable(
-        &self,
-        tla_id: &AccountId,
-        name: &str,
-        price: U128,
-    ) -> Result<AccountId, ContractError> {
-        crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
-        validate_name(name)?;
-        if price.0 == 0 {
-            return Err(ContractError::InvalidPrice);
-        }
-        let key = sub_account_key(tla_id, name);
-        self.assert_sale_idle(&key)?;
-        let owner = self.assert_sellable(&key, tla_id)?;
-        if env::predecessor_account_id() != owner {
-            return Err(ContractError::OnlyOwner);
-        }
-        Ok(owner)
-    }
-
-    fn assert_transferable(
+    pub(crate) fn assert_transferable(
         &self,
         tla_id: &AccountId,
         name: &str,
@@ -552,7 +165,6 @@ impl TlaRegistry {
         if self.reclaim_pending.contains_key(&key) {
             return Err(ContractError::ReclaimInProgress);
         }
-        self.assert_sale_idle(&key)?;
         let owner = self.assert_sellable(&key, tla_id)?;
         if env::predecessor_account_id() != owner {
             return Err(ContractError::OnlyOwner);
@@ -569,21 +181,11 @@ impl TlaRegistry {
         Ok((sub_account, owner))
     }
 
-    pub(crate) fn assert_sale_idle(&self, key: &str) -> Result<(), ContractError> {
-        if let Some(listing) = self.listings.get(key) {
-            if listing.settling {
-                return Err(ContractError::SaleInProgress);
-            }
-        }
-        if let Some(offer) = self.accepted_offers.get(key) {
-            if offer.settling {
-                return Err(ContractError::SaleInProgress);
-            }
-        }
-        Ok(())
-    }
-
-    fn assert_sellable(&self, key: &str, tla_id: &AccountId) -> Result<AccountId, ContractError> {
+    pub(crate) fn assert_sellable(
+        &self,
+        key: &str,
+        tla_id: &AccountId,
+    ) -> Result<AccountId, ContractError> {
         if self.reclaim_pending.contains_key(key) {
             return Err(ContractError::ReclaimInProgress);
         }
@@ -617,145 +219,4 @@ impl TlaRegistry {
         }
         Ok(sub.owner.clone())
     }
-
-    fn sub_account_owner(&self, key: &str) -> Result<AccountId, ContractError> {
-        self.sub_accounts
-            .get(key)
-            .map(|s| s.owner.clone())
-            .ok_or(ContractError::SubAccountNotFound)
-    }
-
-    fn resolve_and_lock_sale(
-        &mut self,
-        key: &str,
-        buyer: &AccountId,
-        deposit: u128,
-    ) -> Result<u128, ContractError> {
-        let offer_terms = self
-            .accepted_offers
-            .get(key)
-            .map(|o| (o.buyer.clone(), o.price));
-        if let Some((offer_buyer, offer_price)) = offer_terms {
-            if &offer_buyer == buyer {
-                if deposit < offer_price {
-                    return Err(ContractError::PriceNotMet);
-                }
-                if let Some(offer) = self.accepted_offers.get_mut(key) {
-                    offer.settling = true;
-                }
-                return Ok(offer_price);
-            }
-        }
-        let listing_price = self.listings.get(key).map(|l| l.price);
-        if let Some(listing_price) = listing_price {
-            if deposit < listing_price {
-                return Err(ContractError::PriceNotMet);
-            }
-            if let Some(listing) = self.listings.get_mut(key) {
-                listing.settling = true;
-            }
-            return Ok(listing_price);
-        }
-        Err(ContractError::NotListed)
-    }
-
-    fn resolve_and_lock_paid_sale(
-        &mut self,
-        key: &str,
-        buyer: &AccountId,
-    ) -> Result<u128, ContractError> {
-        let offer_terms = self
-            .accepted_offers
-            .get(key)
-            .map(|o| (o.buyer.clone(), o.price));
-        if let Some((offer_buyer, offer_price)) = offer_terms {
-            if &offer_buyer == buyer {
-                if let Some(offer) = self.accepted_offers.get_mut(key) {
-                    offer.settling = true;
-                }
-                return Ok(offer_price);
-            }
-        }
-        let listing_price = self.listings.get(key).map(|l| l.price);
-        if let Some(listing_price) = listing_price {
-            if let Some(listing) = self.listings.get_mut(key) {
-                listing.settling = true;
-            }
-            return Ok(listing_price);
-        }
-        Err(ContractError::NotListed)
-    }
-
-    pub(crate) fn clear_settling(&mut self, key: &str) {
-        if let Some(listing) = self.listings.get_mut(key) {
-            listing.settling = false;
-        }
-        if let Some(offer) = self.accepted_offers.get_mut(key) {
-            offer.settling = false;
-        }
-    }
-
-    fn abort_sale(
-        &mut self,
-        key: &str,
-        settlement: &PendingBuy,
-        token: Option<AccountId>,
-        reason: &str,
-    ) -> PromiseOrValue<()> {
-        self.add_pending_refund(&settlement.buyer, settlement.deposit.0);
-        self.clear_settling(key);
-        Event::SubAccountSaleBlocked {
-            full_name: key.to_string(),
-            token,
-            reason: reason.to_string(),
-        }
-        .emit();
-        PromiseOrValue::Value(())
-    }
-}
-
-fn settle_transfer(hos_extension: &AccountId, settlement: PendingBuy) -> Promise {
-    ext_hos_extension::ext(hos_extension.clone())
-        .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-        .force_transfer(
-            settlement.sub_account.clone(),
-            Some(settlement.buyer.clone()),
-            RotationCause::Sale,
-        )
-        .then(
-            TlaRegistry::ext(env::current_account_id())
-                .with_static_gas(GAS_FOR_SOLD_CALLBACK)
-                .on_sub_account_sold(
-                    settlement.tla_id,
-                    settlement.name,
-                    settlement.buyer,
-                    settlement.price,
-                    settlement.deposit,
-                ),
-        )
-}
-
-fn settle_transfer_paid(
-    hos_extension: &AccountId,
-    settlement: PendingBuy,
-    operator: AccountId,
-) -> Promise {
-    ext_hos_extension::ext(hos_extension.clone())
-        .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-        .force_transfer(
-            settlement.sub_account.clone(),
-            Some(settlement.buyer.clone()),
-            RotationCause::Sale,
-        )
-        .then(
-            TlaRegistry::ext(env::current_account_id())
-                .with_static_gas(GAS_FOR_SOLD_CALLBACK)
-                .on_sub_account_sold_paid(
-                    settlement.tla_id,
-                    settlement.name,
-                    settlement.buyer,
-                    operator,
-                    settlement.price,
-                ),
-        )
 }

@@ -237,7 +237,7 @@ async fn rent(
 }
 
 #[tokio::test]
-async fn tla_registry_list_and_buy_rotates_wallet_owner() -> Result<()> {
+async fn nft_transfer_rotates_the_wallet_and_the_registry_together() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;
     let tla = fleet.registrar.id().clone();
@@ -245,56 +245,30 @@ async fn tla_registry_list_and_buy_rotates_wallet_owner() -> Result<()> {
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
     arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
 
-    let price = NearToken::from_near(1).as_yoctonear();
-    let listed = fleet
+    let moved = fleet
         .bob
-        .call(registry.id(), "list_sub_account")
+        .call(registry.id(), "nft_transfer")
         .args_json(json!({
-            "tla_id": tla,
-            "name": name,
-            "price": price.to_string(),
+            "receiver_id": fleet.relay.id(),
+            "token_id": token_id,
+            "approval_id": null,
+            "memo": null,
         }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
         .into_result()?;
-    if let Some(failure) = listed.receipt_failures().first() {
-        bail!("list receipt failed: {failure:?}");
-    }
-    let listing: serde_json::Value = registry
-        .view("get_listing")
-        .args_json(json!({ "tla_id": tla, "name": name }))
-        .await?
-        .json()?;
-    assert!(
-        !listing.is_null(),
-        "sub-account must be listed, got {listing}"
-    );
-
-    let bought = fleet
-        .relay
-        .call(registry.id(), "buy_sub_account")
-        .args_json(json!({
-            "tla_id": tla,
-            "name": name,
-        }))
-        .deposit(NearToken::from_yoctonear(
-            price + NearToken::from_millinear(100).as_yoctonear(),
-        ))
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-    if let Some(failure) = bought.receipt_failures().first() {
-        bail!("buy receipt failed: {failure:?}");
+    if let Some(failure) = moved.receipt_failures().first() {
+        bail!("nft_transfer receipt failed: {failure:?}");
     }
 
     assert_eq!(
         owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
         fleet.relay.id().as_str(),
-        "the owner extension must rotate to the buyer after sale"
+        "the owner extension must rotate to the receiver"
     );
     let sub: serde_json::Value = registry
         .view("get_sub_account")
@@ -304,7 +278,91 @@ async fn tla_registry_list_and_buy_rotates_wallet_owner() -> Result<()> {
     assert_eq!(
         sub["owner"],
         fleet.relay.id().as_str(),
-        "registry owner must become the buyer after sale"
+        "registry owner must follow the wallet rotation"
+    );
+    let token: serde_json::Value = registry
+        .view("nft_token")
+        .args_json(json!({ "token_id": token_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        token["owner_id"],
+        fleet.relay.id().as_str(),
+        "nft_token must report the receiver"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn nft_transfer_by_a_non_owner_moves_nothing() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
+
+    let attempt = fleet
+        .relay
+        .call(registry.id(), "nft_transfer")
+        .args_json(json!({
+            "receiver_id": fleet.relay.id(),
+            "token_id": token_id,
+            "approval_id": null,
+            "memo": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        attempt.into_result().is_err(),
+        "a stranger must not be able to move a name"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "the wallet must still name the original owner"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn nft_transfer_refuses_an_approval_id() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
+
+    let attempt = fleet
+        .bob
+        .call(registry.id(), "nft_transfer")
+        .args_json(json!({
+            "receiver_id": fleet.relay.id(),
+            "token_id": token_id,
+            "approval_id": 1u64,
+            "memo": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        attempt.into_result().is_err(),
+        "approvals are not implemented, so an approval_id must be refused rather than ignored"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a refused transfer must leave the wallet untouched"
     );
 
     Ok(())
@@ -325,51 +383,36 @@ async fn a_sale_pays_the_sellers_balance_out_with_the_name() -> Result<()> {
         .into_result()?;
     arm_transfer(&fleet, &tenant).await?;
 
-    let price = NearToken::from_near(1).as_yoctonear();
-    fleet
+    let held = balance_of(&fleet.worker, &tenant).await?;
+    let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
+
+    let moved = fleet
         .bob
-        .call(registry.id(), "list_sub_account")
+        .call(registry.id(), "nft_transfer")
         .args_json(json!({
-            "tla_id": tla,
-            "name": name,
-            "price": price.to_string(),
+            "receiver_id": fleet.relay.id(),
+            "token_id": format!("{name}.{tla}"),
+            "approval_id": null,
+            "memo": null,
         }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
         .into_result()?;
-
-    let held = balance_of(&fleet.worker, &tenant).await?;
-    let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
-
-    let bought = fleet
-        .relay
-        .call(registry.id(), "buy_sub_account")
-        .args_json(json!({
-            "tla_id": tla,
-            "name": name,
-        }))
-        .deposit(NearToken::from_yoctonear(
-            price + NearToken::from_millinear(100).as_yoctonear(),
-        ))
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-    if let Some(failure) = bought.receipt_failures().first() {
-        bail!("buy receipt failed: {failure:?}");
+    if let Some(failure) = moved.receipt_failures().first() {
+        bail!("nft_transfer receipt failed: {failure:?}");
     }
 
     let left = balance_of(&fleet.worker, &tenant).await?;
     assert!(
         left < NearToken::from_millinear(500).as_yoctonear(),
-        "the sold account must not carry the seller's funds to the buyer, found {left} yocto"
+        "the transferred account must not carry the seller's funds to the buyer, found {left} yocto"
     );
     let seller_after = balance_of(&fleet.worker, fleet.bob.id()).await?;
     assert!(
-        seller_after - seller_before > held - NearToken::from_millinear(500).as_yoctonear(),
-        "the seller must receive the account balance on top of the sale proceeds: \
+        seller_after > seller_before,
+        "the seller must receive the account balance on the way out: \
          {seller_before} -> {seller_after} with {held} yocto held"
     );
     Ok(())
@@ -546,37 +589,25 @@ async fn tla_registry_paged_views_serve_the_catalogue_without_an_indexer() -> Re
     .await?;
     assert_eq!(paged.len(), 1, "owner paging must respect from_index");
 
-    fleet
-        .bob
-        .call(registry.id(), "list_sub_account")
-        .args_json(json!({ "tla_id": tla, "name": "alice", "price": U128(900) }))
-        .deposit(NearToken::from_yoctonear(1))
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-
-    let listings: Vec<serde_json::Value> = registry
-        .view("list_listings")
-        .args_json(json!({ "from_index": 0, "limit": 10 }))
+    let tokens: Vec<serde_json::Value> = registry
+        .view("nft_tokens_for_owner")
+        .args_json(json!({ "account_id": owner, "from_index": null, "limit": null }))
         .await?
         .json()?;
-    assert_eq!(listings.len(), 1, "the listing must be enumerable");
-    assert_eq!(listings[0]["full_name"], format!("alice.{tla}"));
-
-    let page: Vec<serde_json::Value> = registry
-        .view("list_sub_accounts_by_owner")
-        .args_json(json!({ "owner": owner, "from_index": 0, "limit": 10 }))
-        .await?
-        .json()?;
-    let listed = page
-        .iter()
-        .find(|d| d["sub_account"]["full_name"] == format!("alice.{tla}"))
-        .expect("the listed name is still in the owner page");
     assert_eq!(
-        listed["listing"]["price_yocto"], "900",
-        "the page must carry the listing so no second view call is needed"
+        tokens.len(),
+        2,
+        "the owner's names must be enumerable as tokens"
     );
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t["token_id"] == format!("alice.{tla}")),
+        "nft_tokens_for_owner must carry the name"
+    );
+
+    let supply: serde_json::Value = registry.view("nft_total_supply").await?.json()?;
+    assert_eq!(supply, "2", "total supply must count every minted name");
 
     let scoped: Vec<serde_json::Value> = registry
         .view("list_recent_activity")
@@ -600,10 +631,10 @@ async fn tla_registry_paged_views_serve_the_catalogue_without_an_indexer() -> Re
         .await?
         .json()?;
     assert_eq!(
-        feed[0]["event"], "sub_account_listed",
+        feed[0]["event"], "sub_account_rented",
         "the feed is newest first"
     );
-    assert_eq!(feed[0]["account"], format!("alice.{tla}"));
+    assert_eq!(feed[0]["account"], format!("carol.{tla}"));
     assert_eq!(
         feed.iter()
             .filter(|e| e["event"] == "sub_account_rented")
