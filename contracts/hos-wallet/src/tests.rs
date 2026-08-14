@@ -237,6 +237,117 @@ fn a_granted_extension_cannot_pay_an_ungranted_receiver() {
 }
 
 #[test]
+fn a_revert_returns_the_name_to_where_it_came_from_without_a_fresh_arming() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    assert!(c.w_is_extension_enabled(acc(BUYER)));
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    assert!(c.w_is_extension_enabled(acc(OWNER)));
+    assert!(!c.w_is_extension_enabled(acc(BUYER)));
+}
+
+#[test]
+#[should_panic(expected = "only return the name to where it came from")]
+fn a_revert_cannot_send_the_name_to_a_third_party() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc("attacker.testnet")), RotationCause::Revert);
+}
+
+#[test]
+#[should_panic(expected = "no rotation to revert")]
+fn a_revert_cannot_run_without_a_rotation_to_undo() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+}
+
+#[test]
+#[should_panic(expected = "no rotation to revert")]
+fn a_revert_is_one_shot() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+}
+
+#[test]
+#[should_panic(expected = "revert window for this rotation has closed")]
+fn a_revert_expires_with_its_window() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    ctx(AUTHORITY, 1, now_ns() + HOUR_NS);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+}
+
+#[test]
+#[should_panic(expected = "the owner has not authorised a transfer")]
+fn a_revert_does_not_leave_the_wallet_armed_for_a_further_move() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+}
+
+#[test]
+#[should_panic(expected = "only return the name to where it came from")]
+fn a_revert_reaches_only_the_previous_hop_not_further_back() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    ctx(BUYER, 1, now_ns());
+    c.hos_arm_transfer(true);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc("carol.testnet")), RotationCause::Transfer);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+}
+
+#[test]
+#[should_panic(expected = "receiver must not be this account")]
+fn a_rotation_cannot_target_the_wallet_account() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(WALLET)), RotationCause::Transfer);
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority")]
+fn the_owner_cannot_rotate_the_wallet_directly() {
+    let mut c = deploy();
+    arm(&mut c);
+    ctx(OWNER, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority")]
+fn a_granted_extension_cannot_rotate_the_wallet() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Revert);
+}
+
+#[test]
 #[should_panic(expected = "cannot redirect refunds")]
 fn a_granted_extension_cannot_redirect_refunds_past_the_allowlist() {
     let mut c = deploy();

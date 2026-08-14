@@ -28,6 +28,9 @@ const IMPL_VERSION: u32 = 3;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
+/// A revert exists to undo the rotation it follows inside one promise chain,
+/// so the window is minutes rather than open ended.
+const REVERT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 #[ext_contract(ext_ft)]
@@ -135,6 +138,8 @@ pub struct TenantWallet {
     authority_freeze_until_ns: u64,
     transfer_armed: bool,
     spend_grants: BTreeMap<AccountId, SpendGrant>,
+    revert_to: Option<AccountId>,
+    revert_until_ns: u64,
 }
 
 #[near]
@@ -238,6 +243,8 @@ impl TenantWallet {
             authority_freeze_until_ns: 0,
             transfer_armed: false,
             spend_grants: BTreeMap::new(),
+            revert_to: None,
+            revert_until_ns: 0,
         }
     }
 
@@ -263,6 +270,8 @@ impl TenantWallet {
             authority_freeze_until_ns: old.authority_freeze_until_ns,
             transfer_armed: false,
             spend_grants: BTreeMap::new(),
+            revert_to: None,
+            revert_until_ns: 0,
         }
     }
 
@@ -397,8 +406,24 @@ impl TenantWallet {
     #[payable]
     pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause) {
         self.assert_authority();
-        if !self.lease_expired() {
-            require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+        let previous_owner = self.owner.clone();
+        if matches!(cause, RotationCause::Revert) {
+            let pinned = self
+                .revert_to
+                .take()
+                .unwrap_or_else(|| env::panic_str(error::NOTHING_TO_REVERT));
+            require!(
+                env::block_timestamp() < self.revert_until_ns,
+                error::REVERT_WINDOW_CLOSED
+            );
+            require!(to.as_ref() == Some(&pinned), error::REVERT_TARGET_PINNED);
+            self.revert_until_ns = 0;
+        } else {
+            if !self.lease_expired() {
+                require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+            }
+            self.revert_to = Some(previous_owner);
+            self.revert_until_ns = env::block_timestamp().saturating_add(REVERT_WINDOW_NS);
         }
         self.transfer_armed = false;
         self.spend_grants.clear();

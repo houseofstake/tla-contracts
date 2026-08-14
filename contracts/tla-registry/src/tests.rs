@@ -125,6 +125,18 @@ fn rent_alice_sub(c: &mut TlaRegistry, name: &str) {
     );
 }
 
+fn settle_transfer(c: &mut TlaRegistry, name: &str, from: &str, to: &str) {
+    ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+    c.nft_on_rotation_resolved(
+        acc(TLA),
+        name.to_string(),
+        acc(from),
+        acc(to),
+        None,
+        Ok(true),
+    );
+}
+
 mod names {
     use super::*;
 
@@ -619,6 +631,53 @@ mod marketplace {
         assert!(matches!(
             c.cancel_retraction(acc(TLA), "ali.ce".to_string()),
             Err(ContractError::InvalidName { .. })
+        ));
+    }
+
+    #[test]
+    fn a_resolve_does_not_claw_a_name_back_from_a_third_party() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+        settle_transfer(&mut c, "alice", ALICE, BOB);
+        settle_transfer(&mut c, "alice", BOB, CAROL);
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let outcome = c.nft_resolve_transfer(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert!(
+            matches!(outcome, near_sdk::PromiseOrValue::Value(true)),
+            "a receiver that moved the name on must not be able to revert it away from its new holder"
+        );
+        assert_eq!(
+            c.nft_token(key).unwrap().owner_id,
+            acc(CAROL),
+            "the third party keeps the name"
+        );
+    }
+
+    #[test]
+    fn a_co_owner_cannot_sell_a_name_they_do_not_own() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(BOB, 1, 2);
+        assert!(matches!(
+            c.nft_transfer(acc(BOB), format!("alice.{TLA}"), None, None),
+            Err(ContractError::OnlyOwner)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_token_id_is_refused_before_any_rotation() {
+        let mut c = deploy_with_open_tla();
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.nft_transfer(acc(BOB), format!("ghost.{TLA}"), None, None),
+            Err(ContractError::TokenNotFound)
         ));
     }
 
@@ -1645,19 +1704,33 @@ mod marketplace_pause {
     }
 
     #[test]
-    fn a_paused_marketplace_refuses_an_nft_transfer() {
+    fn a_paused_marketplace_refuses_entry_into_custody() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.nft_transfer(acc(BOB), format!("alice.{TLA}"), None, None),
+            c.nft_transfer_call(acc(BOB), format!("alice.{TLA}"), None, None, String::new()),
             Err(ContractError::MarketplacePaused)
         ));
     }
 
     #[test]
-    fn a_paused_marketplace_still_refuses_the_legacy_transfer_path() {
+    fn a_paused_marketplace_never_traps_a_name_in_custody() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        settle_transfer(&mut c, "alice", ALICE, BOB);
+        pause_market(&mut c);
+        ctx(BOB, 1, 2);
+        assert!(
+            c.nft_transfer(acc(ALICE), format!("alice.{TLA}"), None, None)
+                .is_ok(),
+            "a market pause must never block the exit, or a custodian cannot return a name"
+        );
+    }
+
+    #[test]
+    fn a_paused_marketplace_still_allows_a_direct_transfer() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
@@ -1667,6 +1740,19 @@ mod marketplace_pause {
                 .is_ok(),
             "the registry pause, not the market pause, gates a direct transfer"
         );
+    }
+
+    #[test]
+    fn the_registry_pause_stops_every_path_including_the_exit() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ADMIN, 0, 2);
+        c.pause().unwrap();
+        ctx(ALICE, 1, 3);
+        assert!(matches!(
+            c.nft_transfer(acc(BOB), format!("alice.{TLA}"), None, None),
+            Err(ContractError::Paused)
+        ));
     }
 
     #[test]
@@ -1889,18 +1975,6 @@ mod paged_views {
         names(c.list_sub_accounts_by_owner(acc(who), 0, 100))
     }
 
-    fn settle_transfer(c: &mut TlaRegistry, name: &str, from: &str, to: &str) {
-        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.nft_on_rotation_resolved(
-            acc(TLA),
-            name.to_string(),
-            acc(from),
-            acc(to),
-            None,
-            Ok(true),
-        );
-    }
-
     #[test]
     fn sub_accounts_page_and_carry_their_name_and_tla() {
         let mut c = deploy_with_open_tla();
@@ -1942,6 +2016,24 @@ mod paged_views {
         assert_eq!(c.nft_tokens(None, Some(1)).len(), 1);
         assert_eq!(c.nft_tokens(Some(U128(1)), Some(10)).len(), 1);
         assert_eq!(c.nft_tokens(Some(U128(2)), Some(10)).len(), 0);
+    }
+
+    #[test]
+    fn token_enumeration_refuses_an_unbounded_scan() {
+        let mut c = deploy_with_open_tla();
+        for i in 0..3 {
+            rent_alice_sub(&mut c, &format!("name{i}"));
+        }
+        assert_eq!(
+            c.nft_tokens(None, Some(u64::MAX)).len(),
+            3,
+            "an oversized limit is clamped, not honoured"
+        );
+        assert_eq!(
+            c.nft_tokens_for_owner(acc(ALICE), None, Some(u64::MAX))
+                .len(),
+            3
+        );
     }
 
     #[test]

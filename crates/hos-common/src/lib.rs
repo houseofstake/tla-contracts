@@ -40,20 +40,27 @@ pub enum RotationCause {
     ReRent,
     Reclaim,
     Recovery,
+    /// Undoes the rotation immediately preceding it, and nothing else. The
+    /// wallet pins the destination to the account the name just left and
+    /// refuses anything older or elsewhere.
+    Revert,
 }
 
 impl RotationCause {
     pub fn parks(self) -> bool {
         match self {
             Self::Reclaim => true,
-            Self::Sale | Self::Transfer | Self::ReRent | Self::Recovery => false,
+            Self::Sale | Self::Transfer | Self::ReRent | Self::Recovery | Self::Revert => false,
         }
     }
 
+    /// A revert must not sweep. The rotation it undoes already swept the
+    /// balance to the outgoing payout account, and sweeping again would empty
+    /// the account on its way back to the owner who never let go of it.
     pub fn sweeps(self) -> bool {
         match self {
             Self::Sale | Self::Transfer | Self::ReRent | Self::Reclaim => true,
-            Self::Recovery => false,
+            Self::Recovery | Self::Revert => false,
         }
     }
 }

@@ -12,10 +12,14 @@ use near_sdk::{
     env, ext_contract, near, AccountId, FunctionError, Gas, Promise, PromiseError, PromiseOrValue,
 };
 
+/// A caller may not ask for an unbounded scan of the collection.
+const MAX_ENUMERATION_LIMIT: u64 = 100;
 const EVENT_STANDARD: &str = "nep171";
 const EVENT_VERSION: &str = "1.0.0";
 const GAS_FOR_NFT_ON_TRANSFER: Gas = Gas::from_tgas(25);
-const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas::from_tgas(25);
+/// Must fund the return rotation it may schedule: a force_transfer plus its
+/// callback, not just its own execution.
+const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas::from_tgas(80);
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(crate = "near_sdk::serde")]
@@ -119,6 +123,10 @@ impl TlaRegistry {
         memo: Option<String>,
         msg: String,
     ) -> Result<Promise, ContractError> {
+        // A market pause closes the entrance, never the exit. Handing a name to
+        // a receiver is how it enters custody; taking it back out is a plain
+        // nft_transfer, which stays open so a pause can never strand it there.
+        self.assert_marketplace_open()?;
         let (tla_id, name, from, sub_account) =
             self.open_nft_transfer(&receiver_id, &token_id, approval_id)?;
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
@@ -213,7 +221,7 @@ impl TlaRegistry {
         PromiseOrValue::Promise(
             ext_hos_extension::ext(self.hos_extension.clone())
                 .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-                .force_transfer(sub_account, Some(from.clone()), RotationCause::Transfer)
+                .force_transfer(sub_account, Some(from.clone()), RotationCause::Revert)
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
@@ -222,6 +230,9 @@ impl TlaRegistry {
         )
     }
 
+    /// The forward transfer already happened and was reported, so a failed
+    /// give-back cannot be undone by panicking here. Record it instead, or the
+    /// only evidence that a name is stuck with a receiver is lost.
     #[private]
     pub fn nft_on_return_resolved(
         &mut self,
@@ -231,7 +242,23 @@ impl TlaRegistry {
         to: AccountId,
         #[callback_result] swapped: Result<bool, PromiseError>,
     ) -> bool {
-        self.commit_nft_rotation(&tla_id, &name, &from, &to, None, swapped);
+        let key = sub_account_key(&tla_id, &name);
+        if !matches!(swapped, Ok(true)) || !self.sub_account_reassign(&key, &to, &to) {
+            Event::TransferFailed {
+                full_name: key,
+                from,
+                to,
+            }
+            .emit();
+            return false;
+        }
+        emit_nft_transfer(&from, &to, &key, None);
+        self.emit_activity(Event::SubAccountTransferred {
+            full_name: key,
+            tla_id,
+            from,
+            to,
+        });
         false
     }
 
@@ -283,7 +310,11 @@ impl TlaRegistry {
         U128(
             self.sub_accounts_by_owner
                 .get(&account_id)
-                .map_or(0, |keys| u128::from(keys.len())),
+                .map_or(0, |keys| {
+                    keys.iter()
+                        .filter(|key| self.sub_accounts.contains_key(*key))
+                        .count() as u128
+                }),
         )
     }
 
@@ -292,7 +323,11 @@ impl TlaRegistry {
         self.sub_accounts
             .iter()
             .skip(start)
-            .take(limit.unwrap_or(u64::MAX) as usize)
+            .take(
+                limit
+                    .unwrap_or(MAX_ENUMERATION_LIMIT)
+                    .min(MAX_ENUMERATION_LIMIT) as usize,
+            )
             .map(|(key, sub)| Token {
                 token_id: key.clone(),
                 owner_id: sub.owner.clone(),
@@ -313,7 +348,11 @@ impl TlaRegistry {
         let start = from_index.map_or(0, |i| i.0 as usize);
         keys.iter()
             .skip(start)
-            .take(limit.unwrap_or(u64::MAX) as usize)
+            .take(
+                limit
+                    .unwrap_or(MAX_ENUMERATION_LIMIT)
+                    .min(MAX_ENUMERATION_LIMIT) as usize,
+            )
             .filter_map(|key| {
                 let sub = self.sub_accounts.get(key)?;
                 Some(Token {
@@ -336,7 +375,6 @@ impl TlaRegistry {
         if approval_id.is_some() {
             return Err(ContractError::ApprovalsNotSupported);
         }
-        self.assert_marketplace_open()?;
         let (tla_id, name) = self.split_token_id(token_id)?;
         let (sub_account, from) = self.assert_transferable(&tla_id, &name, receiver_id)?;
         Ok((tla_id, name, from, sub_account))

@@ -331,6 +331,137 @@ async fn nft_transfer_by_a_non_owner_moves_nothing() -> Result<()> {
     Ok(())
 }
 
+async fn deploy_receiver(fleet: &Fleet) -> Result<Contract> {
+    let account = fleet
+        .relay
+        .create_subaccount("receiver")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?
+        .into_result()?;
+    let receiver = account.deploy(&wasm("test_dapp")).await?.into_result()?;
+    receiver
+        .call("new")
+        .args_json(json!({ "token": fleet.relay.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(receiver)
+}
+
+async fn transfer_call(
+    fleet: &Fleet,
+    registry: &Contract,
+    receiver: &Contract,
+    token_id: &str,
+    msg: &str,
+) -> Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(fleet
+        .bob
+        .call(registry.id(), "nft_transfer_call")
+        .args_json(json!({
+            "receiver_id": receiver.id(),
+            "token_id": token_id,
+            "approval_id": null,
+            "memo": null,
+            "msg": msg,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+#[tokio::test]
+async fn nft_transfer_call_leaves_the_name_with_a_receiver_that_keeps_it() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let receiver = deploy_receiver(&fleet).await?;
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
+
+    let out = transfer_call(&fleet, &registry, &receiver, &token_id, "keep").await?;
+    let out = out.into_result()?;
+    if let Some(failure) = out.receipt_failures().first() {
+        bail!("transfer_call receipt failed: {failure:?}");
+    }
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        receiver.id().as_str(),
+        "a receiver that keeps the token must hold the wallet"
+    );
+    let token: serde_json::Value = registry
+        .view("nft_token")
+        .args_json(json!({ "token_id": token_id }))
+        .await?
+        .json()?;
+    assert_eq!(token["owner_id"], receiver.id().as_str());
+    Ok(())
+}
+
+#[tokio::test]
+async fn nft_transfer_call_returns_the_name_when_the_receiver_refuses_it() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let receiver = deploy_receiver(&fleet).await?;
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
+
+    transfer_call(&fleet, &registry, &receiver, &token_id, "return")
+        .await?
+        .into_result()?;
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a refused token must be rotated back to the original owner"
+    );
+    let token: serde_json::Value = registry
+        .view("nft_token")
+        .args_json(json!({ "token_id": token_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        token["owner_id"],
+        fleet.bob.id().as_str(),
+        "the registry must follow the rotation back"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn nft_transfer_call_returns_the_name_when_the_receiver_panics() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let receiver = deploy_receiver(&fleet).await?;
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    arm_transfer(&fleet, &tenant).await?;
+    let token_id = format!("{name}.{tla}");
+
+    transfer_call(&fleet, &registry, &receiver, &token_id, "panic")
+        .await?
+        .into_result()?;
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a receiver that panics must not keep the name"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn nft_transfer_refuses_an_approval_id() -> Result<()> {
     let fleet = deploy_fleet().await?;
