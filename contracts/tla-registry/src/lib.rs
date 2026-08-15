@@ -117,6 +117,8 @@ pub struct TlaRegistry {
     pub(crate) suspended_until: LookupMap<AccountId, u64>,
     pub(crate) token_metadata: LookupMap<String, TokenMetadata>,
     pub(crate) nft_contract_metadata: Option<NftContractMetadata>,
+    pub(crate) approved_code_hash: Option<[u8; 32]>,
+    pub(crate) approved_at: Option<u64>,
 }
 
 #[near(serializers = [borsh])]
@@ -218,6 +220,8 @@ impl TlaRegistry {
             suspended_until: LookupMap::new(StorageKey::SuspendedUntil),
             token_metadata: LookupMap::new(StorageKey::TokenMetadataStore),
             nft_contract_metadata: None,
+            approved_code_hash: None,
+            approved_at: None,
         }
     }
 
@@ -265,6 +269,8 @@ impl TlaRegistry {
             suspended_until: old.suspended_until,
             token_metadata: LookupMap::new(StorageKey::TokenMetadataStore),
             nft_contract_metadata: None,
+            approved_code_hash: None,
+            approved_at: None,
         }
     }
 

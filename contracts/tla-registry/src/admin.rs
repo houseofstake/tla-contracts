@@ -352,3 +352,58 @@ impl TlaRegistry {
         Ok(())
     }
 }
+
+pub(crate) const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
+
+#[near]
+impl TlaRegistry {
+    #[payable]
+    #[handle_result]
+    pub fn approve_upgrade(
+        &mut self,
+        code_hash: near_sdk::json_types::Base58CryptoHash,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        self.approved_code_hash = Some(code_hash.into());
+        self.approved_at = Some(env::block_timestamp());
+        Event::UpgradeApproved {
+            hash: (&code_hash).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn upgrade(&mut self, code: Vec<u8>) -> Result<near_sdk::Promise, ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if code.is_empty() {
+            return Err(ContractError::EmptyCode);
+        }
+        let approved = self
+            .approved_code_hash
+            .ok_or(ContractError::NoApprovedHash)?;
+        if env::sha256_array(&code) != approved {
+            return Err(ContractError::HashMismatch);
+        }
+        let approved_at = self.approved_at.ok_or(ContractError::NoApprovedHash)?;
+        if env::block_timestamp() < approved_at.saturating_add(UPGRADE_DELAY_NS) {
+            return Err(ContractError::ApprovalTooYoung);
+        }
+        self.approved_code_hash = None;
+        self.approved_at = None;
+        Event::Upgraded {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(near_sdk::Promise::new(env::current_account_id()).deploy_contract(code))
+    }
+
+    pub fn approved_upgrade_hash(&self) -> Option<near_sdk::json_types::Base58CryptoHash> {
+        self.approved_code_hash
+            .map(near_sdk::json_types::Base58CryptoHash::from)
+    }
+}

@@ -161,6 +161,10 @@ pub enum Event {
     SubAccountRetractionCanceled { full_name: String, by: AccountId },
     #[event_version("1.0.0")]
     ReclaimPendingCleared { full_name: String, by: AccountId },
+    #[event_version("1.0.0")]
+    UpgradeApproved { hash: String, by: AccountId },
+    #[event_version("1.0.0")]
+    Upgraded { by: AccountId },
 }
 
 impl Event {

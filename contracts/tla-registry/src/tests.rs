@@ -2358,3 +2358,72 @@ mod migration {
         assert!(!old.paused);
     }
 }
+
+mod keyless_upgrade {
+    use super::*;
+    use crate::admin::UPGRADE_DELAY_NS;
+    use near_sdk::json_types::Base58CryptoHash;
+
+    fn code() -> Vec<u8> {
+        vec![7u8; 32]
+    }
+
+    fn hash() -> Base58CryptoHash {
+        Base58CryptoHash::from(near_sdk::env::sha256_array(code()))
+    }
+
+    #[test]
+    fn the_council_can_ship_code_without_any_key_on_the_account() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.approve_upgrade(hash()).unwrap();
+        assert_eq!(c.approved_upgrade_hash(), Some(hash()));
+        ctx(COUNCIL, 1, UPGRADE_DELAY_NS + 1);
+        assert!(c.upgrade(code()).is_ok());
+        assert_eq!(c.approved_upgrade_hash(), None, "an approval is spent once");
+    }
+
+    #[test]
+    fn nobody_but_the_council_may_approve() {
+        let mut c = deploy();
+        ctx(ALICE, 1, 0);
+        assert!(matches!(
+            c.approve_upgrade(hash()),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn code_that_does_not_match_the_approval_is_refused() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.approve_upgrade(hash()).unwrap();
+        ctx(COUNCIL, 1, UPGRADE_DELAY_NS + 1);
+        assert!(matches!(
+            c.upgrade(vec![9u8; 32]),
+            Err(ContractError::HashMismatch)
+        ));
+    }
+
+    #[test]
+    fn an_approval_must_serve_the_delay() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.approve_upgrade(hash()).unwrap();
+        ctx(COUNCIL, 1, UPGRADE_DELAY_NS - 1);
+        assert!(matches!(
+            c.upgrade(code()),
+            Err(ContractError::ApprovalTooYoung)
+        ));
+    }
+
+    #[test]
+    fn upgrading_without_an_approval_is_refused() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, UPGRADE_DELAY_NS + 1);
+        assert!(matches!(
+            c.upgrade(code()),
+            Err(ContractError::NoApprovedHash)
+        ));
+    }
+}
