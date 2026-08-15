@@ -276,9 +276,11 @@ impl TlaRegistry {
         if self.ft_allowlist.contains(&token) {
             return Ok(());
         }
-        if self.ft_allowlist.len() >= MAX_ALLOWLIST_SIZE
-            || self.sweepable_tokens.len() >= MAX_SWEEPABLE_SIZE
-        {
+        if self.ft_allowlist.len() >= MAX_ALLOWLIST_SIZE {
+            return Err(ContractError::AllowlistFull);
+        }
+        let widens_sweep = !self.sweepable_tokens.contains(&token);
+        if widens_sweep && self.sweepable_tokens.len() >= MAX_SWEEPABLE_SIZE {
             return Err(ContractError::AllowlistFull);
         }
         self.ft_allowlist.insert(token.clone());

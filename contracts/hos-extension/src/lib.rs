@@ -215,7 +215,6 @@ impl HosExtension {
 
     #[payable]
     #[handle_result]
-    #[handle_result]
     pub fn approve_upgrade(&mut self, code_hash: Base58CryptoHash) -> Result<(), ContractError> {
         self.assert_one_yocto()?;
         self.assert_council()?;

@@ -531,7 +531,7 @@ async fn spending_cannot_drain_the_storage_reserve() -> Result<()> {
     Ok(())
 }
 
-/// The custodial chain the product actually runs: a relay account owns a
+/// The relay chain the product actually runs: a relay account owns a
 /// provider wallet, that provider wallet owns the user's leased name, and the
 /// relay drives both hops through the standard extension entrypoint. No key
 /// exists at any level.
@@ -592,7 +592,7 @@ async fn a_relay_drives_a_users_lease_through_the_provider_account_it_owns() -> 
         .await?;
     assert!(
         outcome.is_success(),
-        "the custodial two-hop failed: {outcome:#?}"
+        "the relay two-hop failed: {outcome:#?}"
     );
     if let Some(failure) = outcome.receipt_failures().first() {
         panic!("a receipt in the two-hop chain failed: {failure:?}");
@@ -603,6 +603,6 @@ async fn a_relay_drives_a_users_lease_through_the_provider_account_it_owns() -> 
         "the leased name did not pay out through the provider wallet"
     );
 
-    println!("CUSTODIAL CHAIN: relay -> provider wallet -> leased name, zero keys involved");
+    println!("RELAY CHAIN: relay -> provider wallet -> leased name, zero keys involved");
     Ok(())
 }

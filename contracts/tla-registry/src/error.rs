@@ -67,7 +67,6 @@ pub enum ContractError {
     BusinessSubNotResellable,
     InvalidCommissionRate,
     ApprovalsNotSupported,
-    NftMetadataNotSet,
     TokenNotFound,
     RotationNotConfirmed,
     OwnerIndexOutOfSync,

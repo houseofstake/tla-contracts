@@ -14,5 +14,7 @@ pub enum Event {
     #[event_version("1.0.0")]
     MinBalanceSet { min_balance: NearToken },
     #[event_version("1.0.0")]
+    UpgradeApproved { hash: String, by: AccountId },
+    #[event_version("1.0.0")]
     SelfUpgraded {},
 }

@@ -1114,6 +1114,29 @@ mod refunds_and_admin {
     }
 
     #[test]
+    fn relisting_a_token_never_exhausts_the_sweep_ceiling() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 1);
+        let token = acc("usdc.testnet");
+        for _ in 0..200 {
+            ctx(ADMIN, 0, 1);
+            c.add_ft_allowlist(token.clone()).unwrap();
+            c.remove_ft_allowlist(token.clone()).unwrap();
+        }
+        ctx(ADMIN, 0, 1);
+        c.add_ft_allowlist(token.clone()).unwrap();
+        assert_eq!(
+            c.get_ft_allowlist(),
+            vec![token],
+            "a token already known to the sweeper must be re-listable forever"
+        );
+        assert!(
+            c.add_ft_allowlist(acc("other.testnet")).is_ok(),
+            "and churning one token must not consume another's capacity"
+        );
+    }
+
+    #[test]
     fn fee_config_guards() {
         let mut c = deploy();
         ctx(ADMIN, 0, 1);
@@ -1713,7 +1736,7 @@ mod marketplace_pause {
     }
 
     #[test]
-    fn a_paused_marketplace_refuses_entry_into_custody() {
+    fn a_paused_marketplace_refuses_a_new_deposit() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
@@ -1725,7 +1748,7 @@ mod marketplace_pause {
     }
 
     #[test]
-    fn a_paused_marketplace_never_traps_a_name_in_custody() {
+    fn a_paused_marketplace_never_traps_a_deposited_name() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         settle_transfer(&mut c, "alice", ALICE, BOB);
@@ -1734,7 +1757,7 @@ mod marketplace_pause {
         assert!(
             c.nft_transfer(acc(ALICE), format!("alice.{TLA}"), None, None)
                 .is_ok(),
-            "a market pause must never block the exit, or a custodian cannot return a name"
+            "a market pause must never block the exit, or a holder cannot return a name"
         );
     }
 
@@ -2042,6 +2065,90 @@ mod paged_views {
             c.nft_tokens_for_owner(acc(ALICE), None, Some(u64::MAX))
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn the_collection_answers_nep177_from_the_moment_it_exists() {
+        let c = deploy_with_open_tla();
+        let meta = c.nft_metadata();
+        assert_eq!(
+            meta.spec, NFT_SPEC,
+            "a wallet that validates the spec must accept it"
+        );
+        assert!(!meta.name.is_empty(), "a nameless collection is skipped");
+        assert!(!meta.symbol.is_empty());
+    }
+
+    #[test]
+    fn admin_branding_replaces_the_placeholder() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 1);
+        c.admin_set_nft_metadata(
+            "collection".to_string(),
+            "sym".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let meta = c.nft_metadata();
+        assert_eq!(meta.name, "collection");
+        assert_eq!(meta.symbol, "sym");
+        assert_eq!(meta.spec, NFT_SPEC, "the spec is not the admin's to change");
+    }
+
+    #[test]
+    fn every_token_carries_metadata_a_wallet_can_render() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+
+        let token = c.nft_token(key.clone()).unwrap();
+        let meta = token.metadata.expect("a nameless token renders blank");
+        assert_eq!(
+            meta.title,
+            Some(key.clone()),
+            "the title is the name itself"
+        );
+        assert_eq!(meta.copies, Some(1), "each name is one of one");
+
+        let extra: near_sdk::serde_json::Value =
+            near_sdk::serde_json::from_str(&meta.extra.expect("lease timing travels in extra"))
+                .unwrap();
+        let sub = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        assert_eq!(extra["expires_at"], sub.expires_at.0.to_string());
+
+        for listed in [
+            c.nft_tokens(None, None),
+            c.nft_tokens_for_owner(acc(ALICE), None, None),
+        ] {
+            assert!(
+                listed.iter().all(|t| t.metadata.is_some()),
+                "enumeration must carry the same metadata a single read does"
+            );
+        }
+    }
+
+    #[test]
+    fn token_metadata_follows_a_renewal_rather_than_going_stale() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+        let before = c.nft_token(key.clone()).unwrap().metadata.unwrap().extra;
+
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(ALICE, rent, 2);
+        let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+
+        let after = c.nft_token(key).unwrap().metadata.unwrap().extra;
+        assert_ne!(
+            before, after,
+            "expiry is derived on read, so a renewal shows up without a write"
         );
     }
 

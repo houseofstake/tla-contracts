@@ -123,7 +123,7 @@ impl TlaRegistry {
         msg: String,
     ) -> Result<Promise, ContractError> {
         // A market pause closes the entrance, never the exit. Handing a name to
-        // a receiver is how it enters custody; taking it back out is a plain
+        // a receiver is how it is deposited; taking it back out is a plain
         // nft_transfer, which stays open so a pause can never strand it there.
         self.assert_marketplace_open()?;
         let (tla_id, name, from, sub_account) =
@@ -264,18 +264,11 @@ impl TlaRegistry {
 
     pub fn nft_token(&self, token_id: String) -> Option<Token> {
         let sub = self.sub_accounts.get(&token_id)?;
-        Some(Token {
-            token_id: token_id.clone(),
-            owner_id: sub.owner.clone(),
-            metadata: self.token_metadata.get(&token_id).cloned(),
-        })
+        Some(token_of(&token_id, sub))
     }
 
-    #[handle_result]
-    pub fn nft_metadata(&self) -> Result<NftContractMetadata, ContractError> {
-        self.nft_contract_metadata
-            .clone()
-            .ok_or(ContractError::NftMetadataNotSet)
+    pub fn nft_metadata(&self) -> NftContractMetadata {
+        self.nft_contract_metadata.clone()
     }
 
     #[handle_result]
@@ -290,7 +283,7 @@ impl TlaRegistry {
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_admin()?;
-        self.nft_contract_metadata = Some(NftContractMetadata {
+        self.nft_contract_metadata = NftContractMetadata {
             spec: NFT_SPEC.to_string(),
             name,
             symbol,
@@ -298,7 +291,7 @@ impl TlaRegistry {
             base_uri,
             reference,
             reference_hash: None,
-        });
+        };
         Ok(())
     }
 
@@ -324,11 +317,7 @@ impl TlaRegistry {
             .iter()
             .skip(start)
             .take(limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT) as usize)
-            .map(|(key, sub)| Token {
-                token_id: key.clone(),
-                owner_id: sub.owner.clone(),
-                metadata: self.token_metadata.get(key).cloned(),
-            })
+            .map(|(key, sub)| token_of(key, sub))
             .collect()
     }
 
@@ -345,15 +334,48 @@ impl TlaRegistry {
         keys.iter()
             .skip(start)
             .take(limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT) as usize)
-            .filter_map(|key| {
-                let sub = self.sub_accounts.get(key)?;
-                Some(Token {
-                    token_id: key.clone(),
-                    owner_id: sub.owner.clone(),
-                    metadata: self.token_metadata.get(key).cloned(),
-                })
-            })
+            .filter_map(|key| Some(token_of(key, self.sub_accounts.get(key)?)))
             .collect()
+    }
+}
+
+pub(crate) fn initial_metadata() -> NftContractMetadata {
+    let account = env::current_account_id().to_string();
+    NftContractMetadata {
+        spec: NFT_SPEC.to_string(),
+        name: account.clone(),
+        symbol: account,
+        icon: None,
+        base_uri: None,
+        reference: None,
+        reference_hash: None,
+    }
+}
+
+fn token_of(token_id: &str, sub: &SubAccountEntry) -> Token {
+    Token {
+        token_id: token_id.to_owned(),
+        owner_id: sub.owner.clone(),
+        metadata: Some(TokenMetadata {
+            title: Some(token_id.to_owned()),
+            description: None,
+            media: None,
+            media_hash: None,
+            copies: Some(1),
+            issued_at: None,
+            expires_at: None,
+            starts_at: None,
+            updated_at: None,
+            extra: Some(
+                json!({
+                    "rented_at": sub.rented_at.to_string(),
+                    "expires_at": sub.expires_at.to_string(),
+                })
+                .to_string(),
+            ),
+            reference: None,
+            reference_hash: None,
+        }),
     }
 }
 

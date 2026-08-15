@@ -1,7 +1,7 @@
 mod error;
 mod events;
 
-use near_sdk::json_types::U64;
+use near_sdk::json_types::{Base58CryptoHash, U64};
 use near_sdk::serde_json::json;
 use near_sdk::{
     env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
@@ -16,6 +16,7 @@ const ON_MINTED_GAS: Gas = Gas::from_tgas(20);
 const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 const MAX_LABEL_LEN: u8 = 60;
 const ACCOUNT_STORAGE_FLOOR: NearToken = NearToken::from_millinear(7);
+const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 #[near(serializers = [json])]
 #[derive(Clone)]
@@ -53,6 +54,21 @@ pub struct Registrar {
     min_balance: NearToken,
     min_label_len: u8,
     wallet_timeout_secs: u32,
+    approved_code_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
+}
+
+#[near(serializers = [borsh])]
+pub struct LegacyRegistrar {
+    registry: AccountId,
+    council: AccountId,
+    wallet_impl: AccountId,
+    hos_extension: AccountId,
+    recovery: AccountId,
+    chain_id: String,
+    min_balance: NearToken,
+    min_label_len: u8,
+    wallet_timeout_secs: u32,
 }
 
 #[near]
@@ -81,13 +97,31 @@ impl Registrar {
             min_balance: config.min_balance,
             min_label_len: config.min_label_len,
             wallet_timeout_secs: config.wallet_timeout_secs,
+            approved_code_hash: None,
+            approved_at: None,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        hos_common::try_state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE))
+        let Some(old) = hos_common::try_state_read::<LegacyRegistrar>() else {
+            return hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        };
+        Self {
+            registry: old.registry,
+            council: old.council,
+            wallet_impl: old.wallet_impl,
+            hos_extension: old.hos_extension,
+            recovery: old.recovery,
+            chain_id: old.chain_id,
+            min_balance: old.min_balance,
+            min_label_len: old.min_label_len,
+            wallet_timeout_secs: old.wallet_timeout_secs,
+            approved_code_hash: None,
+            approved_at: None,
+        }
     }
 
     #[payable]
@@ -209,6 +243,20 @@ impl Registrar {
         Event::MinBalanceSet { min_balance }.emit();
     }
 
+    pub fn approve_upgrade(&mut self, code_hash: Base58CryptoHash) {
+        require!(
+            env::predecessor_account_id() == self.council,
+            error::ONLY_COUNCIL
+        );
+        self.approved_code_hash = Some(code_hash.into());
+        self.approved_at = Some(env::block_timestamp());
+        Event::UpgradeApproved {
+            hash: String::from(&code_hash),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
     pub fn upgrade_self(&mut self, code: near_sdk::json_types::Base64VecU8) -> Promise {
         require!(
             env::predecessor_account_id() == self.council,
@@ -216,8 +264,25 @@ impl Registrar {
         );
         let code = code.0;
         require!(!code.is_empty(), error::EMPTY_CODE);
+        let approved = self
+            .approved_code_hash
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
+        require!(env::sha256_array(&code) == approved, error::HASH_MISMATCH);
+        let approved_at = self
+            .approved_at
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_HASH));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(UPGRADE_DELAY_NS),
+            error::APPROVAL_TOO_YOUNG
+        );
+        self.approved_code_hash = None;
+        self.approved_at = None;
         Event::SelfUpgraded {}.emit();
         hos_common::deploy_and_migrate(code)
+    }
+
+    pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
+        self.approved_code_hash.map(Into::into)
     }
 
     pub fn registry(&self) -> &AccountId {
@@ -455,6 +520,70 @@ mod tests {
         let mut c = deploy();
         ctx("attacker.testnet", 0);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
+    }
+
+    fn ctx_at(predecessor: &str, ts: u64) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acc(TLA))
+            .predecessor_account_id(acc(predecessor))
+            .attached_deposit(NearToken::from_yoctonear(0))
+            .block_timestamp(ts)
+            .build());
+    }
+
+    fn hash_of(code: &[u8]) -> near_sdk::json_types::Base58CryptoHash {
+        near_sdk::env::sha256_array(code).into()
+    }
+
+    #[test]
+    #[should_panic(expected = "only council")]
+    fn outsider_cannot_approve_an_upgrade() {
+        let mut c = deploy();
+        ctx("attacker.testnet", 0);
+        c.approve_upgrade(hash_of(&[1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "no upgrade has been approved")]
+    fn the_root_cannot_be_upgraded_without_a_prior_approval() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "code does not match the approved hash")]
+    fn approved_code_cannot_be_swapped_for_other_code() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        c.approve_upgrade(hash_of(&[1]));
+        ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![2]));
+    }
+
+    #[test]
+    #[should_panic(expected = "approved upgrade is still inside its delay")]
+    fn the_root_cannot_be_upgraded_inside_the_delay() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        c.approve_upgrade(hash_of(&[1]));
+        ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS - 1);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
+    }
+
+    #[test]
+    fn an_approved_upgrade_lands_once_the_delay_has_passed() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        c.approve_upgrade(hash_of(&[1]));
+        assert_eq!(c.approved_upgrade_hash(), Some(hash_of(&[1])));
+        ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
+        assert_eq!(
+            c.approved_upgrade_hash(),
+            None,
+            "the approval is spent, so the same code cannot be redeployed unannounced"
+        );
     }
 
     #[test]

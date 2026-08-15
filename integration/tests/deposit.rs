@@ -6,30 +6,30 @@ use near_workspaces::types::NearToken;
 use near_workspaces::Contract;
 use serde_json::json;
 
-async fn deploy_custodian(fleet: &Fleet) -> Result<Contract> {
+async fn deploy_holder(fleet: &Fleet) -> Result<Contract> {
     let account = fleet
         .relay
-        .create_subaccount("custody")
+        .create_subaccount("holder")
         .initial_balance(NearToken::from_near(10))
         .transact()
         .await?
         .into_result()?;
-    let custodian = account.deploy(&wasm("test_dapp")).await?.into_result()?;
-    custodian
+    let holder = account.deploy(&wasm("test_dapp")).await?.into_result()?;
+    holder
         .call("new")
         .args_json(json!({ "token": fleet.relay.id() }))
         .transact()
         .await?
         .into_result()?;
-    Ok(custodian)
+    Ok(holder)
 }
 
 #[tokio::test]
-async fn a_custodian_can_hand_a_name_back_after_holding_it() -> Result<()> {
+async fn a_holder_can_return_a_deposited_name() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;
     let tla = fleet.registrar.id().clone();
-    let custodian = deploy_custodian(&fleet).await?;
+    let holder = deploy_holder(&fleet).await?;
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
@@ -39,7 +39,7 @@ async fn a_custodian_can_hand_a_name_back_after_holding_it() -> Result<()> {
         .bob
         .call(registry.id(), "nft_transfer_call")
         .args_json(json!({
-            "receiver_id": custodian.id(),
+            "receiver_id": holder.id(),
             "token_id": token_id,
             "approval_id": null,
             "memo": null,
@@ -55,11 +55,11 @@ async fn a_custodian_can_hand_a_name_back_after_holding_it() -> Result<()> {
     }
     assert_eq!(
         owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
-        custodian.id().as_str(),
-        "the custodian must actually hold the account, not merely be recorded against it"
+        holder.id().as_str(),
+        "the holder must actually hold the account, not merely be recorded against it"
     );
 
-    let returned = custodian
+    let returned = holder
         .as_account()
         .call(registry.id(), "nft_transfer")
         .args_json(json!({
@@ -74,7 +74,7 @@ async fn a_custodian_can_hand_a_name_back_after_holding_it() -> Result<()> {
         .await?
         .into_result()?;
     if let Some(failure) = returned.receipt_failures().first() {
-        bail!("the custodian could not hand the name back: {failure:?}");
+        bail!("the holder could not return the name: {failure:?}");
     }
 
     assert_eq!(
@@ -97,11 +97,11 @@ async fn a_custodian_can_hand_a_name_back_after_holding_it() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_stranger_cannot_pull_a_name_out_of_custody() -> Result<()> {
+async fn a_stranger_cannot_withdraw_a_name_deposited_by_someone_else() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;
     let tla = fleet.registrar.id().clone();
-    let custodian = deploy_custodian(&fleet).await?;
+    let holder = deploy_holder(&fleet).await?;
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
@@ -111,7 +111,7 @@ async fn a_stranger_cannot_pull_a_name_out_of_custody() -> Result<()> {
         .bob
         .call(registry.id(), "nft_transfer_call")
         .args_json(json!({
-            "receiver_id": custodian.id(),
+            "receiver_id": holder.id(),
             "token_id": token_id,
             "approval_id": null,
             "memo": null,
@@ -143,8 +143,8 @@ async fn a_stranger_cannot_pull_a_name_out_of_custody() -> Result<()> {
     );
     assert_eq!(
         owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
-        custodian.id().as_str(),
-        "custody must survive the attempt"
+        holder.id().as_str(),
+        "the deposit must survive the attempt"
     );
 
     Ok(())

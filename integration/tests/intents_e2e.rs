@@ -181,7 +181,7 @@ async fn held_amount(verifier: &Contract, holder: &Account, token: &str) -> Resu
 }
 
 #[tokio::test]
-async fn a_leased_name_can_be_placed_into_intents_custody() -> Result<()> {
+async fn a_leased_name_can_be_deposited_into_intents() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;
     let tla = fleet.registrar.id().clone();
@@ -422,6 +422,7 @@ struct Market {
     fleet: Fleet,
     registry: Contract,
     verifier: Contract,
+    ft: Contract,
     tenant: near_workspaces::AccountId,
     token_id: String,
     name_token: String,
@@ -460,6 +461,7 @@ async fn open_market(fee_pips: u32) -> Result<Market> {
         fleet,
         registry,
         verifier,
+        ft,
         tenant,
         token_id,
         name_token,
@@ -677,7 +679,7 @@ async fn two_buyers_cannot_race_the_same_listing() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_seller_who_pulls_the_name_out_of_custody_cannot_be_settled_against() -> Result<()> {
+async fn a_seller_who_withdraws_the_name_cannot_be_settled_against() -> Result<()> {
     let market = open_market(0).await?;
     market.deposit_the_name().await?;
 
@@ -699,7 +701,7 @@ async fn a_seller_who_pulls_the_name_out_of_custody_cannot_be_settled_against() 
     );
     assert!(
         market.execute(vec![withdrawal]).await?,
-        "the seller may take their name back while it is unsold"
+        "the seller may withdraw their name while it is unsold"
     );
 
     let buyer_cash_before = market.cash_of(&market.buyer_account).await?;
@@ -707,7 +709,7 @@ async fn a_seller_who_pulls_the_name_out_of_custody_cannot_be_settled_against() 
         !market
             .execute(vec![listing, market.buy_side(1).await])
             .await?,
-        "a listing against a name no longer in custody must not settle"
+        "a listing against a name the seller already withdrew must not settle"
     );
     assert_eq!(
         market.cash_of(&market.buyer_account).await?,
@@ -765,5 +767,215 @@ async fn a_pair_that_does_not_net_is_refused() -> Result<()> {
     );
     assert_eq!(market.name_held_by(&market.buyer_account).await?, 0);
 
+    Ok(())
+}
+
+/// The verifier authenticates a withdrawal by predecessor, so a holder exits
+/// with one call and no signature. This is the product's exit path.
+#[tokio::test]
+async fn a_holder_exits_with_one_call_and_no_signature() -> Result<()> {
+    let market = open_market(0).await?;
+    market.deposit_the_name().await?;
+    assert_eq!(market.name_held_by(&market.fleet.bob).await?, 1);
+
+    let withdrawn = market
+        .fleet
+        .bob
+        .call(market.verifier.id(), "nft_withdraw")
+        .args_json(json!({
+            "token": market.registry.id(),
+            "receiver_id": market.fleet.bob.id(),
+            "token_id": market.token_id,
+            "memo": null,
+            "msg": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = withdrawn.receipt_failures().first() {
+        bail!("a direct withdrawal must not need our help: {failure:?}");
+    }
+
+    assert_eq!(
+        market.name_held_by(&market.fleet.bob).await?,
+        0,
+        "the balance inside the verifier is spent"
+    );
+    assert_eq!(
+        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        market.fleet.bob.id().as_str(),
+        "and the leased account is back under its holder"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stranger_cannot_withdraw_a_name_they_do_not_hold() -> Result<()> {
+    let market = open_market(0).await?;
+    market.deposit_the_name().await?;
+
+    let mallory = funded(&market.fleet, "mallory", 10).await?;
+    let attempt = mallory
+        .call(market.verifier.id(), "nft_withdraw")
+        .args_json(json!({
+            "token": market.registry.id(),
+            "receiver_id": mallory.id(),
+            "token_id": market.token_id,
+            "memo": null,
+            "msg": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        !attempt.is_success() || !attempt.receipt_failures().is_empty(),
+        "a stranger must not be able to withdraw a name they never deposited"
+    );
+    assert_eq!(
+        market.name_held_by(&market.fleet.bob).await?,
+        1,
+        "and the holder's balance is untouched"
+    );
+    assert_eq!(
+        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        market.verifier.id().as_str(),
+        "the name stays inside the verifier"
+    );
+    Ok(())
+}
+
+async fn mint_ft(ft: &Contract, who: &Account, amount: u128) -> Result<()> {
+    ft.call("storage_deposit")
+        .args_json(json!({ "account_id": who.id() }))
+        .deposit(NearToken::from_millinear(10))
+        .transact()
+        .await?
+        .into_result()?;
+    ft.call("mint")
+        .args_json(json!({ "account_id": who.id(), "amount": U128(amount) }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+impl Market {
+    async fn buy_in_one_call(
+        &self,
+        buyer: &Account,
+        amount: u128,
+        signed: Vec<serde_json::Value>,
+    ) -> Result<bool> {
+        let msg = json!({
+            "receiver_id": buyer.id(),
+            "execute_intents": signed,
+            "refund_if_fails": true,
+        })
+        .to_string();
+        let outcome = buyer
+            .call(self.ft.id(), "ft_transfer_call")
+            .args_json(json!({
+                "receiver_id": self.verifier.id(),
+                "amount": U128(amount),
+                "memo": null,
+                "msg": msg,
+            }))
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?;
+        Ok(outcome.is_success() && outcome.receipt_failures().is_empty())
+    }
+
+    async fn wallet_ft(&self, who: &Account) -> Result<u128> {
+        let raw: U128 = self
+            .ft
+            .view("ft_balance_of")
+            .args_json(json!({ "account_id": who.id() }))
+            .await?
+            .json()?;
+        Ok(raw.0)
+    }
+}
+
+#[tokio::test]
+async fn a_buyer_funds_and_settles_in_one_call() -> Result<()> {
+    let market = open_market(0).await?;
+    market.deposit_the_name().await?;
+
+    let buyer = funded(&market.fleet, "walkin", 20).await?;
+    mint_ft(&market.ft, &buyer, PRICE * 2).await?;
+    let purse = Signing::new(buyer.clone());
+    purse.register(&market.verifier).await?;
+    assert_eq!(
+        market.cash_of(&buyer).await?,
+        0,
+        "the buyer holds nothing inside the verifier before they act"
+    );
+
+    let ask = market.sell_side(PRICE as i128).await;
+    let bid = purse.sign(
+        &market.verifier,
+        market.nonce().await,
+        json!({
+            "signer_id": buyer.id(),
+            "deadline": market.far_future(),
+            "intents": [{ "intent": "token_diff", "diff": {
+                market.name_token.clone(): "1",
+                market.cash_token.clone(): format!("-{PRICE}"),
+            }}],
+        }),
+    );
+
+    assert!(
+        market.buy_in_one_call(&buyer, PRICE, vec![ask, bid]).await?,
+        "one call must deposit the buyer's own tokens and settle the pair"
+    );
+    assert_eq!(
+        held_amount(&market.verifier, &buyer, &market.name_token).await?,
+        1,
+        "the buyer holds the name"
+    );
+    assert_eq!(
+        market.cash_of(&market.fleet.bob).await?,
+        PRICE,
+        "and the seller is paid, all in one receipt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replaying_a_one_call_purchase_refunds_the_buyer() -> Result<()> {
+    let market = open_market(0).await?;
+    market.deposit_the_name().await?;
+
+    let buyer = market.buyer_account.clone();
+    mint_ft(&market.ft, &buyer, PRICE * 2).await?;
+
+    let pair = vec![market.sell_side(PRICE as i128).await, market.buy_side(1).await];
+
+    assert!(
+        market.buy_in_one_call(&buyer, PRICE, pair.clone()).await?,
+        "the first purchase lands"
+    );
+    let after_first = market.wallet_ft(&buyer).await?;
+
+    assert!(
+        !market.buy_in_one_call(&buyer, PRICE, pair).await?,
+        "replaying the same pair must not settle a second time"
+    );
+    assert_eq!(
+        market.wallet_ft(&buyer).await?,
+        after_first,
+        "and the buyer's tokens come back rather than being taken twice"
+    );
+    assert_eq!(
+        market.name_held_by(&market.buyer_account).await?,
+        1,
+        "exactly one name moved"
+    );
     Ok(())
 }
