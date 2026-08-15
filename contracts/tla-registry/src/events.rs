@@ -115,6 +115,11 @@ pub enum Event {
         new_payout_account: AccountId,
     },
     #[event_version("1.0.0")]
+    PayoutAccountUpdateFailed {
+        full_name: String,
+        attempted: AccountId,
+    },
+    #[event_version("1.0.0")]
     RefundPending {
         account: AccountId,
         amount_yocto: U128,

@@ -401,6 +401,18 @@ impl TenantWallet {
     }
 
     #[payable]
+    pub fn hos_set_payout_account(&mut self, payout_account: AccountId, expected_owner: AccountId) {
+        self.assert_authority();
+        require!(self.owner == expected_owner, error::OWNER_MOVED);
+        require!(
+            payout_account != env::current_account_id(),
+            error::PAYOUT_IS_SELF
+        );
+        self.payout_account = payout_account.clone();
+        Event::PayoutAccountSet { payout_account }.emit();
+    }
+
+    #[payable]
     pub fn hos_set_lease(&mut self, lease_until_ns: U64, state: OperatingState) {
         self.assert_authority();
         require!(
@@ -467,11 +479,13 @@ impl TenantWallet {
         if let Some(next) = to {
             self.wallet.extensions.insert(next.clone());
             self.owner = next.clone();
-            self.payout_account = next.clone();
-            Event::PayoutAccountSet {
-                payout_account: next,
+            if cause.repoints_payout() {
+                self.payout_account = next.clone();
+                Event::PayoutAccountSet {
+                    payout_account: next,
+                }
+                .emit();
             }
-            .emit();
         }
         if sweepable {
             self.sweep_to(outgoing);

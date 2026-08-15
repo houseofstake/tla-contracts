@@ -15,6 +15,12 @@ pub trait HosExtension {
         asked_by: Option<AccountId>,
     );
     fn push_lease(&mut self, wallet: AccountId, lease_until_ns: U64, state: OperatingState);
+    fn set_payout(
+        &mut self,
+        wallet: AccountId,
+        payout_account: AccountId,
+        expected_owner: AccountId,
+    );
 }
 
 #[allow(dead_code)]

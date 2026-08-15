@@ -21,6 +21,7 @@ pub const BAD_LEASE_STATE: &str = "state not settable through lease push";
 pub const RESERVE_BREACH: &str = "action would breach the balance reserve";
 pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be this account";
+pub const OWNER_MOVED: &str = "the account changed hands before this payout change landed";
 pub const OWNER_IS_SELF: &str = "owner account must not be this account";
 pub const COLLECTION_IS_SELF: &str = "collection account must not be this account";
 pub const LEASE_ACTIVE: &str = "sweep requires an expired lease";

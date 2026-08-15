@@ -111,6 +111,12 @@ fn settled(
     }
 }
 
+fn payout_of(c: &TlaRegistry, name: &str) -> AccountId {
+    c.get_sub_account(acc(TLA), name.to_string())
+        .unwrap()
+        .payout_account
+}
+
 fn rent_alice_sub(c: &mut TlaRegistry, name: &str) {
     let rent_near = rent_near_open(c, name);
     let deposit = c.get_fee_config().account_creation_deposit_yocto.0;
@@ -562,6 +568,27 @@ mod rental {
     }
 
     #[test]
+    fn a_stranger_can_pay_to_renew_a_name_they_do_not_own() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let before = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(BOB, rent, 2);
+        let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        let sub = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        assert_eq!(sub.expires_at.0, before + ONE_YEAR_NS);
+        assert_eq!(sub.owner, acc(ALICE));
+    }
+
+    #[test]
     fn renewal_past_grace_rejected() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
@@ -592,13 +619,52 @@ mod rental {
             Err(ContractError::OnlyOwner)
         ));
         ctx(ALICE, 1, 2);
-        c.set_payout_account(acc(TLA), "alice".to_string(), acc(BOB))
-            .unwrap();
+        assert!(c
+            .set_payout_account(acc(TLA), "alice".to_string(), acc(BOB))
+            .is_ok());
         assert_eq!(
-            c.get_sub_account(acc(TLA), "alice".to_string())
-                .unwrap()
-                .payout_account,
-            acc(BOB)
+            payout_of(&c, "alice"),
+            acc(ALICE),
+            "the record must not move before the wallet has taken it"
+        );
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_payout_set(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE));
+        assert_eq!(payout_of(&c, "alice"), acc(BOB));
+    }
+
+    #[test]
+    fn a_payout_the_wallet_refused_leaves_the_record_alone() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .set_payout_account(acc(TLA), "alice".to_string(), acc(BOB))
+            .is_ok());
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_payout_set(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE));
+        assert_eq!(
+            payout_of(&c, "alice"),
+            acc(ALICE),
+            "otherwise the registry says one thing and the sweep does another"
+        );
+    }
+
+    #[test]
+    fn a_payout_change_does_not_land_on_a_name_that_changed_hands() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .set_payout_account(acc(TLA), "alice".to_string(), acc(CAROL))
+            .is_ok());
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(c.sub_account_reassign(&key, &acc(BOB), &acc(BOB)));
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_payout_set(acc(TLA), "alice".to_string(), acc(CAROL), acc(ALICE));
+        assert_eq!(
+            payout_of(&c, "alice"),
+            acc(BOB),
+            "the seller must not redirect the payout of a name the buyer now holds"
         );
     }
 }
@@ -1183,6 +1249,73 @@ mod business {
             settled(name, ALICE, ALICE, rent_near, total),
             Ok(MintOutcome::Active),
         );
+    }
+
+    fn rent_employee_sub(c: &mut TlaRegistry, name: &str, employee: &str) {
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 0, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(acc(TLA), name.to_string(), acc(employee), acc(ALICE))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_licensee_can_retract_an_account_an_employee_owns() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "staff".to_string())
+                .unwrap()
+                .owner,
+            acc(BOB),
+            "the employee holds it so their wallet can sign as the account"
+        );
+        ctx(ALICE, 1, 2);
+        c.schedule_retraction(acc(TLA), "staff".to_string())
+            .unwrap();
+        assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
+        ctx(ALICE, 1, 3);
+        c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    #[test]
+    fn a_stranger_still_cannot_retract_a_business_account() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx("mallory.testnet", 1, 2);
+        assert!(matches!(
+            c.schedule_retraction(acc(TLA), "staff".to_string()),
+            Err(ContractError::OnlyOwner)
+        ));
+    }
+
+    #[test]
+    fn a_business_employee_cannot_redirect_the_licensee_payout() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 0, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(acc(TLA), "staff".to_string(), acc(BOB), acc(ALICE))
+            .unwrap();
+        assert_eq!(payout_of(&c, "staff"), acc(ALICE));
+
+        ctx(BOB, 1, 2);
+        assert!(
+            matches!(
+                c.set_payout_account(acc(TLA), "staff".to_string(), acc(BOB)),
+                Err(ContractError::OnlyLicensee)
+            ),
+            "the employee holds the name but the licence pays for it"
+        );
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .set_payout_account(acc(TLA), "staff".to_string(), acc(CAROL))
+            .is_ok());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::{TlaRegistry, TlaRegistryExt};
 use hos_common::{OperatingState, RotationCause};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
+use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -25,6 +25,8 @@ pub struct PendingReRent {
 }
 
 const GAS_FOR_CREATE: Gas = Gas::from_tgas(90);
+const GAS_FOR_SET_PAYOUT: Gas = Gas::from_tgas(30);
+const GAS_FOR_SET_PAYOUT_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(45);
 const GAS_FOR_PUSH_LEASE: Gas = Gas::from_tgas(20);
@@ -325,7 +327,7 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
         new_payout_account: AccountId,
-    ) -> Result<(), ContractError> {
+    ) -> Result<Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
         validate_name(&name)?;
@@ -334,20 +336,63 @@ impl TlaRegistry {
             return Err(ContractError::PayoutAccountEqualsSubAccount);
         }
         let caller = env::predecessor_account_id();
-        let sub = self
+        let owner = {
+            let sub = self
+                .sub_accounts
+                .get(&key)
+                .ok_or(ContractError::SubAccountNotFound)?;
+            let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
+            if tla.tla_type == TlaType::Business {
+                if tla.licensee.as_ref() != Some(&caller) {
+                    return Err(ContractError::OnlyLicensee);
+                }
+            } else if caller != sub.owner {
+                return Err(ContractError::OnlyOwner);
+            }
+            sub.owner.clone()
+        };
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        Ok(ext_hos_extension::ext(self.hos_extension.clone())
+            .with_static_gas(GAS_FOR_SET_PAYOUT)
+            .set_payout(sub_account, new_payout_account.clone(), owner.clone())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SET_PAYOUT_CALLBACK)
+                    .on_payout_set(tla_id, name, new_payout_account, owner),
+            ))
+    }
+
+    #[private]
+    pub fn on_payout_set(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        new_payout_account: AccountId,
+        expected_owner: AccountId,
+    ) {
+        let key = sub_account_key(&tla_id, &name);
+        let still_theirs = self
             .sub_accounts
-            .get_mut(&key)
-            .ok_or(ContractError::SubAccountNotFound)?;
-        if caller != sub.owner {
-            return Err(ContractError::OnlyOwner);
+            .get(&key)
+            .is_some_and(|sub| sub.owner == expected_owner);
+        if !is_promise_success() || !still_theirs {
+            Event::PayoutAccountUpdateFailed {
+                full_name: key,
+                attempted: new_payout_account,
+            }
+            .emit();
+            return;
         }
-        sub.payout_account = new_payout_account.clone();
+        if let Some(sub) = self.sub_accounts.get_mut(&key) {
+            sub.payout_account = new_payout_account.clone();
+        }
         Event::PayoutAccountUpdated {
             full_name: key,
             new_payout_account,
         }
         .emit();
-        Ok(())
     }
 
     #[handle_result]
@@ -370,9 +415,6 @@ impl TlaRegistry {
                 .ok_or(ContractError::SubAccountNotFound)?;
             if now >= sub.expires_at.saturating_add(self.grace_period_ns) {
                 return Err(ContractError::SubAccountPastGracePeriod);
-            }
-            if caller != sub.owner {
-                return Err(ContractError::OnlyOwner);
             }
             if sub.retraction_at.is_some() {
                 return Err(ContractError::RetractionPending);

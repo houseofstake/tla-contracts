@@ -21,17 +21,18 @@ impl TlaRegistry {
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
         let now = env::block_timestamp();
-        {
+        let licensee = {
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
             if tla.tla_type != TlaType::Business {
                 return Err(ContractError::NotBusinessTla);
             }
-        }
+            tla.licensee.clone()
+        };
         let sub = self
             .sub_accounts
             .get_mut(&key)
             .ok_or(ContractError::SubAccountNotFound)?;
-        if caller != sub.owner {
+        if caller != sub.owner && licensee.as_ref() != Some(&caller) {
             return Err(ContractError::OnlyOwner);
         }
         if sub.retraction_at.is_some() {
@@ -61,11 +62,17 @@ impl TlaRegistry {
         let caller = env::predecessor_account_id();
         let retraction_notice_ns = self.fee_config.retraction_notice_ns.0;
         let now = env::block_timestamp();
+        let licensee = self
+            .tlas
+            .get(&tla_id)
+            .ok_or(ContractError::TlaNotFound)?
+            .licensee
+            .clone();
         let sub = self
             .sub_accounts
             .get_mut(&key)
             .ok_or(ContractError::SubAccountNotFound)?;
-        if caller != sub.owner {
+        if caller != sub.owner && licensee.as_ref() != Some(&caller) {
             return Err(ContractError::OnlyOwner);
         }
         let retraction_at = sub

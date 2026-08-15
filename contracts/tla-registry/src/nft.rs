@@ -133,7 +133,7 @@ impl TlaRegistry {
             .force_transfer(
                 sub_account,
                 Some(receiver_id.clone()),
-                RotationCause::Transfer,
+                RotationCause::Deposit,
                 Some(from.clone()),
             )
             .then(
@@ -168,7 +168,14 @@ impl TlaRegistry {
         memo: Option<String>,
         #[callback_result] swapped: Result<bool, PromiseError>,
     ) {
-        self.commit_nft_rotation(&tla_id, &name, &from, &to, memo.as_ref(), swapped);
+        self.commit_nft_rotation(
+            &tla_id,
+            &name,
+            &from,
+            &to,
+            memo.as_ref(),
+            (RotationCause::Transfer, swapped),
+        );
     }
 
     #[private]
@@ -186,7 +193,14 @@ impl TlaRegistry {
             msg,
         } = call;
         let token_id = sub_account_key(&tla_id, &name);
-        self.commit_nft_rotation(&tla_id, &name, &from, &to, memo.as_ref(), swapped);
+        self.commit_nft_rotation(
+            &tla_id,
+            &name,
+            &from,
+            &to,
+            memo.as_ref(),
+            (RotationCause::Deposit, swapped),
+        );
         ext_nft_receiver::ext(to.clone())
             .with_static_gas(GAS_FOR_NFT_ON_TRANSFER)
             .with_unused_gas_weight(1)
@@ -250,7 +264,7 @@ impl TlaRegistry {
                 to,
             }
             .emit();
-            return false;
+            return true;
         }
         emit_nft_transfer(&from, &to, &key, None);
         self.emit_activity(Event::SubAccountTransferred {
@@ -401,13 +415,21 @@ impl TlaRegistry {
         from: &AccountId,
         to: &AccountId,
         memo: Option<&String>,
-        swapped: Result<bool, PromiseError>,
+        rotation: (RotationCause, Result<bool, PromiseError>),
     ) {
+        let (cause, swapped) = rotation;
         if !matches!(swapped, Ok(true)) {
             ContractError::RotationNotConfirmed.panic();
         }
         let key = sub_account_key(tla_id, name);
-        if !self.sub_account_reassign(&key, to, to) {
+        let payout = if cause.repoints_payout() {
+            to.clone()
+        } else {
+            self.sub_accounts
+                .get(&key)
+                .map_or_else(|| to.clone(), |sub| sub.payout_account.clone())
+        };
+        if !self.sub_account_reassign(&key, to, &payout) {
             ContractError::OwnerIndexOutOfSync.panic();
         }
         emit_nft_transfer(from, to, &key, memo);

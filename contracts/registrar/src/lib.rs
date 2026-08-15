@@ -285,6 +285,14 @@ impl Registrar {
         self.approved_code_hash.map(Into::into)
     }
 
+    pub fn approved_upgrade_at(&self) -> Option<U64> {
+        self.approved_at.map(U64)
+    }
+
+    pub fn upgrade_delay_ns(&self) -> U64 {
+        U64(UPGRADE_DELAY_NS)
+    }
+
     pub fn registry(&self) -> &AccountId {
         &self.registry
     }

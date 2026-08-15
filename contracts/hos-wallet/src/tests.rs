@@ -544,6 +544,75 @@ fn a_transfer_moves_ownership_and_payout_together() {
 }
 
 #[test]
+fn the_authority_sets_the_payout_account() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_set_payout_account(acc(BUYER), acc(OWNER));
+    assert_eq!(c.hos_payout_account(), acc(BUYER));
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority")]
+fn the_renter_cannot_set_their_own_payout_account() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.hos_set_payout_account(acc(BUYER), acc(OWNER));
+}
+
+#[test]
+#[should_panic(expected = "payout account must not be this account")]
+fn the_payout_account_cannot_be_the_leased_account_itself() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_set_payout_account(env::current_account_id(), acc(OWNER));
+}
+
+#[test]
+#[should_panic(expected = "changed hands before this payout change landed")]
+fn a_payout_change_authorised_by_the_previous_owner_is_refused() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_set_payout_account(acc("carol.testnet"), acc(OWNER));
+}
+
+#[test]
+fn a_deposit_moves_ownership_but_leaves_payout_with_the_depositor() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc("venue.testnet")),
+        RotationCause::Deposit,
+        Some(acc(OWNER)),
+    );
+    assert!(c.w_is_extension_enabled(acc("venue.testnet")));
+    assert_eq!(
+        c.hos_payout_account(),
+        acc(PAYOUT),
+        "a venue never earns a claim on the balance, so the next sweep must not reach it"
+    );
+}
+
+#[test]
+fn leaving_a_venue_repoints_payout_at_the_new_holder() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc("venue.testnet")),
+        RotationCause::Deposit,
+        Some(acc(OWNER)),
+    );
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc(BUYER)),
+        RotationCause::Transfer,
+        Some(acc("venue.testnet")),
+    );
+    assert_eq!(c.hos_payout_account(), acc(BUYER));
+}
+
+#[test]
 fn a_transfer_evicts_co_owners() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());

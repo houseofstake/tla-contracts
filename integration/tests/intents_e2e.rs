@@ -811,6 +811,30 @@ async fn a_holder_exits_with_one_call_and_no_signature() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_deposited_name_keeps_its_payout_with_the_seller() -> Result<()> {
+    let market = open_market(0).await?;
+    market.deposit_the_name().await?;
+
+    assert_eq!(
+        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        market.verifier.id().as_str(),
+        "the verifier holds the name while it is on the book"
+    );
+    let payout: String = market
+        .fleet
+        .worker
+        .view(&market.tenant, "hos_payout_account")
+        .await?
+        .json()?;
+    assert_eq!(
+        payout,
+        market.fleet.bob.id().as_str(),
+        "but it never earns the balance, or a later sweep pays a contract no one can withdraw from"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_stranger_cannot_withdraw_a_name_they_do_not_hold() -> Result<()> {
     let market = open_market(0).await?;
     market.deposit_the_name().await?;

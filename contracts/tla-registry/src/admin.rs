@@ -412,4 +412,12 @@ impl TlaRegistry {
         self.approved_code_hash
             .map(near_sdk::json_types::Base58CryptoHash::from)
     }
+
+    pub fn approved_upgrade_at(&self) -> Option<near_sdk::json_types::U64> {
+        self.approved_at.map(near_sdk::json_types::U64)
+    }
+
+    pub fn upgrade_delay_ns(&self) -> near_sdk::json_types::U64 {
+        near_sdk::json_types::U64(self.upgrade_delay_ns)
+    }
 }

@@ -59,6 +59,7 @@ pub enum MintOutcome {
 pub enum RotationCause {
     Sale,
     Transfer,
+    Deposit,
     ReRent,
     Reclaim,
     Recovery,
@@ -72,7 +73,27 @@ impl RotationCause {
     pub fn parks(self) -> bool {
         match self {
             Self::Reclaim => true,
-            Self::Sale | Self::Transfer | Self::ReRent | Self::Recovery | Self::Revert => false,
+            Self::Sale
+            | Self::Transfer
+            | Self::Deposit
+            | Self::ReRent
+            | Self::Recovery
+            | Self::Revert => false,
+        }
+    }
+
+    /// A venue holds a name without ever having a beneficial claim on what sits
+    /// on the account, so payout must stay with the depositor. Repointing it at
+    /// the venue sends the next sweep somewhere no one can recover it from.
+    pub fn repoints_payout(self) -> bool {
+        match self {
+            Self::Deposit => false,
+            Self::Sale
+            | Self::Transfer
+            | Self::ReRent
+            | Self::Reclaim
+            | Self::Recovery
+            | Self::Revert => true,
         }
     }
 
@@ -81,14 +102,14 @@ impl RotationCause {
     /// the account on its way back to the owner who never let go of it.
     pub fn sweeps(self) -> bool {
         match self {
-            Self::Sale | Self::Transfer | Self::ReRent | Self::Reclaim => true,
+            Self::Sale | Self::Transfer | Self::Deposit | Self::ReRent | Self::Reclaim => true,
             Self::Recovery | Self::Revert => false,
         }
     }
 
     pub fn needs_holder(self) -> bool {
         match self {
-            Self::Sale | Self::Transfer => true,
+            Self::Sale | Self::Transfer | Self::Deposit => true,
             Self::ReRent | Self::Reclaim | Self::Recovery | Self::Revert => false,
         }
     }
@@ -96,7 +117,7 @@ impl RotationCause {
     pub fn needs_expiry(self) -> bool {
         match self {
             Self::ReRent | Self::Reclaim => true,
-            Self::Sale | Self::Transfer | Self::Recovery | Self::Revert => false,
+            Self::Sale | Self::Transfer | Self::Deposit | Self::Recovery | Self::Revert => false,
         }
     }
 }

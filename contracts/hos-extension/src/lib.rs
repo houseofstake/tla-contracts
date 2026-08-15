@@ -54,6 +54,7 @@ trait TenantWallet {
     fn hos_sweep_near(&mut self);
     fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128);
     fn hos_payout_account(&self) -> AccountId;
+    fn hos_set_payout_account(&mut self, payout_account: AccountId, expected_owner: AccountId);
     fn hos_migrate(collection_id: AccountId);
 }
 
@@ -290,6 +291,21 @@ impl HosExtension {
             .with_static_gas(GAS_FOR_LEASE)
             .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
             .hos_set_lease(lease_until_ns, state))
+    }
+
+    #[handle_result]
+    pub fn set_payout(
+        &mut self,
+        wallet: AccountId,
+        payout_account: AccountId,
+        expected_owner: AccountId,
+    ) -> Result<Promise, ContractError> {
+        self.assert_registry()?;
+        self.assert_not_paused()?;
+        Ok(ext_wallet::ext(wallet)
+            .with_static_gas(GAS_FOR_LEASE)
+            .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
+            .hos_set_payout_account(payout_account, expected_owner))
     }
 
     #[handle_result]
@@ -535,6 +551,18 @@ impl HosExtension {
 
     pub fn get_recovery(&self) -> AccountId {
         self.recovery.clone()
+    }
+
+    pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
+        self.approved_code_hash.map(Base58CryptoHash::from)
+    }
+
+    pub fn approved_upgrade_at(&self) -> Option<U64> {
+        self.approved_at.map(U64)
+    }
+
+    pub fn upgrade_delay_ns(&self) -> U64 {
+        U64(UPGRADE_DELAY_NS)
     }
 
     pub fn min_sweep_attached(&self) -> U128 {
