@@ -26,3 +26,5 @@ anyhow = "1"
 bip39 = { version = "2", features = ["rand"] }
 slip10_ed25519 = "0.1"
 base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

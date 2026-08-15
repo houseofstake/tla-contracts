@@ -214,3 +214,58 @@ async fn the_pair_refuses_an_item_and_a_collection_that_disagree() -> Result<()>
 
     Ok(())
 }
+
+#[tokio::test]
+async fn a_keyless_parent_makes_the_namespace_the_membership_proof() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let honest = rent(&fleet, &registry, &tla, "alice").await?;
+
+    let key = fleet.registrar.as_account().secret_key().public_key();
+    fleet
+        .registrar
+        .as_account()
+        .batch(&tla)
+        .delete_key(key)
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(
+        fleet.worker.view_access_keys(&tla).await?.is_empty(),
+        "the collection's minting authority must be code, not a person"
+    );
+
+    let forged = fleet
+        .registrar
+        .as_account()
+        .create_subaccount("evil")
+        .initial_balance(NearToken::from_near(6))
+        .transact()
+        .await;
+    let refused = match forged {
+        Err(_) => true,
+        Ok(outcome) => outcome.into_result().is_err(),
+    };
+    assert!(
+        refused,
+        "with no key on the parent, a forged sibling cannot be created at all"
+    );
+
+    let bound_to: String = fleet.worker.view(&tla, "registry").await?.json()?;
+    assert_eq!(
+        bound_to,
+        registry.id().as_str(),
+        "and the parent names the registry it will only mint for, so a consumer that \
+         checks these two things once can trust every name under it by suffix alone"
+    );
+
+    let item = item_info(&fleet.worker, &honest).await?;
+    let token = collection_says(&registry, item["token_id"].as_str().unwrap()).await?;
+    assert!(
+        pair_accepts(&honest, &item, &token, registry.id()),
+        "and names the registrar already minted keep working"
+    );
+
+    Ok(())
+}

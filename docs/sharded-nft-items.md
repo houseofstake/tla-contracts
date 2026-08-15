@@ -136,10 +136,49 @@ Each clause rules out a specific forgery, and none is redundant:
   stale answer.
 
 The attack this closes is the one TON names: an account somewhere claiming membership of a
-collection it was never minted into. Note what it does not close. If someone holds a parent account's
-full access key, they can create a real child of that parent and deploy anything there, so the
-account will sit under a genuine parent. Only the collection clause refuses it, because the registry
-never minted that name. Naming is a filter; the collection is the security boundary.
+collection it was never minted into.
+
+## Verify the collection once, then trust every member by its name
+
+The design assumes its end state: the parent account holds no key. Everything below follows from
+that, and a deployment that still has a key on the parent is a transient to be finished, not a mode
+to design for.
+
+NEAR permits only the parent to create `<label>.<parent>`. With no key on the parent, the only
+remaining creator is the parent's own contract. That contract is the registrar, and the registrar
+refuses to mint for anyone but the registry it was configured with. The chain is short and every link
+is public:
+
+1. the account id ends with `.<parent>`, which only `<parent>` could have produced;
+2. `view_access_key_list(<parent>)` is empty, so its minting authority is code and not a person;
+3. `<parent>.registry()` names the collection, and the registrar mints only when that collection asks.
+
+Therefore any account under `<parent>` is a name the collection authorised.
+
+The consequence is the interesting part. Steps 2 and 3 are properties of the **collection**, not of
+any item, so a consumer checks them **once** and caches the answer. After that, membership of any
+name is a string suffix comparison: free, offline, and available to a client that has never heard of
+the account before.
+
+This is where NEAR does better than the standard it borrows from. TON binds an item to its collection
+through `address = hash(code, data)`. That is strong, but the address is opaque and carries no
+provenance, so a TON client must perform a round trip **per item, forever**. A NEAR account id carries
+its own provenance, so the cost collapses from once per item to once per collection. TEP-62 cannot
+express this, because a TON address does not distinguish who is permitted to produce siblings.
+
+It also gives a client something TEP-62 has no way to offer: the ability to **verify the trust
+assumption rather than accept it**. An empty key list is public evidence that nobody can hand-mint a
+sibling. On TON there is no equivalent question to ask.
+
+### What the collection round trip is still for
+
+Membership no longer needs it. Ownership does not either, since the item is the account itself and
+therefore authoritative. What remains is **consistency**: the item and the registry index are updated
+in separate receipts, so a failure between them leaves the index stale while the item is right.
+
+Ask the collection anyway, and refuse on disagreement. Not because you doubt the item, but because a
+divergence means the system is in a state nobody designed, and settlement is indexed by the
+collection. Fail closed and let an operator repair the index.
 
 ## Trust model
 
@@ -147,11 +186,23 @@ The collection is trusted to say who is a member. The item is trusted to say who
 trusted for the other's answer, and a consumer that accepts a disagreement has no defence against
 whichever side is wrong.
 
-Two consequences worth stating plainly. The registry contract can rotate an item's ownership through
-its authority, so a compromised registry account can move a name; the check detects the resulting
-divergence but does not prevent the rotation. And the parent account's key, while it exists, is a
-capability to create genuine children. Removing these keys is what turns both from a human-held
-capability into a code-enforced one.
+The registry contract can rotate an item's ownership through its authority, so a compromised registry
+account can move a name; the check detects the resulting divergence but does not prevent the
+rotation. That is the residual trust, and removing the registry's key does not remove it, because the
+authority is exercised by code the council governs.
+
+**Authenticity is not suitability.** A verified pair says this account is genuinely the name it claims
+and is owned by whom it says. It says nothing about whether the lease is live. `init` follows
+TEP-62's meaning, that the item is initialised and has an owner, and a name whose lease has expired
+but has not yet been reclaimed still reports `init: true`. Anything trading the asset MUST read
+`hos_lease` as well, or it will let someone buy a name the authority can reclaim immediately.
+
+**Do not add a code hash check.** It looks like the direct analogue of TON's `hash(code, data)` and it
+is the wrong move here. A leased account holds no key, so its code can only change through the
+council-gated global contract publish, which means the only threat such a check catches is the
+council shipping malicious code, and the council is the trust root. Against that it buys nothing,
+while it breaks every consumer during a fleet republish when hashes legitimately differ. More binding,
+worse operationally, aimed at a threat outside the model.
 
 ## What is proven, and where
 
@@ -167,6 +218,11 @@ End to end against real wasm, `integration/tests/sharded_item.rs`:
 - `a_forgery_created_under_the_real_parent_is_still_refused`: a child created directly under the TLA
   account sits under a genuine parent, so naming separates nothing. The collection clause refuses it,
   which is the case that shows why both halves exist.
+- `a_keyless_parent_makes_the_namespace_the_membership_proof`: the same forgery, attempted after the
+  parent's key is deleted, cannot be created at all. Note how the previous test is staged, by signing
+  as the parent, and that this one removes the ability to stage it. It also asserts the other two
+  links, an empty key list and the registrar naming its collection, so the whole chain a consumer
+  caches is proven in one place. Names already minted keep verifying.
 - `the_pair_refuses_an_item_and_a_collection_that_disagree`: a rotation applied to the item without
   the index catching up, and the pair refuses the split.
 
@@ -174,6 +230,41 @@ Consumer, `packages/contract-client/src/item.ts` in the product repository, with
 enumerated and tested one per clause, including an attacker supplying both halves. Wired into
 ownership verification at `apps/server/src/providers/near-ownership.ts`, which pins the collection
 from configuration and fails closed if the chain cannot be reached.
+
+## Conformance with TEP-62's stated intent
+
+TEP-62 states its own purpose and its own limitation, so this can be checked against the text rather
+than against a reading of it.
+
+**The rationale we inherit.** "'One NFT - one smart contract' simplifies fees calculation and allows
+to give gas-consumption guarantees." Every leased name is its own account running its own contract,
+so the property TEP-62 is arguing for holds here for the same reason it holds there.
+
+**The drawback we half close, and the half matters.** TEP-62 says plainly: "There is no way to get
+current owner of NFT onchain because TON is an asynchronous blockchain." NEAR is asynchronous in the
+same way, so an on-chain caller reading an item through a cross-contract call inherits exactly this
+limitation: by the time the callback lands, ownership may have moved. This design does not fix that
+and must not be described as if it does.
+
+What NEAR permits and TON does not is an off-chain caller pinning both reads to one block height. A
+wallet, indexer or marketplace asks the item and the collection at the same height, so the pair
+cannot be read either side of a transfer and the answer is atomic. That is the sense in which the
+gap closes, and it closes only for off-chain consumers, which is who actually needs it here.
+
+**Deliberate omissions that match theirs.** TEP-62 excludes approvals because "you cannot send the
+message 'is there an approval?' because the response may become irrelevant while the response message
+is getting to you." We exclude NEP-178 for a related reason from the other end: `nft_transfer` rejects
+a set `approval_id` rather than ignoring it, and Intents always passes `None`, so an approval would
+add surface nothing uses. TEP-62 also declines to mandate royalties because guaranteeing them means
+prohibiting free transfers; commission here is handled in settlement, not by the token, for the same
+reason.
+
+**Where the mapping is not one to one.** TEP-62 requires a collection to implement
+`get_nft_address_by_index()`, because on TON an index and an address are different things and the
+round trip from one to the other is what proves membership. Here the index *is* the address: the
+token id is the account id. So the round trip degenerates into `nft_token(token_id)` returning a
+token, which NEP-171 already requires. A reader coming from TEP-62 should be told this explicitly,
+because they will look for an address-by-index method and not find one.
 
 ## Relationship to existing NEPs
 
