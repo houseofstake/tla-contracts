@@ -63,6 +63,26 @@ impl RotationCause {
             Self::Recovery | Self::Revert => false,
         }
     }
+
+    /// Rotations that only happen because someone holding the account asked.
+    /// The wallet checks the named account against its own extension set, and
+    /// the lease authority is never eligible, so House of Stake cannot move a
+    /// live lease through this path however it is called.
+    pub fn needs_holder(self) -> bool {
+        match self {
+            Self::Sale | Self::Transfer => true,
+            Self::ReRent | Self::Reclaim | Self::Recovery | Self::Revert => false,
+        }
+    }
+
+    /// Rotations the authority may perform alone, and only once the lease has
+    /// run out.
+    pub fn needs_expiry(self) -> bool {
+        match self {
+            Self::ReRent | Self::Reclaim => true,
+            Self::Sale | Self::Transfer | Self::Recovery | Self::Revert => false,
+        }
+    }
 }
 
 #[cfg(test)]

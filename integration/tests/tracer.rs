@@ -68,11 +68,14 @@ async fn tracer_mint_owner_path_rotate_patch() -> Result<()> {
         "nobody may bolt a key onto a leased account"
     );
 
-    arm_transfer(&fleet, &alice).await?;
     let outcome = fleet
         .extension
         .call(&alice, "hos_transfer_ownership")
-        .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
+        .args_json(json!({
+            "to": fleet.relay.id(),
+            "cause": "Sale",
+            "asked_by": fleet.bob.id(),
+        }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()

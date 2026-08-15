@@ -119,6 +119,7 @@ impl Registrar {
             "config": {
                 "owner_account": owner_account,
                 "authority": self.hos_extension,
+                "collection_id": self.registry,
                 "payout_account": payout_account,
                 "lease_until_ns": U64(lease_until_ns),
                 "timeout_secs": self.wallet_timeout_secs,

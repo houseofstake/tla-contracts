@@ -44,7 +44,12 @@ fn registry_sells_via_force_transfer() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(c
-        .force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale)
+        .force_transfer(
+            acc(WALLET),
+            Some(acc(BUYER)),
+            RotationCause::Sale,
+            Some(acc(BUYER))
+        )
         .is_ok());
 }
 
@@ -53,7 +58,7 @@ fn registry_parks_via_force_transfer() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(c
-        .force_transfer(acc(WALLET), None, RotationCause::Reclaim)
+        .force_transfer(acc(WALLET), None, RotationCause::Reclaim, None)
         .is_ok());
 }
 
@@ -62,7 +67,7 @@ fn park_with_new_owner_rejected() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Reclaim),
+        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Reclaim, None),
         Err(ContractError::ParkTakesNoOwner)
     ));
 }
@@ -72,7 +77,7 @@ fn transfer_without_new_owner_rejected() {
     let mut c = deploy();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), None, RotationCause::Sale),
+        c.force_transfer(acc(WALLET), None, RotationCause::Sale, Some(acc(BUYER))),
         Err(ContractError::TransferNeedsOwner)
     ));
 }
@@ -82,7 +87,12 @@ fn non_registry_cannot_force_transfer() {
     let mut c = deploy();
     ctx(ADMIN, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale),
+        c.force_transfer(
+            acc(WALLET),
+            Some(acc(BUYER)),
+            RotationCause::Sale,
+            Some(acc(BUYER))
+        ),
         Err(ContractError::OnlyRegistry)
     ));
 }
@@ -94,7 +104,12 @@ fn paused_blocks_force_transfer() {
     c.pause().unwrap();
     ctx(REGISTRY, 0);
     assert!(matches!(
-        c.force_transfer(acc(WALLET), Some(acc(BUYER)), RotationCause::Sale),
+        c.force_transfer(
+            acc(WALLET),
+            Some(acc(BUYER)),
+            RotationCause::Sale,
+            Some(acc(BUYER))
+        ),
         Err(ContractError::Paused)
     ));
 }

@@ -45,11 +45,16 @@ trait FungibleToken {
 #[ext_contract(ext_wallet)]
 trait TenantWallet {
     fn hos_set_lease(&mut self, lease_until_ns: U64, state: OperatingState);
-    fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause);
+    fn hos_transfer_ownership(
+        &mut self,
+        to: Option<AccountId>,
+        cause: RotationCause,
+        asked_by: Option<AccountId>,
+    );
     fn hos_sweep_near(&mut self);
     fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128);
     fn hos_payout_account(&self) -> AccountId;
-    fn hos_migrate();
+    fn hos_migrate(collection_id: AccountId);
 }
 
 const EXTENSION_CALL_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -290,7 +295,7 @@ impl HosExtension {
         self.assert_council()?;
         Ok(ext_wallet::ext(wallet)
             .with_static_gas(GAS_FOR_LEASE)
-            .hos_migrate())
+            .hos_migrate(self.registry.clone()))
     }
 
     #[handle_result]
@@ -299,6 +304,7 @@ impl HosExtension {
         wallet: AccountId,
         new_owner: Option<AccountId>,
         cause: RotationCause,
+        asked_by: Option<AccountId>,
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
@@ -307,6 +313,9 @@ impl HosExtension {
         }
         if !cause.parks() && new_owner.is_none() {
             return Err(ContractError::TransferNeedsOwner);
+        }
+        if cause.needs_holder() && asked_by.is_none() {
+            return Err(ContractError::TransferNeedsHolder);
         }
         Event::ForceTransferRequested {
             wallet: wallet.clone(),
@@ -318,7 +327,7 @@ impl HosExtension {
         Ok(ext_wallet::ext(wallet.clone())
             .with_static_gas(GAS_FOR_ROTATE)
             .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
-            .hos_transfer_ownership(new_owner, cause)
+            .hos_transfer_ownership(new_owner, cause, asked_by)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_ROTATE_CB)

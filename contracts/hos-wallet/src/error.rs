@@ -22,9 +22,11 @@ pub const RESERVE_BREACH: &str = "action would breach the balance reserve";
 pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be this account";
 pub const OWNER_IS_SELF: &str = "owner account must not be this account";
+pub const COLLECTION_IS_SELF: &str = "collection account must not be this account";
 pub const LEASE_ACTIVE: &str = "sweep requires an expired lease";
 pub const EXTENSIONS_LOCKED: &str = "the authority may edit extensions only after the lease ends";
-pub const TRANSFER_NOT_ARMED: &str = "the owner has not authorised a transfer of this lease";
+pub const TRANSFER_NOT_REQUESTED: &str =
+    "a transfer of a live lease must be asked for by an account that holds it";
 pub const NOTHING_TO_REVERT: &str = "there is no rotation to revert";
 pub const REVERT_WINDOW_CLOSED: &str = "the revert window for this rotation has closed";
 pub const REVERT_TARGET_PINNED: &str = "a revert may only return the name to where it came from";

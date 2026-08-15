@@ -228,7 +228,7 @@ impl TlaRegistry {
             .on_reclaim_finalized(tla_id, name, destination);
         ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_FORCE_TRANSFER)
-            .force_transfer(sub_account, None, RotationCause::Reclaim)
+            .force_transfer(sub_account, None, RotationCause::Reclaim, None)
             .then(finalize)
     }
 }

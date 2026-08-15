@@ -18,6 +18,7 @@ pub enum ContractError {
     ApprovalTooYoung,
     ParkTakesNoOwner,
     TransferNeedsOwner,
+    TransferNeedsHolder,
     RequiresOneYocto,
 }
 

@@ -94,8 +94,7 @@ async fn demonstrate_account_id_ownership_and_hos_reclaim() -> Result<()> {
     println!("\n===== 5. THE OWNER TRIES TO SEIZE (AddKey FullAccess) =====");
     println!("  result      : REJECTED (the account never adds keys, so none exist)");
 
-    arm_transfer(&fleet, &alice).await?;
-    let rotate = fleet
+    let alone = fleet
         .extension
         .call(&alice, "hos_transfer_ownership")
         .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
@@ -103,8 +102,28 @@ async fn demonstrate_account_id_ownership_and_hos_reclaim() -> Result<()> {
         .max_gas()
         .transact()
         .await?;
-    assert!(rotate.is_success(), "HoS must retain control: {rotate:#?}");
-    println!("\n===== 6. HoS TRANSFERS THE NAME (reclaim / resale) =====");
+    assert!(
+        alone.is_failure(),
+        "HoS alone must not move a live lease: {alone:#?}"
+    );
+
+    let rotate = fleet
+        .extension
+        .call(&alice, "hos_transfer_ownership")
+        .args_json(json!({
+            "to": fleet.relay.id(),
+            "cause": "Sale",
+            "asked_by": fleet.bob.id(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        rotate.is_success(),
+        "a sale the holder asked for must settle: {rotate:#?}"
+    );
+    println!("\n===== 6. THE HOLDER SELLS, HoS CANNOT MOVE IT ALONE =====");
 
     let evicted = fleet
         .bob

@@ -505,6 +505,7 @@ fn re_rent_transfer(hos_extension: &AccountId, pending: PendingReRent) -> Promis
             pending.sub_account,
             Some(pending.owner.clone()),
             RotationCause::ReRent,
+            None,
         )
         .then(
             TlaRegistry::ext(env::current_account_id())

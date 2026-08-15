@@ -27,6 +27,7 @@ impl TlaRegistry {
                 sub_account,
                 Some(new_owner.clone()),
                 RotationCause::Transfer,
+                Some(from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
@@ -72,6 +73,7 @@ impl TlaRegistry {
                 sub_account,
                 Some(new_owner.clone()),
                 RotationCause::Recovery,
+                None,
             )
             .then(
                 Self::ext(env::current_account_id())

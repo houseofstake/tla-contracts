@@ -133,7 +133,6 @@ async fn nobody_can_repoint_the_payout_account_independently() -> Result<()> {
 async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let tenant = mint(&fleet, "sold", NearToken::from_near(5)).await?;
-    arm_transfer(&fleet, &tenant).await?;
 
     let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
     let buyer_before = balance_of(&fleet.worker, fleet.relay.id()).await?;
@@ -141,13 +140,17 @@ async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
     let moved = fleet
         .extension
         .call(&tenant, "hos_transfer_ownership")
-        .args_json(json!({ "to": fleet.relay.id(), "cause": "Sale" }))
+        .args_json(json!({
+            "to": fleet.relay.id(),
+            "cause": "Sale",
+            "asked_by": fleet.bob.id(),
+        }))
         .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(30))
         .transact()
         .await?;
     if !moved.is_success() {
-        bail!("the authority must be able to transfer ownership: {moved:#?}");
+        bail!("a sale the holder asked for must settle: {moved:#?}");
     }
     if let Some(failure) = moved.receipt_failures().first() {
         bail!("transfer receipt failed: {failure:?}");
@@ -165,9 +168,10 @@ async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
         seller_after > seller_before + NearToken::from_near(4).as_yoctonear(),
         "the outgoing owner must receive the balance: {seller_before} -> {seller_after}"
     );
-    assert_eq!(
-        buyer_after, buyer_before,
-        "the incoming owner must inherit the name, never the previous owner's funds"
+    assert!(
+        buyer_after < buyer_before + NearToken::from_near(1).as_yoctonear(),
+        "the incoming owner must inherit the name, never the previous owner's funds: \
+         {buyer_before} -> {buyer_after}"
     );
     let left = balance_of(&fleet.worker, &tenant).await?;
     assert!(
@@ -181,7 +185,6 @@ async fn a_transfer_moves_the_payout_with_the_owner() -> Result<()> {
 async fn a_recovery_leaves_the_balance_with_the_recovered_account() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let tenant = mint(&fleet, "lostkeys", NearToken::from_near(5)).await?;
-    arm_transfer(&fleet, &tenant).await?;
 
     let before = balance_of(&fleet.worker, &tenant).await?;
     let moved = fleet

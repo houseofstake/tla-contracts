@@ -103,6 +103,7 @@ impl TlaRegistry {
                 sub_account,
                 Some(receiver_id.clone()),
                 RotationCause::Transfer,
+                Some(from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
@@ -133,6 +134,7 @@ impl TlaRegistry {
                 sub_account,
                 Some(receiver_id.clone()),
                 RotationCause::Transfer,
+                Some(from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
@@ -219,7 +221,7 @@ impl TlaRegistry {
         PromiseOrValue::Promise(
             ext_hos_extension::ext(self.hos_extension.clone())
                 .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-                .force_transfer(sub_account, Some(from.clone()), RotationCause::Revert)
+                .force_transfer(sub_account, Some(from.clone()), RotationCause::Revert, None)
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)

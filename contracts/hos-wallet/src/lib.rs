@@ -71,9 +71,23 @@ pub struct AuthorizationBlob {
 pub struct WalletInit {
     pub owner_account: AccountId,
     pub authority: AccountId,
+    pub collection_id: AccountId,
     pub payout_account: AccountId,
     pub lease_until_ns: U64,
     pub timeout_secs: u32,
+}
+
+/// What an item answers about itself, without anyone having to trust the
+/// collection's index. Mirrors TEP-62's `get_nft_data`, which reports
+/// `(init?, index, collection, owner, content)` from the item rather than the
+/// collection.
+#[near(serializers = [json])]
+pub struct NftItemInfo {
+    pub init: bool,
+    pub collection_id: AccountId,
+    pub token_id: String,
+    pub owner_id: AccountId,
+    pub parent_id: String,
 }
 
 #[near(serializers = [json])]
@@ -132,12 +146,12 @@ pub struct TenantWallet {
     wallet: State<NoPublicKey>,
     authority: AccountId,
     owner: AccountId,
+    collection_id: AccountId,
     payout_account: AccountId,
     lease_until_ns: u64,
     state: OperatingState,
     frozen: FreezeState,
     authority_freeze_until_ns: u64,
-    transfer_armed: bool,
     spend_grants: BTreeMap<AccountId, SpendGrant>,
     revert_to: Option<AccountId>,
     revert_until_ns: u64,
@@ -204,6 +218,7 @@ impl TenantWallet {
         let WalletInit {
             owner_account,
             authority,
+            collection_id,
             payout_account,
             lease_until_ns,
             timeout_secs,
@@ -225,6 +240,7 @@ impl TenantWallet {
         require!(payout_account != current, error::PAYOUT_IS_SELF);
         require!(owner_account != current, error::OWNER_IS_SELF);
         require!(owner_account != authority, error::UNAUTHORIZED);
+        require!(collection_id != current, error::COLLECTION_IS_SELF);
         Event::WalletInitialized {
             owner: owner_account.clone(),
         }
@@ -237,20 +253,23 @@ impl TenantWallet {
             wallet,
             authority,
             owner: owner_account,
+            collection_id,
             payout_account,
             lease_until_ns: lease_until_ns.0,
             state: OperatingState::Active,
             frozen: FreezeState::Unfrozen,
             authority_freeze_until_ns: 0,
-            transfer_armed: false,
             spend_grants: BTreeMap::new(),
             revert_to: None,
             revert_until_ns: 0,
         }
     }
 
+    /// `collection_id` names the index this account belongs to. It confers no
+    /// authority, so naming the wrong one cannot move or take the account: the
+    /// pairing check simply fails and the item is refused.
     #[init(ignore_state)]
-    pub fn hos_migrate() -> Self {
+    pub fn hos_migrate(collection_id: AccountId) -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
         let old = LegacyTenantWallet::try_from_slice(&raw)
             .unwrap_or_else(|_| env::panic_str(error::NO_STATE));
@@ -263,16 +282,20 @@ impl TenantWallet {
             old.wallet.extensions.contains(&old.owner),
             error::ONLY_OWNER
         );
+        require!(
+            collection_id != env::current_account_id(),
+            error::COLLECTION_IS_SELF
+        );
         Self {
             wallet: old.wallet,
             authority: old.authority,
             owner: old.owner,
+            collection_id,
             payout_account: old.payout_account,
             lease_until_ns: old.lease_until_ns,
             state: old.state,
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
-            transfer_armed: false,
             spend_grants: old.spend_grants,
             revert_to: None,
             revert_until_ns: 0,
@@ -331,18 +354,6 @@ impl TenantWallet {
         }
     }
 
-    #[payable]
-    pub fn hos_arm_transfer(&mut self, armed: bool) {
-        self.assert_owner_caller();
-        self.assert_renter_active();
-        self.transfer_armed = armed;
-        Event::TransferArmed { armed }.emit();
-    }
-
-    pub fn hos_transfer_armed(&self) -> bool {
-        self.transfer_armed
-    }
-
     /// NEP-641. Always delegates: the account holds no key, so the owner named
     /// in the blob resolves the authorization instead. The lease authority is
     /// never an eligible owner, so House of Stake cannot prove ownership of a
@@ -384,6 +395,27 @@ impl TenantWallet {
         }
     }
 
+    /// The item's own account of itself. A caller pairs this with the
+    /// collection's `nft_token` and refuses the item unless both agree, so
+    /// neither side is trusted alone. `parent_id` needs no lookup to check:
+    /// only that account could have created this one, which is what makes a
+    /// forged collection claim detectable.
+    pub fn nft_item_info(&self) -> NftItemInfo {
+        let token_id = env::current_account_id();
+        let parent_id = token_id
+            .as_str()
+            .split_once('.')
+            .map(|(_, parent)| parent.to_string())
+            .unwrap_or_default();
+        NftItemInfo {
+            init: self.wallet.extensions.contains(&self.owner),
+            collection_id: self.collection_id.clone(),
+            token_id: token_id.to_string(),
+            owner_id: self.owner.clone(),
+            parent_id,
+        }
+    }
+
     pub fn hos_payout_account(&self) -> AccountId {
         self.payout_account.clone()
     }
@@ -408,7 +440,12 @@ impl TenantWallet {
     /// Moves payout with ownership, evicts co-owners, and returns any balance
     /// above the reserve to the outgoing payout account.
     #[payable]
-    pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause) {
+    pub fn hos_transfer_ownership(
+        &mut self,
+        to: Option<AccountId>,
+        cause: RotationCause,
+        asked_by: Option<AccountId>,
+    ) {
         self.assert_authority();
         let previous_owner = self.owner.clone();
         if matches!(cause, RotationCause::Revert) {
@@ -423,13 +460,21 @@ impl TenantWallet {
             require!(to.as_ref() == Some(&pinned), error::REVERT_TARGET_PINNED);
             self.revert_until_ns = 0;
         } else {
-            if !self.lease_expired() {
-                require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+            if cause.needs_holder() {
+                let holder =
+                    asked_by.unwrap_or_else(|| env::panic_str(error::TRANSFER_NOT_REQUESTED));
+                require!(holder != self.authority, error::UNAUTHORIZED);
+                require!(
+                    self.wallet.extensions.contains(&holder),
+                    error::TRANSFER_NOT_REQUESTED
+                );
+            }
+            if cause.needs_expiry() {
+                require!(self.lease_expired(), error::LEASE_ACTIVE);
             }
             self.revert_to = Some(previous_owner);
             self.revert_until_ns = env::block_timestamp().saturating_add(REVERT_WINDOW_NS);
         }
-        self.transfer_armed = false;
         self.spend_grants.clear();
         if let Some(next) = to.as_ref() {
             require!(*next != env::current_account_id(), error::SELF_TARGET);

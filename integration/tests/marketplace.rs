@@ -244,7 +244,6 @@ async fn nft_transfer_rotates_the_wallet_and_the_registry_together() -> Result<(
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     let moved = fleet
@@ -302,7 +301,6 @@ async fn nft_transfer_by_a_non_owner_moves_nothing() -> Result<()> {
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     let attempt = fleet
@@ -381,7 +379,6 @@ async fn nft_transfer_call_leaves_the_name_with_a_receiver_that_keeps_it() -> Re
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     let out = transfer_call(&fleet, &registry, &receiver, &token_id, "keep").await?;
@@ -413,7 +410,6 @@ async fn nft_transfer_call_returns_the_name_when_the_receiver_refuses_it() -> Re
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     transfer_call(&fleet, &registry, &receiver, &token_id, "return")
@@ -447,7 +443,6 @@ async fn nft_transfer_call_returns_the_name_when_the_receiver_panics() -> Result
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     transfer_call(&fleet, &registry, &receiver, &token_id, "panic")
@@ -470,7 +465,6 @@ async fn nft_transfer_refuses_an_approval_id() -> Result<()> {
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
     let token_id = format!("{name}.{tla}");
 
     let attempt = fleet
@@ -512,7 +506,6 @@ async fn a_sale_pays_the_sellers_balance_out_with_the_name() -> Result<()> {
         .transfer_near(&tenant, NearToken::from_near(3))
         .await?
         .into_result()?;
-    arm_transfer(&fleet, &tenant).await?;
 
     let held = balance_of(&fleet.worker, &tenant).await?;
     let seller_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
@@ -557,7 +550,6 @@ async fn tla_registry_transfer_rotates_wallet_owner_without_a_sale() -> Result<(
 
     let name = "alice";
     let tenant = rent(&fleet, &registry, &tla, name).await?;
-    arm_transfer(&fleet, &tenant).await?;
 
     let moved = fleet
         .bob
@@ -815,7 +807,6 @@ async fn a_wallet_with_many_co_owners_is_still_transferable() -> Result<()> {
     }
     println!("padded the extension set to {added} entries");
 
-    arm_transfer(&fleet, &tenant).await?;
     let moved = fleet
         .bob
         .call(registry.id(), "nft_transfer")

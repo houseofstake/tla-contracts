@@ -8,6 +8,7 @@ const PARENT: &str = "tla.testnet";
 const AUTHORITY: &str = "hos-extension.testnet";
 const PAYOUT: &str = "payout.testnet";
 const OWNER: &str = "renter.testnet";
+const REGISTRY: &str = "registry.testnet";
 const BUYER: &str = "buyer.testnet";
 const YEAR_NS: u64 = 31_536_000_000_000_000;
 const HOUR_NS: u64 = 3_600_000_000_000;
@@ -43,15 +44,11 @@ fn init(ts: u64, lease_until_ns: u64) -> TenantWallet {
     TenantWallet::hos_init(WalletInit {
         owner_account: acc(OWNER),
         authority: acc(AUTHORITY),
+        collection_id: acc(REGISTRY),
         payout_account: acc(PAYOUT),
         lease_until_ns: U64(lease_until_ns),
         timeout_secs: 3600,
     })
-}
-
-fn arm(c: &mut TenantWallet) {
-    ctx(OWNER, 1, now_ns());
-    c.hos_arm_transfer(true);
 }
 
 fn deploy() -> TenantWallet {
@@ -239,12 +236,11 @@ fn a_granted_extension_cannot_pay_an_ungranted_receiver() {
 #[test]
 fn a_revert_returns_the_name_to_where_it_came_from_without_a_fresh_arming() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     assert!(c.w_is_extension_enabled(acc(BUYER)));
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
     assert!(c.w_is_extension_enabled(acc(OWNER)));
     assert!(!c.w_is_extension_enabled(acc(BUYER)));
 }
@@ -253,11 +249,10 @@ fn a_revert_returns_the_name_to_where_it_came_from_without_a_fresh_arming() {
 #[should_panic(expected = "only return the name to where it came from")]
 fn a_revert_cannot_send_the_name_to_a_third_party() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc("attacker.testnet")), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc("attacker.testnet")), RotationCause::Revert, None);
 }
 
 #[test]
@@ -265,77 +260,73 @@ fn a_revert_cannot_send_the_name_to_a_third_party() {
 fn a_revert_cannot_run_without_a_rotation_to_undo() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
 }
 
 #[test]
 #[should_panic(expected = "no rotation to revert")]
 fn a_revert_is_one_shot() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
 }
 
 #[test]
 #[should_panic(expected = "revert window for this rotation has closed")]
 fn a_revert_expires_with_its_window() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     ctx(AUTHORITY, 1, now_ns() + HOUR_NS);
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
 }
 
 #[test]
-#[should_panic(expected = "the owner has not authorised a transfer")]
-fn a_revert_does_not_leave_the_wallet_armed_for_a_further_move() {
+#[should_panic(expected = "must be asked for by an account that holds it")]
+fn a_revert_does_not_let_the_authority_move_the_name_onward() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(BUYER)));
 }
 
 #[test]
 #[should_panic(expected = "only return the name to where it came from")]
 fn a_revert_reaches_only_the_previous_hop_not_further_back() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
-    ctx(BUYER, 1, now_ns());
-    c.hos_arm_transfer(true);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc("carol.testnet")), RotationCause::Transfer);
+    c.hos_transfer_ownership(
+        Some(acc("carol.testnet")),
+        RotationCause::Transfer,
+        Some(acc(BUYER)),
+    );
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(OWNER)), RotationCause::Revert, None);
 }
 
 #[test]
 #[should_panic(expected = "receiver must not be this account")]
 fn a_rotation_cannot_target_the_wallet_account() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(WALLET)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(WALLET)), RotationCause::Transfer, Some(acc(OWNER)));
 }
 
 #[test]
 #[should_panic(expected = "only the lease authority")]
 fn the_owner_cannot_rotate_the_wallet_directly() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(OWNER, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
 }
 
 #[test]
@@ -344,7 +335,7 @@ fn a_granted_extension_cannot_rotate_the_wallet() {
     let mut c = deploy();
     install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
     ctx(BUYER, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Revert);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Revert, None);
 }
 
 #[test]
@@ -432,9 +423,12 @@ fn evicting_an_extension_drops_its_grant() {
 fn a_sale_clears_every_grant_the_previous_owner_made() {
     let mut c = deploy();
     install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc("newowner.testnet")), RotationCause::Sale);
+    c.hos_transfer_ownership(
+        Some(acc("newowner.testnet")),
+        RotationCause::Sale,
+        Some(acc(OWNER)),
+    );
     assert!(
         c.hos_spend_grant(acc(BUYER)).is_none(),
         "a buyer must not inherit the seller's spend grants"
@@ -464,13 +458,18 @@ fn an_installed_extension_cannot_evict_the_owner() {
 }
 
 #[test]
-#[should_panic(expected = "only the owner")]
-fn an_installed_extension_cannot_arm_a_transfer() {
+fn a_co_owner_the_owner_installed_may_ask_for_a_transfer() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner(BUYER)]));
-    ctx(BUYER, 1, now_ns());
-    c.hos_arm_transfer(true);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc("carol.testnet")),
+        RotationCause::Transfer,
+        Some(acc(BUYER)),
+    );
+    assert!(c.w_is_extension_enabled(acc("carol.testnet")));
+    assert!(!c.w_is_extension_enabled(acc(BUYER)));
 }
 
 #[test]
@@ -537,9 +536,8 @@ fn the_lease_push_cannot_park_the_wallet() {
 #[test]
 fn a_transfer_moves_ownership_and_payout_together() {
     let mut c = deploy();
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     assert!(c.w_is_extension_enabled(acc(BUYER)));
     assert!(!c.w_is_extension_enabled(acc(OWNER)));
     assert_eq!(c.hos_payout_account(), acc(BUYER));
@@ -550,19 +548,17 @@ fn a_transfer_evicts_co_owners() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner("carol.testnet")]));
-    arm(&mut c);
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
     assert!(!c.w_is_extension_enabled(acc("carol.testnet")));
     assert!(!c.w_is_extension_enabled(acc(OWNER)));
 }
 
 #[test]
 fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
-    let mut c = deploy();
-    arm(&mut c);
-    ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(None, RotationCause::Reclaim);
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
     assert_eq!(c.w_extensions().len(), 1);
     assert!(c.w_is_extension_enabled(acc(AUTHORITY)));
     assert_eq!(c.hos_payout_account(), acc(PAYOUT));
@@ -573,7 +569,7 @@ fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
 fn the_renter_cannot_transfer_ownership() {
     let mut c = deploy();
     ctx(OWNER, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
 }
 
 #[test]
@@ -701,6 +697,7 @@ fn init_rejects_a_non_parent_caller() {
     TenantWallet::hos_init(WalletInit {
         owner_account: acc(OWNER),
         authority: acc(AUTHORITY),
+        collection_id: acc(REGISTRY),
         payout_account: acc(PAYOUT),
         lease_until_ns: U64(now_ns() + YEAR_NS),
         timeout_secs: 3600,
@@ -720,6 +717,7 @@ fn init_rejects_an_owner_that_is_also_the_authority() {
     TenantWallet::hos_init(WalletInit {
         owner_account: acc(AUTHORITY),
         authority: acc(AUTHORITY),
+        collection_id: acc(REGISTRY),
         payout_account: acc(PAYOUT),
         lease_until_ns: U64(now_ns() + YEAR_NS),
         timeout_secs: 3600,
@@ -772,10 +770,9 @@ fn resolve_auth_refuses_an_account_that_is_not_an_owner() {
 #[test]
 #[should_panic(expected = "named account is not an owner")]
 fn resolve_auth_panics_once_the_account_is_parked() {
-    let mut c = deploy();
-    arm(&mut c);
-    ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(None, RotationCause::Reclaim);
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
     let _ = c.w_resolve_auth(vec![], auth_blob("login"));
 }
 
@@ -875,46 +872,76 @@ fn the_authority_can_refreeze_after_a_lapse() {
 }
 
 #[test]
-#[should_panic(expected = "the owner has not authorised a transfer")]
-fn the_authority_cannot_move_a_live_lease_the_owner_has_not_armed() {
+#[should_panic(expected = "must be asked for by an account that holds it")]
+fn the_authority_cannot_move_a_live_lease_on_its_own() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, None);
 }
 
 #[test]
-fn reclaim_after_expiry_needs_no_arming() {
+#[should_panic(expected = "unauthorized")]
+fn the_authority_cannot_name_itself_as_the_holder() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc(BUYER)),
+        RotationCause::Transfer,
+        Some(acc(AUTHORITY)),
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be asked for by an account that holds it")]
+fn a_stranger_cannot_be_named_as_the_holder() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(
+        Some(acc(BUYER)),
+        RotationCause::Transfer,
+        Some(acc("attacker.testnet")),
+    );
+}
+
+#[test]
+fn reclaim_after_expiry_needs_no_holder() {
     let mut c = init(now_ns(), now_ns() + 1);
     ctx(AUTHORITY, 1, now_ns() + 2);
-    c.hos_transfer_ownership(None, RotationCause::Reclaim);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
     assert_eq!(c.w_extensions().len(), 1);
 }
 
 #[test]
-fn arming_is_consumed_by_a_transfer() {
+#[should_panic(expected = "sweep requires an expired lease")]
+fn the_authority_cannot_reclaim_a_live_lease() {
     let mut c = deploy();
-    arm(&mut c);
-    assert!(c.hos_transfer_armed());
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer);
-    assert!(!c.hos_transfer_armed());
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
 }
 
 #[test]
-#[should_panic(expected = "only the owner")]
-fn the_authority_cannot_arm_a_transfer_for_the_owner() {
+fn recovery_works_without_the_lost_owner_doing_anything() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
-    c.hos_arm_transfer(true);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery, None);
+    assert!(c.w_is_extension_enabled(acc(BUYER)));
+    assert!(!c.w_is_extension_enabled(acc(OWNER)));
 }
 
 #[test]
-fn the_owner_can_disarm_before_a_sale_settles() {
+fn an_owner_who_leaves_cannot_ask_for_a_further_transfer() {
     let mut c = deploy();
-    arm(&mut c);
-    ctx(OWNER, 1, now_ns());
-    c.hos_arm_transfer(false);
-    assert!(!c.hos_transfer_armed());
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+    ctx(AUTHORITY, 1, now_ns());
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.hos_transfer_ownership(
+            Some(acc("carol.testnet")),
+            RotationCause::Transfer,
+            Some(acc(OWNER)),
+        );
+    }));
+    assert!(outcome.is_err(), "the previous owner is no longer a holder");
 }
 
 fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
@@ -933,19 +960,16 @@ fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
 }
 
 #[test]
-fn migrate_carries_the_owner_across_and_disarms_any_pending_transfer() {
+fn migrate_carries_the_owner_across_and_drops_any_arming() {
     let c = deploy();
     let lease = c.lease_until_ns;
     let legacy = legacy_state(c, true);
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    let migrated = TenantWallet::hos_migrate();
+    let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
     assert_eq!(migrated.owner, acc(OWNER));
     assert_eq!(migrated.lease_until_ns, lease);
-    assert!(
-        !migrated.transfer_armed,
-        "a migration must not carry an armed transfer across"
-    );
+    assert!(migrated.wallet.extensions.contains(&acc(OWNER)));
 }
 
 #[test]
@@ -955,7 +979,7 @@ fn migrate_cannot_be_used_to_hand_the_wallet_to_another_account() {
     legacy.wallet.extensions.insert(acc("co-owner.testnet"));
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    let migrated = TenantWallet::hos_migrate();
+    let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
     assert_eq!(
         migrated.owner,
         acc(OWNER),
@@ -970,7 +994,7 @@ fn migrate_is_refused_to_anyone_but_the_authority() {
     let legacy = legacy_state(c, false);
     ctx(OWNER, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    TenantWallet::hos_migrate();
+    TenantWallet::hos_migrate(acc(REGISTRY));
 }
 
 #[test]
@@ -981,7 +1005,7 @@ fn migrate_refuses_an_owner_outside_the_extension_set() {
     legacy.owner = acc("stranger.testnet");
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    TenantWallet::hos_migrate();
+    TenantWallet::hos_migrate(acc(REGISTRY));
 }
 
 #[test]
@@ -1053,11 +1077,10 @@ fn sweepable_from(balance: NearToken, c: &TenantWallet) -> u128 {
 #[test]
 fn a_sale_returns_the_balance_to_the_seller_not_the_buyer() {
     let mut c = deploy();
-    arm(&mut c);
     let balance = NearToken::from_near(4);
     ctx_bal(AUTHORITY, 1, now_ns(), balance);
     let expected = sweepable_from(balance, &c);
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale, Some(acc(OWNER)));
     assert_eq!(transfers(), vec![(acc(PAYOUT), expected)]);
     assert_eq!(c.hos_payout_account(), acc(BUYER));
 }
@@ -1065,9 +1088,8 @@ fn a_sale_returns_the_balance_to_the_seller_not_the_buyer() {
 #[test]
 fn the_authority_cannot_redirect_the_sweep() {
     let mut c = deploy();
-    arm(&mut c);
     ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale, Some(acc(OWNER)));
     let sent = transfers();
     assert!(
         sent.iter().all(|(to, _)| *to == acc(PAYOUT)),
@@ -1078,9 +1100,8 @@ fn the_authority_cannot_redirect_the_sweep() {
 #[test]
 fn a_recovery_leaves_the_balance_with_the_account() {
     let mut c = deploy();
-    arm(&mut c);
     ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery, None);
     assert!(
         transfers().is_empty(),
         "a recovered account keeps its balance for the recovered owner"
@@ -1093,35 +1114,32 @@ fn a_reclaim_returns_the_balance_to_the_payout_account() {
     let balance = NearToken::from_near(6);
     ctx_bal(AUTHORITY, 1, now_ns() + 2, balance);
     let expected = sweepable_from(balance, &c);
-    c.hos_transfer_ownership(None, RotationCause::Reclaim);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
     assert_eq!(transfers(), vec![(acc(PAYOUT), expected)]);
 }
 
 #[test]
 fn a_sweep_never_dips_into_the_reserve() {
     let mut c = deploy();
-    arm(&mut c);
     ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_millinear(1));
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale, Some(acc(OWNER)));
     assert!(transfers().is_empty());
 }
 
 #[test]
 fn a_rotation_onto_the_payout_account_moves_nothing() {
     let mut c = deploy();
-    arm(&mut c);
     ctx_bal(AUTHORITY, 1, now_ns(), NearToken::from_near(4));
-    c.hos_transfer_ownership(Some(acc(PAYOUT)), RotationCause::Sale);
+    c.hos_transfer_ownership(Some(acc(PAYOUT)), RotationCause::Sale, Some(acc(OWNER)));
     assert!(transfers().is_empty());
 }
 
 #[test]
 fn the_sweep_leaves_the_account_able_to_pay_for_its_own_storage() {
     let mut c = deploy();
-    arm(&mut c);
     let balance = NearToken::from_near(4);
     ctx_bal(AUTHORITY, 1, now_ns(), balance);
-    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale, Some(acc(OWNER)));
     let swept: u128 = transfers().iter().map(|(_, amount)| amount).sum();
     assert!(balance.as_yoctonear() - swept >= c.reserve());
 }
@@ -1205,5 +1223,68 @@ mod adapter_wire_format {
             near_sdk::NearToken::from_near(1),
             "the transfer amount must survive the wire"
         );
+    }
+}
+
+mod sharded_item {
+    use super::*;
+
+    #[test]
+    fn an_item_describes_itself_without_the_collection() {
+        let c = deploy();
+        let info = c.nft_item_info();
+        assert_eq!(info.collection_id, acc(REGISTRY));
+        assert_eq!(info.token_id, WALLET);
+        assert_eq!(info.owner_id, acc(OWNER));
+        assert_eq!(info.parent_id, PARENT);
+        assert!(info.init);
+    }
+
+    #[test]
+    fn the_reported_owner_follows_a_transfer_not_the_stale_index() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+        assert_eq!(
+            c.nft_item_info().owner_id,
+            acc(BUYER),
+            "the item is the authority on ownership, so a collection index that still \
+             says otherwise is the thing that is wrong"
+        );
+    }
+
+    #[test]
+    fn the_parent_the_item_reports_is_the_only_account_that_could_have_made_it() {
+        let c = deploy();
+        let info = c.nft_item_info();
+        assert!(
+            info.token_id.ends_with(&format!(".{}", info.parent_id)),
+            "a caller can check the naming without a single view call, and only \
+             {} could have created {}",
+            info.parent_id,
+            info.token_id
+        );
+    }
+
+    #[test]
+    fn a_parked_item_reports_itself_uninitialised() {
+        let mut c = init(now_ns(), now_ns() + 1);
+        ctx(AUTHORITY, 1, now_ns() + 2);
+        c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+        assert!(!c.nft_item_info().init);
+    }
+
+    #[test]
+    #[should_panic(expected = "collection account must not be this account")]
+    fn an_item_cannot_claim_to_be_its_own_collection() {
+        ctx(PARENT, 0, now_ns());
+        TenantWallet::hos_init(WalletInit {
+            owner_account: acc(OWNER),
+            authority: acc(AUTHORITY),
+            collection_id: acc(WALLET),
+            payout_account: acc(PAYOUT),
+            lease_until_ns: U64(now_ns() + YEAR_NS),
+            timeout_secs: 3600,
+        });
     }
 }

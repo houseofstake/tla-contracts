@@ -12,6 +12,7 @@ pub trait HosExtension {
         wallet: AccountId,
         new_owner: Option<AccountId>,
         cause: RotationCause,
+        asked_by: Option<AccountId>,
     );
     fn push_lease(&mut self, wallet: AccountId, lease_until_ns: U64, state: OperatingState);
 }
