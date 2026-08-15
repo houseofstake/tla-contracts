@@ -92,7 +92,7 @@ impl TlaRegistry {
         self.tlas
             .iter()
             .skip(from_index as usize)
-            .take(limit as usize)
+            .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .map(|(id, entry)| to_tla_view(id, entry, &self.fee_config, &self.clock()))
             .collect()
     }
@@ -101,7 +101,7 @@ impl TlaRegistry {
         self.sub_accounts
             .iter()
             .skip(from_index as usize)
-            .take(limit as usize)
+            .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|(key, sub)| self.to_sub_detail(key, sub))
             .collect()
     }
@@ -144,7 +144,7 @@ impl TlaRegistry {
             })
             .filter(|r| account.as_ref().is_none_or(|a| &r.account == a))
             .skip(from_index as usize)
-            .take(limit as usize)
+            .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .map(|r| ActivityView {
                 event: r.event.clone(),
                 account: r.account.clone(),
@@ -193,7 +193,7 @@ impl TlaRegistry {
     ) -> Vec<SubAccountDetailView> {
         keys.iter()
             .skip(from_index as usize)
-            .take(limit as usize)
+            .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|key| self.to_sub_detail(key, self.sub_accounts.get(key)?))
             .collect()
     }

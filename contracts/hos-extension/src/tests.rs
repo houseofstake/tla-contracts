@@ -329,3 +329,26 @@ fn an_admin_cannot_approve_an_upgrade() {
         Err(ContractError::OnlyCouncil)
     ));
 }
+
+mod migration {
+    use crate::HosExtension;
+    use near_sdk::base64::Engine;
+    use near_sdk::borsh::BorshDeserialize;
+
+    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbRgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAcmVjLmhvc2RlbW8udGVzdG5ldAABFwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAA==";
+
+    #[test]
+    fn the_live_state_still_decodes_as_the_current_struct() {
+        let raw = near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64");
+        let state = HosExtension::try_from_slice(&raw)
+            .expect("deployed state no longer decodes as HosExtension");
+        assert_eq!(state.registry.as_str(), "registry.hosdemo.testnet");
+        assert_eq!(state.recovery.as_str(), "rec.hosdemo.testnet");
+        assert_eq!(state.council.as_str(), "council.hosdemo.testnet");
+        assert_eq!(state.version, 1);
+        assert!(!state.paused);
+        assert_eq!(state.paused_until_ns, 0);
+    }
+}

@@ -37,6 +37,16 @@ use hos_common::MAX_AUTHORITY_HOLD_NS;
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
 const ACTIVITY_CAPACITY: u32 = 256;
+const MIGRATION_DRAIN_CAP: usize = 200;
+
+fn drain_capped<V: BorshSerialize + near_sdk::borsh::BorshDeserialize>(
+    map: &mut IterableMap<String, V>,
+) {
+    let doomed: Vec<String> = map.keys().take(MIGRATION_DRAIN_CAP).cloned().collect();
+    for key in doomed {
+        map.remove(&key);
+    }
+}
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -216,8 +226,8 @@ impl TlaRegistry {
     pub fn migrate() -> Self {
         let mut old: LegacyTlaRegistry =
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
-        old.listings.clear();
-        old.accepted_offers.clear();
+        drain_capped(&mut old.listings);
+        drain_capped(&mut old.accepted_offers);
         Self {
             tlas: old.tlas,
             sub_accounts: old.sub_accounts,

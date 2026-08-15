@@ -116,6 +116,7 @@ pub struct LegacyTenantWallet {
     frozen: FreezeState,
     authority_freeze_until_ns: u64,
     transfer_armed: bool,
+    spend_grants: BTreeMap<AccountId, SpendGrant>,
 }
 
 #[near(
@@ -249,7 +250,7 @@ impl TenantWallet {
     }
 
     #[init(ignore_state)]
-    pub fn hos_migrate(owner: AccountId) -> Self {
+    pub fn hos_migrate() -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
         let old = LegacyTenantWallet::try_from_slice(&raw)
             .unwrap_or_else(|_| env::panic_str(error::NO_STATE));
@@ -257,19 +258,22 @@ impl TenantWallet {
             env::predecessor_account_id() == old.authority,
             error::ONLY_AUTHORITY
         );
-        require!(owner != old.authority, error::UNAUTHORIZED);
-        require!(old.wallet.extensions.contains(&owner), error::ONLY_OWNER);
+        require!(old.owner != old.authority, error::UNAUTHORIZED);
+        require!(
+            old.wallet.extensions.contains(&old.owner),
+            error::ONLY_OWNER
+        );
         Self {
             wallet: old.wallet,
             authority: old.authority,
-            owner,
+            owner: old.owner,
             payout_account: old.payout_account,
             lease_until_ns: old.lease_until_ns,
             state: old.state,
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
             transfer_armed: false,
-            spend_grants: BTreeMap::new(),
+            spend_grants: old.spend_grants,
             revert_to: None,
             revert_until_ns: 0,
         }

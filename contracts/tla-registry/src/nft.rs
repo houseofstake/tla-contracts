@@ -12,8 +12,6 @@ use near_sdk::{
     env, ext_contract, near, AccountId, FunctionError, Gas, Promise, PromiseError, PromiseOrValue,
 };
 
-/// A caller may not ask for an unbounded scan of the collection.
-const MAX_ENUMERATION_LIMIT: u64 = 100;
 const EVENT_STANDARD: &str = "nep171";
 const EVENT_VERSION: &str = "1.0.0";
 const GAS_FOR_NFT_ON_TRANSFER: Gas = Gas::from_tgas(25);
@@ -323,11 +321,7 @@ impl TlaRegistry {
         self.sub_accounts
             .iter()
             .skip(start)
-            .take(
-                limit
-                    .unwrap_or(MAX_ENUMERATION_LIMIT)
-                    .min(MAX_ENUMERATION_LIMIT) as usize,
-            )
+            .take(limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT) as usize)
             .map(|(key, sub)| Token {
                 token_id: key.clone(),
                 owner_id: sub.owner.clone(),
@@ -348,11 +342,7 @@ impl TlaRegistry {
         let start = from_index.map_or(0, |i| i.0 as usize);
         keys.iter()
             .skip(start)
-            .take(
-                limit
-                    .unwrap_or(MAX_ENUMERATION_LIMIT)
-                    .min(MAX_ENUMERATION_LIMIT) as usize,
-            )
+            .take(limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|key| {
                 let sub = self.sub_accounts.get(key)?;
                 Some(Token {

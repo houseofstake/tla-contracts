@@ -776,3 +776,64 @@ async fn tla_registry_paged_views_serve_the_catalogue_without_an_indexer() -> Re
 
     Ok(())
 }
+
+#[tokio::test]
+async fn a_wallet_with_many_co_owners_is_still_transferable() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let tenant = rent(&fleet, &registry, &tla, "alice").await?;
+
+    fleet
+        .council
+        .transfer_near(&tenant, NearToken::from_near(5))
+        .await?
+        .into_result()?;
+
+    let mut added = 0usize;
+    for batch in 0..20 {
+        let ops: Vec<serde_json::Value> = (0..25)
+            .map(|i| {
+                json!({
+                    "op": "add_extension",
+                    "payload": { "account_id": format!("pad{batch}x{i}.test.near") }
+                })
+            })
+            .collect();
+        let out = fleet
+            .bob
+            .call(&tenant, "w_execute_extension")
+            .args_json(json!({ "request": { "internal": ops } }))
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?;
+        if out.into_result().is_err() {
+            break;
+        }
+        added += 25;
+    }
+    println!("padded the extension set to {added} entries");
+
+    arm_transfer(&fleet, &tenant).await?;
+    let moved = fleet
+        .bob
+        .call(registry.id(), "nft_transfer")
+        .args_json(json!({
+            "receiver_id": fleet.relay.id(),
+            "token_id": format!("alice.{tla}"),
+            "approval_id": null,
+            "memo": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    moved.into_result()?;
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.relay.id().as_str(),
+        "a wallet padded with {added} co-owners must still rotate"
+    );
+    Ok(())
+}

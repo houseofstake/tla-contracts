@@ -1053,3 +1053,26 @@ fn a_non_owner_cannot_rotate_the_watcher_set() {
     ctx_paying("attacker.testnet", 0, 1);
     c.set_watchers(vec![wk2, wk3], 2);
 }
+
+mod migration {
+    use crate::LegacyMpcRecovery;
+    use near_sdk::base64::Engine;
+    use near_sdk::borsh::BorshDeserialize;
+
+    const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAEAAAAhAAAAAIS/j9urBasuVw52LoAoxzfkejeW2buaWME8f8jHrqeAAQAAAAEAAABhAQAAAHI=";
+
+    #[test]
+    fn the_legacy_struct_still_matches_the_deployed_state() {
+        let raw = near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64");
+        let old = LegacyMpcRecovery::try_from_slice(&raw)
+            .expect("deployed state no longer decodes as LegacyMpcRecovery");
+        assert_eq!(old.owner.as_str(), "council.hosdemo.testnet");
+        assert_eq!(old.installer.as_str(), "hostla.testnet");
+        assert_eq!(old.signer.as_str(), "v1.signer-prod.testnet");
+        assert_eq!(old.transfer_authority.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(old.watchers.len(), 1);
+        assert_eq!(old.threshold, 1);
+    }
+}

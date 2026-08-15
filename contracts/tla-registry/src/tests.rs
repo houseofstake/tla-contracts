@@ -2329,3 +2329,32 @@ mod paged_views {
         assert_eq!(c.list_sub_accounts_by_tla(acc(TLA), 2, 10).len(), 0);
     }
 }
+
+mod migration {
+    use crate::LegacyTlaRegistry;
+    use near_sdk::base64::Engine;
+    use near_sdk::borsh::BorshDeserialize;
+
+    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbToAAAACAAAADXYCAAAADW0BAAAAEAEAAAASaQAAAAEAAAAUAAAAAAEAAAACAAAAAnYCAAAAAm1AQg8AAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAADoAwAAAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAAAAAECyusngGR4CAAAAAAAA6AMAAAAAKfkPJgIA+gDQBw8CoIYBAAAAAAAAAAAAAAAAAADh9QUAAAAAAAAAAAAAAAAAWEf4DQAAAADAUySlEwAAKCzp/QDrsg0f1wgAAAAAADoAAAAAAAAAAAEBAAAAA9jTFn6joYYMD0MNAAAAAAAAAAAAAgAAAAR2AgAAAARtAQAAAAUBAAAABg0AAAACAAAADnYCAAAADm0AAAAAAgAAAA92AgAAAA9tAQAAAAkBAAAACgEAAAACAAAAC3YCAAAAC20BAAAAAgAAAAx2AgAAAAxtEwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQAACn5DyYCABYAAABwYXJ0bmVyLmhvc3RsYS50ZXN0bmV0iJYYAAAAAAAAAAAAAAAAAMFut02WkcsYzhYAAAAAAAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAFXYCAAAAFW0BAAAAFg==";
+
+    #[test]
+    fn the_legacy_struct_still_matches_the_deployed_state() {
+        let raw = near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64");
+        let old = LegacyTlaRegistry::try_from_slice(&raw)
+            .expect("deployed state no longer decodes as LegacyTlaRegistry");
+        assert_eq!(old.sub_account_count, 58);
+        assert_eq!(old.total_revenue, 10_687_288_186_909_949_954_698_280);
+        assert_eq!(
+            old.total_pending_refunds,
+            16_032_711_813_090_050_045_301_720
+        );
+        assert_eq!(old.grace_period_ns, 604_800_000_000_000);
+        assert_eq!(old.rate_sequence, 5_838);
+        assert_eq!(old.rate_updated_at, 1_786_681_751_917_522_625);
+        assert_eq!(old.hos_extension.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(old.version, 1);
+        assert!(!old.paused);
+    }
+}

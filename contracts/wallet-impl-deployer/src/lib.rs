@@ -9,6 +9,7 @@ const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
 /// reaches every one of them at once. The delay gives owners a window to see
 /// an approval and act on it before the code changes underneath them.
 const DEFAULT_APPROVAL_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
+const DEPLOY_LOCK_TTL_NS: u64 = 10 * 60 * 1_000_000_000;
 
 mod error {
     pub const ONLY_COUNCIL: &str = "only council";
@@ -55,26 +56,23 @@ pub struct ImplDeployer {
     approved_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
     approval_delay_ns: u64,
-    deploy_in_flight: bool,
+    deploy_locked_until: u64,
     approved_upgrade_hash: Option<[u8; 32]>,
     approved_upgrade_at: Option<u64>,
 }
 
-/// Shape of the state written before the approval delay existed. Only read by
-/// `migrate`.
 #[near(serializers = [borsh])]
 pub struct LegacyImplDeployer {
     council: AccountId,
-    patch_authority: AccountId,
     current_hash: Option<[u8; 32]>,
     approved_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
+    approval_delay_ns: u64,
     deploy_in_flight: bool,
 }
 
 #[near]
 impl ImplDeployer {
-    /// Carries pre-delay state forward. Any pending approval is dropped, so it
-    /// has to be re-approved and serve the delay.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
@@ -85,8 +83,8 @@ impl ImplDeployer {
             current_hash: old.current_hash,
             approved_hash: None,
             approved_at: None,
-            approval_delay_ns: DEFAULT_APPROVAL_DELAY_NS,
-            deploy_in_flight: old.deploy_in_flight,
+            approval_delay_ns: old.approval_delay_ns,
+            deploy_locked_until: 0,
             approved_upgrade_hash: None,
             approved_upgrade_at: None,
         }
@@ -105,7 +103,7 @@ impl ImplDeployer {
             approval_delay_ns: approval_delay_ns
                 .map(|value| value.0)
                 .unwrap_or(DEFAULT_APPROVAL_DELAY_NS),
-            deploy_in_flight: false,
+            deploy_locked_until: 0,
             approved_upgrade_hash: None,
             approved_upgrade_at: None,
         }
@@ -128,7 +126,10 @@ impl ImplDeployer {
 
     #[payable]
     pub fn gd_deploy(&mut self, code: Vec<u8>) -> Promise {
-        require!(!self.deploy_in_flight, error::DEPLOY_IN_FLIGHT);
+        require!(
+            env::block_timestamp() >= self.deploy_locked_until,
+            error::DEPLOY_IN_FLIGHT
+        );
         require!(!code.is_empty(), error::EMPTY_CODE);
         let approved = self
             .approved_hash
@@ -146,7 +147,7 @@ impl ImplDeployer {
             .unwrap_or_else(|| env::panic_str(error::COST_OVERFLOW));
         let attached = env::attached_deposit().as_yoctonear();
         require!(attached >= cost, error::INSUFFICIENT_DEPOSIT);
-        self.deploy_in_flight = true;
+        self.deploy_locked_until = env::block_timestamp().saturating_add(DEPLOY_LOCK_TTL_NS);
         let size = code.len() as u64;
         Promise::new(env::current_account_id())
             .deploy_global_contract_by_account_id(code)
@@ -173,7 +174,7 @@ impl ImplDeployer {
         cost: NearToken,
         #[callback_result] result: Result<(), PromiseError>,
     ) -> bool {
-        self.deploy_in_flight = false;
+        self.deploy_locked_until = 0;
         match result {
             Ok(()) => {
                 self.current_hash = Some(hash.into());
@@ -279,6 +280,10 @@ impl ImplDeployer {
 
     pub fn approval_delay_ns(&self) -> near_sdk::json_types::U64 {
         near_sdk::json_types::U64(self.approval_delay_ns)
+    }
+
+    pub fn deploy_locked_until(&self) -> near_sdk::json_types::U64 {
+        near_sdk::json_types::U64(self.deploy_locked_until)
     }
 
     pub fn config(&self) -> DeployerView {
@@ -439,6 +444,38 @@ mod tests {
         let _ = c.gd_deploy(code());
         ctx_at("anyone.testnet", cost(), AFTER_DELAY);
         let _ = c.gd_deploy(code());
+    }
+
+    const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AWkbd5BFQct9Clizk9gSgdfUyr4FqFoqjdtIqm5dR/SjAYOB4845uPXNPuR7lEb/iUVng0q6TpN7AzBTKeYTlF9PAbHLBUX3oskYAACeIimdAAAA";
+
+    #[test]
+    fn the_legacy_struct_still_matches_the_deployed_state() {
+        use near_sdk::base64::Engine;
+        use near_sdk::borsh::BorshDeserialize;
+        let raw = near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64");
+        let old = LegacyImplDeployer::try_from_slice(&raw)
+            .expect("deployed state no longer decodes as LegacyImplDeployer");
+        assert_eq!(old.council.as_str(), "council.hosdemo.testnet");
+        assert_eq!(old.approval_delay_ns, DEFAULT_APPROVAL_DELAY_NS);
+        assert!(old.current_hash.is_some());
+        assert!(!old.deploy_in_flight);
+    }
+
+    #[test]
+    fn a_deploy_whose_callback_never_lands_stops_blocking_after_the_ttl() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1);
+        c.gd_approve(code_hash());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY);
+        let _ = c.gd_deploy(code());
+        ctx_at("anyone.testnet", cost(), AFTER_DELAY + DEPLOY_LOCK_TTL_NS);
+        let _ = c.gd_deploy(code());
+        assert_eq!(
+            c.deploy_locked_until().0,
+            AFTER_DELAY + 2 * DEPLOY_LOCK_TTL_NS
+        );
     }
 
     #[test]

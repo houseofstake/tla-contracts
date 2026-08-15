@@ -7,6 +7,7 @@ use near_sdk::{env, AccountId};
 pub const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 pub const ONE_YEAR_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 pub const NFT_SPEC: &str = "nft-1.0.0";
+pub const MAX_PAGE_LIMIT: u64 = 500;
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
 #[borsh(crate = "near_sdk::borsh")]

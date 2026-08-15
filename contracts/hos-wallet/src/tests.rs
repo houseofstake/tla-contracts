@@ -928,22 +928,38 @@ fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
         frozen: FreezeState::Unfrozen,
         authority_freeze_until_ns: 0,
         transfer_armed: armed,
+        spend_grants: c.spend_grants,
     }
 }
 
 #[test]
-fn migrate_names_the_owner_and_disarms_any_pending_transfer() {
+fn migrate_carries_the_owner_across_and_disarms_any_pending_transfer() {
     let c = deploy();
     let lease = c.lease_until_ns;
     let legacy = legacy_state(c, true);
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    let migrated = TenantWallet::hos_migrate(acc(OWNER));
+    let migrated = TenantWallet::hos_migrate();
     assert_eq!(migrated.owner, acc(OWNER));
     assert_eq!(migrated.lease_until_ns, lease);
     assert!(
         !migrated.transfer_armed,
         "a migration must not carry an armed transfer across"
+    );
+}
+
+#[test]
+fn migrate_cannot_be_used_to_hand_the_wallet_to_another_account() {
+    let c = deploy();
+    let mut legacy = legacy_state(c, false);
+    legacy.wallet.extensions.insert(acc("co-owner.testnet"));
+    ctx(AUTHORITY, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    let migrated = TenantWallet::hos_migrate();
+    assert_eq!(
+        migrated.owner,
+        acc(OWNER),
+        "the authority must not be able to name a new owner through a migration"
     );
 }
 
@@ -954,17 +970,18 @@ fn migrate_is_refused_to_anyone_but_the_authority() {
     let legacy = legacy_state(c, false);
     ctx(OWNER, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    TenantWallet::hos_migrate(acc(OWNER));
+    TenantWallet::hos_migrate();
 }
 
 #[test]
 #[should_panic(expected = "only the owner")]
 fn migrate_refuses_an_owner_outside_the_extension_set() {
     let c = deploy();
-    let legacy = legacy_state(c, false);
+    let mut legacy = legacy_state(c, false);
+    legacy.owner = acc("stranger.testnet");
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
-    TenantWallet::hos_migrate(acc("stranger.testnet"));
+    TenantWallet::hos_migrate();
 }
 
 #[test]
@@ -1107,4 +1124,86 @@ fn the_sweep_leaves_the_account_able_to_pay_for_its_own_storage() {
     c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale);
     let swept: u128 = transfers().iter().map(|(_, amount)| amount).sum();
     assert!(balance.as_yoctonear() - swept >= c.reserve());
+}
+
+mod deployed_shape {
+    use crate::{LegacyTenantWallet, TenantWallet};
+    use near_sdk::base64::Engine;
+    use near_sdk::borsh::BorshDeserialize;
+
+    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAAB0ZXN0dHR0dHQzMS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAdGVzdHR0dHR0MzEudGVzdG5ldBMAAAB0ZXN0dHR0dHQzMS50ZXN0bmV0gGp3K8eVORkAAAAAAAAAAAAAAAAAAAA=";
+
+    fn raw() -> Vec<u8> {
+        near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64")
+    }
+
+    #[test]
+    fn the_legacy_struct_still_matches_a_deployed_wallet() {
+        let old = LegacyTenantWallet::try_from_slice(&raw())
+            .expect("deployed wallet no longer decodes as LegacyTenantWallet");
+        assert_eq!(old.authority.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(old.owner.as_str(), "testttttt31.testnet");
+        assert_eq!(old.payout_account.as_str(), "testttttt31.testnet");
+        assert!(!old.transfer_armed);
+        assert!(old.spend_grants.is_empty());
+        assert!(old.wallet.extensions.contains(&old.owner));
+    }
+
+    #[test]
+    fn a_deployed_wallet_cannot_read_itself_until_it_migrates() {
+        assert!(TenantWallet::try_from_slice(&raw()).is_err());
+    }
+}
+
+mod adapter_wire_format {
+    use defuse_wallet::Request;
+
+    const ADAPTER_REQUEST: &str = r#"{
+      "request": {
+        "external": [
+          {
+            "receiver_id": "counter.testnet",
+            "actions": [
+              {
+                "action": "function_call",
+                "payload": {
+                  "function_name": "increment",
+                  "args": "eyJieSI6MX0=",
+                  "deposit": "0",
+                  "gas": "30000000000000"
+                }
+              },
+              {
+                "action": "transfer",
+                "payload": { "amount": "1000000000000000000000000" }
+              }
+            ]
+          }
+        ]
+      }
+    }"#;
+
+    #[derive(near_sdk::serde::Deserialize)]
+    #[serde(crate = "near_sdk::serde")]
+    struct ExecuteArgs {
+        request: Request,
+    }
+
+    #[test]
+    fn the_adapter_json_deserialises_as_a_request() {
+        let args: ExecuteArgs = near_sdk::serde_json::from_str(ADAPTER_REQUEST)
+            .expect("adapter JSON is not a valid w_execute_extension argument");
+        assert_eq!(args.request.external.len(), 1);
+        let promise = &args.request.external[0];
+        assert_eq!(promise.receiver_id.as_str(), "counter.testnet");
+        assert_eq!(promise.actions.len(), 2);
+        assert!(promise.refund_to.is_none());
+        assert_eq!(
+            promise.total_deposit(),
+            near_sdk::NearToken::from_near(1),
+            "the transfer amount must survive the wire"
+        );
+    }
 }
