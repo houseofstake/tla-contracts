@@ -18,11 +18,6 @@ pub fn sub_account_rent(total_len: u8, premium: &PremiumCategory, config: &FeeCo
     base.saturating_mul(num) / den
 }
 
-pub fn split_resale(price: u128, commission_bps: u16) -> (u128, u128) {
-    let commission = (price.saturating_mul(u128::from(commission_bps)) / 10_000).min(price);
-    (commission, price.saturating_sub(commission))
-}
-
 pub fn calculate_rent(tla: &TlaEntry, tla_id: &AccountId, name: &str, config: &FeeConfig) -> u128 {
     match tla.tla_type {
         TlaType::Business => config.sub_fee_per_account_usd_micro.0,
@@ -57,26 +52,6 @@ pub fn default_fee_config() -> FeeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn split_resale_conserves_value() {
-        let prices = [0u128, 1, 7, 100, 10_000, ONE_NEAR, u128::MAX / 2, u128::MAX];
-        let rates = [0u16, 1, 250, 500, 5_000, 9_999, 10_000, u16::MAX];
-        for &price in &prices {
-            for &bps in &rates {
-                let (commission, proceeds) = split_resale(price, bps);
-                assert!(
-                    commission <= price,
-                    "commission {commission} exceeds price {price}"
-                );
-                assert_eq!(
-                    commission.checked_add(proceeds),
-                    Some(price),
-                    "commission+proceeds must equal price (price={price}, bps={bps})"
-                );
-            }
-        }
-    }
 
     #[test]
     fn base_rent_non_increasing_and_boundaries() {

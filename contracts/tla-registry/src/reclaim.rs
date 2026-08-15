@@ -28,7 +28,6 @@ impl TlaRegistry {
         crate::assert_one_yocto()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
         let (sub_account, _destination) = self.resolve_sweepable(&tla_id, &key)?;
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
@@ -48,7 +47,6 @@ impl TlaRegistry {
             return Err(ContractError::InsufficientPayment);
         }
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
         if !self.sweepable_tokens.contains(&ft) {
             return Err(ContractError::TokenNotInAllowlist);
         }
@@ -75,7 +73,6 @@ impl TlaRegistry {
         self.assert_not_paused()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
         if self.reclaim_pending.contains_key(&key) {
             return Err(ContractError::ReclaimInProgress);
         }
@@ -102,16 +99,6 @@ impl TlaRegistry {
         allowlist: Vec<AccountId>,
     ) -> PromiseOrValue<()> {
         let key = sub_account_key(&tla_id, &name);
-        if self.assert_sale_idle(&key).is_err() {
-            self.reclaim_pending.remove(&key);
-            Event::ReclaimFinalizeBlocked {
-                full_name: key,
-                token: None,
-                reason: "sale_in_progress".to_string(),
-            }
-            .emit();
-            return PromiseOrValue::Value(());
-        }
         if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
             self.reclaim_pending.remove(&key);
             Event::ReclaimFinalizeBlocked {
@@ -159,8 +146,6 @@ impl TlaRegistry {
         let Some(_removed) = self.sub_account_remove(&key) else {
             return;
         };
-        self.listings.remove(&key);
-        self.accepted_offers.remove(&key);
         self.sub_account_count = self.sub_account_count.saturating_sub(1);
         self.business_count_decrement_if_business(&tla_id);
         let now = env::block_timestamp();

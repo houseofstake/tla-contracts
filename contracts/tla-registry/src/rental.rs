@@ -330,7 +330,6 @@ impl TlaRegistry {
         self.assert_not_paused()?;
         validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
         if new_payout_account.as_str() == key {
             return Err(ContractError::PayoutAccountEqualsSubAccount);
         }

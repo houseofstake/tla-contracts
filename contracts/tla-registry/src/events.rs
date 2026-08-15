@@ -121,23 +121,6 @@ pub enum Event {
         reason: String,
     },
     #[event_version("1.0.0")]
-    SubAccountListed {
-        full_name: String,
-        price_yocto: U128,
-        seller: AccountId,
-    },
-    #[event_version("1.0.0")]
-    SubAccountUnlisted { full_name: String, by: AccountId },
-    #[event_version("1.0.0")]
-    OfferAccepted {
-        full_name: String,
-        buyer: AccountId,
-        price_yocto: U128,
-        seller: AccountId,
-    },
-    #[event_version("1.0.0")]
-    OfferRevoked { full_name: String, by: AccountId },
-    #[event_version("1.0.0")]
     SubAccountTransferred {
         full_name: String,
         tla_id: AccountId,
@@ -150,18 +133,6 @@ pub enum Event {
         from: AccountId,
         to: AccountId,
     },
-    #[event_version("1.0.0")]
-    SubAccountSold {
-        full_name: String,
-        tla_id: AccountId,
-        seller: AccountId,
-        buyer: AccountId,
-        price_yocto: U128,
-        commission_yocto: U128,
-        seller_proceeds_yocto: U128,
-    },
-    #[event_version("1.0.0")]
-    SubAccountSaleFailed { full_name: String, buyer: AccountId },
     #[event_version("1.0.0")]
     SubAccountSaleBlocked {
         full_name: String,
@@ -189,8 +160,6 @@ pub enum Event {
     #[event_version("1.0.0")]
     SubAccountRetractionCanceled { full_name: String, by: AccountId },
     #[event_version("1.0.0")]
-    SettlingCleared { full_name: String, by: AccountId },
-    #[event_version("1.0.0")]
     ReclaimPendingCleared { full_name: String, by: AccountId },
 }
 
@@ -206,21 +175,12 @@ impl Event {
             Self::SubAccountRenewed { full_name, .. } => {
                 Some(("sub_account_renewed", full_name.clone()))
             }
-            Self::SubAccountListed { full_name, .. } => {
-                Some(("sub_account_listed", full_name.clone()))
-            }
-            Self::SubAccountUnlisted { full_name, .. } => {
-                Some(("sub_account_unlisted", full_name.clone()))
-            }
-            Self::OfferAccepted { full_name, .. } => Some(("offer_accepted", full_name.clone())),
-            Self::OfferRevoked { full_name, .. } => Some(("offer_revoked", full_name.clone())),
             Self::SubAccountTransferred { full_name, .. } => {
                 Some(("sub_account_transferred", full_name.clone()))
             }
             Self::SubAccountRecovered { full_name, .. } => {
                 Some(("sub_account_recovered", full_name.clone()))
             }
-            Self::SubAccountSold { full_name, .. } => Some(("sub_account_sold", full_name.clone())),
             Self::SubAccountReclaimed { full_name, .. } => {
                 Some(("sub_account_reclaimed", full_name.clone()))
             }

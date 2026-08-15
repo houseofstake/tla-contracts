@@ -10,6 +10,7 @@ mod indexes;
 mod interfaces;
 mod lifecycle;
 mod marketplace;
+mod nft;
 mod pricing;
 mod reclaim;
 mod rental;
@@ -36,6 +37,16 @@ use hos_common::MAX_AUTHORITY_HOLD_NS;
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
 const ACTIVITY_CAPACITY: u32 = 256;
+const MIGRATION_DRAIN_CAP: usize = 200;
+
+fn drain_capped<V: BorshSerialize + near_sdk::borsh::BorshDeserialize>(
+    map: &mut IterableMap<String, V>,
+) {
+    let doomed: Vec<String> = map.keys().take(MIGRATION_DRAIN_CAP).cloned().collect();
+    for key in doomed {
+        map.remove(&key);
+    }
+}
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -64,6 +75,7 @@ pub(crate) enum StorageKey {
     RecentActivity,
     SweepableTokens,
     SuspendedUntil,
+    TokenMetadataStore,
 }
 
 #[near(contract_state)]
@@ -86,8 +98,6 @@ pub struct TlaRegistry {
     pub(crate) ft_allowlist: IterableSet<AccountId>,
     pub(crate) business_sub_count: LookupMap<AccountId, u32>,
     pub(crate) business_sub_cap_override: LookupMap<AccountId, u32>,
-    pub(crate) listings: IterableMap<String, Listing>,
-    pub(crate) accepted_offers: IterableMap<String, AcceptedOffer>,
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) reclaim_pending: LookupMap<String, bool>,
     pub(crate) payment_authorities: IterableSet<AccountId>,
@@ -105,6 +115,8 @@ pub struct TlaRegistry {
     pub(crate) unpaused_at: u64,
     pub(crate) sweepable_tokens: IterableSet<AccountId>,
     pub(crate) suspended_until: LookupMap<AccountId, u64>,
+    pub(crate) token_metadata: LookupMap<String, TokenMetadata>,
+    pub(crate) nft_contract_metadata: Option<NftContractMetadata>,
 }
 
 #[near(serializers = [borsh])]
@@ -141,6 +153,10 @@ pub struct LegacyTlaRegistry {
     treasury: AccountId,
     council: AccountId,
     marketplace_paused: bool,
+    paused_until_ns: u64,
+    unpaused_at: u64,
+    sweepable_tokens: IterableSet<AccountId>,
+    suspended_until: LookupMap<AccountId, u64>,
 }
 
 #[near]
@@ -183,8 +199,6 @@ impl TlaRegistry {
             ft_allowlist: IterableSet::new(StorageKey::FtAllowlist),
             business_sub_count: LookupMap::new(StorageKey::BusinessSubCount),
             business_sub_cap_override: LookupMap::new(StorageKey::BusinessSubCapOverride),
-            listings: IterableMap::new(StorageKey::ListingsIndexed),
-            accepted_offers: IterableMap::new(StorageKey::AcceptedOffersIndexed),
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             reclaim_pending: LookupMap::new(StorageKey::ReclaimPending),
             payment_authorities: IterableSet::new(StorageKey::PaymentAuthorities),
@@ -202,18 +216,18 @@ impl TlaRegistry {
             unpaused_at: 0,
             sweepable_tokens: IterableSet::new(StorageKey::SweepableTokens),
             suspended_until: LookupMap::new(StorageKey::SuspendedUntil),
+            token_metadata: LookupMap::new(StorageKey::TokenMetadataStore),
+            nft_contract_metadata: None,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: LegacyTlaRegistry =
+        let mut old: LegacyTlaRegistry =
             env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
-        let mut sweepable_tokens = IterableSet::new(StorageKey::SweepableTokens);
-        for token in old.ft_allowlist.iter() {
-            sweepable_tokens.insert(token.clone());
-        }
+        drain_capped(&mut old.listings);
+        drain_capped(&mut old.accepted_offers);
         Self {
             tlas: old.tlas,
             sub_accounts: old.sub_accounts,
@@ -232,8 +246,6 @@ impl TlaRegistry {
             ft_allowlist: old.ft_allowlist,
             business_sub_count: old.business_sub_count,
             business_sub_cap_override: old.business_sub_cap_override,
-            listings: old.listings,
-            accepted_offers: old.accepted_offers,
             parked_names: old.parked_names,
             reclaim_pending: old.reclaim_pending,
             payment_authorities: old.payment_authorities,
@@ -247,14 +259,12 @@ impl TlaRegistry {
             treasury: old.treasury,
             council: old.council,
             marketplace_paused: old.marketplace_paused,
-            paused_until_ns: if old.paused {
-                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS)
-            } else {
-                0
-            },
-            unpaused_at: 0,
-            sweepable_tokens,
-            suspended_until: LookupMap::new(StorageKey::SuspendedUntil),
+            paused_until_ns: old.paused_until_ns,
+            unpaused_at: old.unpaused_at,
+            sweepable_tokens: old.sweepable_tokens,
+            suspended_until: old.suspended_until,
+            token_metadata: LookupMap::new(StorageKey::TokenMetadataStore),
+            nft_contract_metadata: None,
         }
     }
 

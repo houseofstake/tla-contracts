@@ -40,6 +40,27 @@ impl TestDapp {
         U128(0)
     }
 
+    /// `msg` drives the branch under test: "return" asks for the token back,
+    /// "panic" fails the receiver outright, anything else keeps it.
+    pub fn nft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        previous_owner_id: AccountId,
+        token_id: String,
+        msg: String,
+    ) -> bool {
+        let _ = (sender_id, token_id);
+        match msg.as_str() {
+            "panic" => env::panic_str("receiver_rejected"),
+            "return" => true,
+            _ => {
+                let current = self.actions.get(&previous_owner_id).copied().unwrap_or(0);
+                self.actions.insert(previous_owner_id, current + 1);
+                false
+            }
+        }
+    }
+
     pub fn get_position(&self, account_id: AccountId) -> U128 {
         U128(self.positions.get(&account_id).copied().unwrap_or(0))
     }

@@ -28,6 +28,9 @@ const IMPL_VERSION: u32 = 3;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
+/// A revert exists to undo the rotation it follows inside one promise chain,
+/// so the window is minutes rather than open ended.
+const REVERT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 #[ext_contract(ext_ft)]
@@ -113,6 +116,7 @@ pub struct LegacyTenantWallet {
     frozen: FreezeState,
     authority_freeze_until_ns: u64,
     transfer_armed: bool,
+    spend_grants: BTreeMap<AccountId, SpendGrant>,
 }
 
 #[near(
@@ -135,6 +139,8 @@ pub struct TenantWallet {
     authority_freeze_until_ns: u64,
     transfer_armed: bool,
     spend_grants: BTreeMap<AccountId, SpendGrant>,
+    revert_to: Option<AccountId>,
+    revert_until_ns: u64,
 }
 
 #[near]
@@ -238,11 +244,13 @@ impl TenantWallet {
             authority_freeze_until_ns: 0,
             transfer_armed: false,
             spend_grants: BTreeMap::new(),
+            revert_to: None,
+            revert_until_ns: 0,
         }
     }
 
     #[init(ignore_state)]
-    pub fn hos_migrate(owner: AccountId) -> Self {
+    pub fn hos_migrate() -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
         let old = LegacyTenantWallet::try_from_slice(&raw)
             .unwrap_or_else(|_| env::panic_str(error::NO_STATE));
@@ -250,19 +258,24 @@ impl TenantWallet {
             env::predecessor_account_id() == old.authority,
             error::ONLY_AUTHORITY
         );
-        require!(owner != old.authority, error::UNAUTHORIZED);
-        require!(old.wallet.extensions.contains(&owner), error::ONLY_OWNER);
+        require!(old.owner != old.authority, error::UNAUTHORIZED);
+        require!(
+            old.wallet.extensions.contains(&old.owner),
+            error::ONLY_OWNER
+        );
         Self {
             wallet: old.wallet,
             authority: old.authority,
-            owner,
+            owner: old.owner,
             payout_account: old.payout_account,
             lease_until_ns: old.lease_until_ns,
             state: old.state,
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
             transfer_armed: false,
-            spend_grants: BTreeMap::new(),
+            spend_grants: old.spend_grants,
+            revert_to: None,
+            revert_until_ns: 0,
         }
     }
 
@@ -397,8 +410,24 @@ impl TenantWallet {
     #[payable]
     pub fn hos_transfer_ownership(&mut self, to: Option<AccountId>, cause: RotationCause) {
         self.assert_authority();
-        if !self.lease_expired() {
-            require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+        let previous_owner = self.owner.clone();
+        if matches!(cause, RotationCause::Revert) {
+            let pinned = self
+                .revert_to
+                .take()
+                .unwrap_or_else(|| env::panic_str(error::NOTHING_TO_REVERT));
+            require!(
+                env::block_timestamp() < self.revert_until_ns,
+                error::REVERT_WINDOW_CLOSED
+            );
+            require!(to.as_ref() == Some(&pinned), error::REVERT_TARGET_PINNED);
+            self.revert_until_ns = 0;
+        } else {
+            if !self.lease_expired() {
+                require!(self.transfer_armed, error::TRANSFER_NOT_ARMED);
+            }
+            self.revert_to = Some(previous_owner);
+            self.revert_until_ns = env::block_timestamp().saturating_add(REVERT_WINDOW_NS);
         }
         self.transfer_armed = false;
         self.spend_grants.clear();
@@ -699,6 +728,10 @@ impl TenantWallet {
             require!(
                 grant.receivers.contains(&promise.receiver_id),
                 error::RECEIVER_NOT_GRANTED
+            );
+            require!(
+                promise.refund_to.is_none(),
+                error::REFUND_TARGET_NOT_ALLOWED
             );
         }
         let spent = grant
