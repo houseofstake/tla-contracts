@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = { workspace = true }
+hos-common = { path = "../../crates/hos-common" }
 
 [dev-dependencies]
 near-sdk = { workspace = true, features = ["unit-testing"] }

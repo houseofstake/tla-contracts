@@ -196,7 +196,7 @@ fn admin_upgrade_returns_promise_once_the_delay_has_run() {
     let code = vec![1, 2, 3];
     approve(&mut c, &code, 0);
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
-    assert!(c.upgrade(code).is_ok());
+    assert!(c.upgrade(Base64VecU8(code)).is_ok());
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn upgrade_rejects_code_that_was_never_approved() {
     let mut c = deploy();
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
     assert!(matches!(
-        c.upgrade(vec![1, 2, 3]),
+        c.upgrade(Base64VecU8(vec![1, 2, 3])),
         Err(ContractError::NoApprovedHash)
     ));
 }
@@ -215,7 +215,7 @@ fn upgrade_rejects_code_that_does_not_match_the_approved_hash() {
     approve(&mut c, &[1, 2, 3], 0);
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
     assert!(matches!(
-        c.upgrade(vec![9, 9, 9]),
+        c.upgrade(Base64VecU8(vec![9, 9, 9])),
         Err(ContractError::HashMismatch)
     ));
 }
@@ -227,7 +227,7 @@ fn upgrade_rejects_an_approval_that_has_not_aged() {
     approve(&mut c, &code, 0);
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS - 1);
     assert!(matches!(
-        c.upgrade(code),
+        c.upgrade(Base64VecU8(code)),
         Err(ContractError::ApprovalTooYoung)
     ));
 }
@@ -238,10 +238,10 @@ fn a_landed_upgrade_clears_the_approval_so_it_cannot_be_replayed() {
     let code = vec![1, 2, 3];
     approve(&mut c, &code, 0);
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS);
-    assert!(c.upgrade(code.clone()).is_ok());
+    assert!(c.upgrade(Base64VecU8(code.clone())).is_ok());
     ctx_at(ADMIN, 1, UPGRADE_DELAY_NS * 2);
     assert!(matches!(
-        c.upgrade(code),
+        c.upgrade(Base64VecU8(code)),
         Err(ContractError::NoApprovedHash)
     ));
 }
@@ -259,7 +259,7 @@ fn upgrade_rejects_empty_code() {
     let mut c = deploy();
     ctx(ADMIN, 1);
     assert!(matches!(
-        c.upgrade(Vec::new()),
+        c.upgrade(Base64VecU8(Vec::new())),
         Err(ContractError::EmptyCode)
     ));
 }
@@ -268,7 +268,10 @@ fn upgrade_rejects_empty_code() {
 fn non_admin_cannot_upgrade() {
     let mut c = deploy();
     ctx(REGISTRY, 1);
-    assert!(matches!(c.upgrade(vec![1]), Err(ContractError::OnlyAdmin)));
+    assert!(matches!(
+        c.upgrade(Base64VecU8(vec![1])),
+        Err(ContractError::OnlyAdmin)
+    ));
 }
 
 #[test]
@@ -297,7 +300,7 @@ fn privileged_methods_reject_a_restricted_access_key() {
         Err(ContractError::RequiresOneYocto)
     ));
     assert!(matches!(
-        c.upgrade(vec![1]),
+        c.upgrade(Base64VecU8(vec![1])),
         Err(ContractError::RequiresOneYocto)
     ));
 }
@@ -366,4 +369,38 @@ mod migration {
         assert!(!state.paused);
         assert_eq!(state.paused_until_ns, 0);
     }
+}
+
+#[test]
+fn the_legacy_arm_runs_and_keeps_the_admin_set() {
+    ctx(ADMIN, 0);
+    let mut admins = near_sdk::store::IterableSet::new(crate::StorageKey::Admins);
+    admins.insert(acc(ADMIN));
+    env::state_write(&crate::LegacyHosExtension {
+        admins,
+        registry: acc(REGISTRY),
+        recovery: acc(RECOVERY),
+        paused: true,
+        version: 0,
+        treasury: acc(DEST),
+        approved_code_hash: Some([5u8; 32]),
+        approved_at: Some(9),
+        council: acc(COUNCIL),
+    });
+    let migrated = HosExtension::migrate();
+    assert_eq!(migrated.registry, acc(REGISTRY));
+    assert_eq!(migrated.council, acc(COUNCIL));
+    assert!(migrated.paused, "a paused contract must not resume itself");
+    assert!(
+        migrated.admins.contains(&acc(ADMIN)),
+        "losing the admin set would strand every wallet this contract governs"
+    );
+}
+
+#[test]
+fn state_already_current_survives_a_same_shape_redeploy() {
+    let current = deploy();
+    let registry = current.registry.clone();
+    env::state_write(&current);
+    assert_eq!(HosExtension::migrate().registry, registry);
 }

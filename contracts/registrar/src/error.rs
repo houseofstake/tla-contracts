@@ -8,5 +8,6 @@ pub const BAD_CHAIN_ID: &str = "chain id must be mainnet or testnet";
 pub const BAD_MIN_LABEL_LEN: &str = "min label length out of bounds";
 pub const BAD_MIN_BALANCE: &str = "min balance below the account storage floor";
 pub const EMPTY_CODE: &str = "code must not be empty";
+pub const NO_STATE: &str = "no state to migrate";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be the minted account";
 pub const OWNER_ACCOUNT_IS_SELF: &str = "owner account must not be the minted account";

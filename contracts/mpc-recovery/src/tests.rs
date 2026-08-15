@@ -939,12 +939,12 @@ fn ctx_paying(predecessor: &str, ts: u64, deposit: u128) {
         .build());
 }
 
-fn code() -> Vec<u8> {
-    vec![7u8; 64]
+fn code() -> Base64VecU8 {
+    Base64VecU8(vec![7u8; 64])
 }
 
 fn code_hash() -> Base58CryptoHash {
-    Base58CryptoHash::from(env::sha256_array(code()))
+    Base58CryptoHash::from(env::sha256_array(&code().0))
 }
 
 const AFTER_UPGRADE_DELAY: u64 = UPGRADE_DELAY_NS + 1;
@@ -981,7 +981,7 @@ fn upgrade_with_different_code_is_rejected() {
     ctx_paying(OWNER, 0, 1);
     c.approve_upgrade(code_hash());
     ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
-    let _ = c.upgrade(vec![8u8; 64]);
+    let _ = c.upgrade(Base64VecU8(vec![8u8; 64]));
 }
 
 #[test]
@@ -1075,4 +1075,37 @@ mod migration {
         assert_eq!(old.watchers.len(), 1);
         assert_eq!(old.threshold, 1);
     }
+}
+
+#[test]
+fn the_legacy_arm_runs_and_keeps_the_watcher_set() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    ctx_paying(OWNER, 0, 0);
+    env::state_write(&crate::LegacyMpcRecovery {
+        owner: AccountId::from_str(OWNER).unwrap(),
+        installer: AccountId::from_str(OWNER).unwrap(),
+        signer: AccountId::from_str(OWNER).unwrap(),
+        transfer_authority: AccountId::from_str(OWNER).unwrap(),
+        watchers: vec![wk1.clone(), wk2.clone()],
+        threshold: 2,
+        accounts: LookupMap::new(b"a"),
+        round_floor: LookupMap::new(b"r"),
+    });
+    let migrated = MpcRecovery::migrate();
+    assert_eq!(migrated.owner, AccountId::from_str(OWNER).unwrap());
+    assert_eq!(
+        migrated.threshold, 2,
+        "dropping the threshold would let one watcher carry a recovery alone"
+    );
+    assert_eq!(migrated.watchers, vec![wk1, wk2]);
+}
+
+#[test]
+fn state_already_current_survives_a_same_shape_redeploy() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1], 1);
+    let owner = c.owner.clone();
+    env::state_write(&c);
+    assert_eq!(MpcRecovery::migrate().owner, owner);
 }

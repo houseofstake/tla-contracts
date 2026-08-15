@@ -1236,7 +1236,6 @@ mod sharded_item {
         assert_eq!(info.collection_id, acc(REGISTRY));
         assert_eq!(info.token_id, WALLET);
         assert_eq!(info.owner_id, acc(OWNER));
-        assert_eq!(info.parent_id, PARENT);
         assert!(info.init);
     }
 
@@ -1254,15 +1253,13 @@ mod sharded_item {
     }
 
     #[test]
-    fn the_parent_the_item_reports_is_the_only_account_that_could_have_made_it() {
+    fn the_token_id_is_the_account_itself_and_not_a_stored_value() {
         let c = deploy();
-        let info = c.nft_item_info();
-        assert!(
-            info.token_id.ends_with(&format!(".{}", info.parent_id)),
-            "a caller can check the naming without a single view call, and only \
-             {} could have created {}",
-            info.parent_id,
-            info.token_id
+        assert_eq!(
+            c.nft_item_info().token_id,
+            env::current_account_id().to_string(),
+            "a caller derives the parent from this, so it must never be something \
+             the item could have chosen"
         );
     }
 

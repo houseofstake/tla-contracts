@@ -76,8 +76,10 @@ impl ImplDeployer {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: LegacyImplDeployer =
-            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        let Some(old) = hos_common::try_state_read::<LegacyImplDeployer>() else {
+            return hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str("no state to migrate"));
+        };
         Self {
             council: old.council,
             current_hash: old.current_hash,
@@ -218,12 +220,13 @@ impl ImplDeployer {
     }
 
     #[payable]
-    pub fn upgrade_self(&mut self, code: Vec<u8>) -> Promise {
+    pub fn upgrade_self(&mut self, code: near_sdk::json_types::Base64VecU8) -> Promise {
         assert_one_yocto();
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
         );
+        let code = code.0;
         require!(!code.is_empty(), error::EMPTY_CODE);
         let approved = self
             .approved_upgrade_hash
@@ -242,7 +245,7 @@ impl ImplDeployer {
         self.approved_upgrade_hash = None;
         self.approved_upgrade_at = None;
         Event::SelfUpgraded {}.emit();
-        Promise::new(env::current_account_id()).deploy_contract(code)
+        hos_common::deploy_and_migrate(code)
     }
 
     #[payable]
@@ -505,7 +508,7 @@ mod tests {
     fn self_upgrade_rejects_a_non_council_caller() {
         let mut c = deploy();
         ctx(PATCH, 1);
-        let _ = c.upgrade_self(code());
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(code()));
     }
 
     #[test]
@@ -521,7 +524,7 @@ mod tests {
     fn self_upgrade_rejects_a_restricted_access_key() {
         let mut c = deploy();
         ctx(COUNCIL, 0);
-        let _ = c.upgrade_self(code());
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(code()));
     }
 
     #[test]
@@ -538,7 +541,7 @@ mod tests {
     fn a_self_upgrade_without_an_approval_is_refused() {
         let mut c = deploy();
         ctx(COUNCIL, 1);
-        let _ = c.upgrade_self(code());
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(code()));
     }
 
     #[test]
@@ -548,7 +551,7 @@ mod tests {
         ctx_at(COUNCIL, 1, 0);
         c.approve_self_upgrade(code_hash());
         ctx_at(COUNCIL, 1, DEFAULT_APPROVAL_DELAY_NS - 1);
-        let _ = c.upgrade_self(code());
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(code()));
     }
 
     #[test]
@@ -558,7 +561,7 @@ mod tests {
         ctx_at(COUNCIL, 1, 0);
         c.approve_self_upgrade(code_hash());
         ctx_at(COUNCIL, 1, AFTER_DELAY);
-        let _ = c.upgrade_self(vec![9u8; 64]);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![9u8; 64]));
     }
 
     #[test]
@@ -568,7 +571,7 @@ mod tests {
         c.approve_self_upgrade(code_hash());
         assert_eq!(c.approved_upgrade_hash(), Some(code_hash()));
         ctx_at(COUNCIL, 1, AFTER_DELAY);
-        let _ = c.upgrade_self(code());
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(code()));
         assert!(
             c.approved_upgrade_hash().is_none(),
             "the approval is spent by the upgrade it authorised"
@@ -597,5 +600,46 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
+    }
+
+    #[test]
+    fn the_legacy_arm_runs_and_drops_a_stuck_deploy_flag() {
+        ctx(COUNCIL, 0);
+        env::state_write(&LegacyImplDeployer {
+            council: acc(COUNCIL),
+            current_hash: Some([3u8; 32]),
+            approved_hash: Some([4u8; 32]),
+            approved_at: Some(7),
+            approval_delay_ns: 11,
+            deploy_in_flight: true,
+        });
+        let migrated = ImplDeployer::migrate();
+        assert_eq!(migrated.council, acc(COUNCIL));
+        assert_eq!(migrated.current_hash, Some([3u8; 32]));
+        assert_eq!(migrated.approval_delay_ns, 11);
+        assert_eq!(
+            migrated.deploy_locked_until, 0,
+            "a publish stuck in flight must not carry across an upgrade"
+        );
+        assert!(
+            migrated.approved_hash.is_none(),
+            "an approval must not survive the code it was granted against"
+        );
+    }
+
+    #[test]
+    fn state_already_current_survives_a_same_shape_redeploy() {
+        ctx(COUNCIL, 0);
+        let current = deploy();
+        let delay = current.approval_delay_ns;
+        env::state_write(&current);
+        assert_eq!(ImplDeployer::migrate().approval_delay_ns, delay);
+    }
+
+    #[test]
+    #[should_panic(expected = "no state to migrate")]
+    fn an_account_with_no_state_refuses_rather_than_writing_a_default() {
+        ctx(COUNCIL, 0);
+        let _ = ImplDeployer::migrate();
     }
 }

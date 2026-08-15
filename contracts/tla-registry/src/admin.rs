@@ -377,9 +377,13 @@ impl TlaRegistry {
 
     #[payable]
     #[handle_result]
-    pub fn upgrade(&mut self, code: Vec<u8>) -> Result<near_sdk::Promise, ContractError> {
+    pub fn upgrade(
+        &mut self,
+        code: near_sdk::json_types::Base64VecU8,
+    ) -> Result<near_sdk::Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_council()?;
+        let code = code.0;
         if code.is_empty() {
             return Err(ContractError::EmptyCode);
         }
@@ -390,7 +394,7 @@ impl TlaRegistry {
             return Err(ContractError::HashMismatch);
         }
         let approved_at = self.approved_at.ok_or(ContractError::NoApprovedHash)?;
-        if env::block_timestamp() < approved_at.saturating_add(UPGRADE_DELAY_NS) {
+        if env::block_timestamp() < approved_at.saturating_add(self.upgrade_delay_ns) {
             return Err(ContractError::ApprovalTooYoung);
         }
         self.approved_code_hash = None;
@@ -399,7 +403,7 @@ impl TlaRegistry {
             by: env::predecessor_account_id(),
         }
         .emit();
-        Ok(near_sdk::Promise::new(env::current_account_id()).deploy_contract(code))
+        Ok(hos_common::deploy_and_migrate(code))
     }
 
     pub fn approved_upgrade_hash(&self) -> Option<near_sdk::json_types::Base58CryptoHash> {

@@ -55,6 +55,7 @@ fn deploy() -> TlaRegistry {
         U64(GRACE_NS),
         acc(TREASURY),
         acc(COUNCIL),
+        None,
     )
 }
 
@@ -974,7 +975,14 @@ mod reclaim {
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
         ctx(ADMIN, 0, 0);
-        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0), acc(TREASURY), acc(COUNCIL));
+        let _ = TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(0),
+            acc(TREASURY),
+            acc(COUNCIL),
+            None,
+        );
     }
 
     #[test]
@@ -1621,6 +1629,7 @@ mod council_split {
             U64(GRACE_NS),
             acc(TREASURY),
             acc(OTHER_COUNCIL),
+            None,
         )
     }
 
@@ -2337,11 +2346,42 @@ mod migration {
 
     const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbToAAAACAAAADXYCAAAADW0BAAAAEAEAAAASaQAAAAEAAAAUAAAAAAEAAAACAAAAAnYCAAAAAm1AQg8AAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAADoAwAAAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAAAAAECyusngGR4CAAAAAAAA6AMAAAAAKfkPJgIA+gDQBw8CoIYBAAAAAAAAAAAAAAAAAADh9QUAAAAAAAAAAAAAAAAAWEf4DQAAAADAUySlEwAAKCzp/QDrsg0f1wgAAAAAADoAAAAAAAAAAAEBAAAAA9jTFn6joYYMD0MNAAAAAAAAAAAAAgAAAAR2AgAAAARtAQAAAAUBAAAABg0AAAACAAAADnYCAAAADm0AAAAAAgAAAA92AgAAAA9tAQAAAAkBAAAACgEAAAACAAAAC3YCAAAAC20BAAAAAgAAAAx2AgAAAAxtEwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQAACn5DyYCABYAAABwYXJ0bmVyLmhvc3RsYS50ZXN0bmV0iJYYAAAAAAAAAAAAAAAAAMFut02WkcsYzhYAAAAAAAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAFXYCAAAAFW0BAAAAFg==";
 
+    fn deployed_state() -> Vec<u8> {
+        near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64")
+    }
+
+    #[test]
+    fn the_deployed_state_selects_the_legacy_arm_without_panicking() {
+        super::ctx(super::COUNCIL, 0, 0);
+        near_sdk::env::storage_write(b"STATE", &deployed_state());
+        assert!(
+            hos_common::try_state_read::<LegacyTlaRegistry>().is_some(),
+            "the live fleet state must still take the legacy arm"
+        );
+        assert!(
+            hos_common::try_state_read::<crate::TlaRegistry>().is_none(),
+            "and must not be mistaken for state that is already current"
+        );
+    }
+
+    #[test]
+    fn migrate_leaves_state_that_is_already_current_alone() {
+        super::ctx(super::COUNCIL, 0, 0);
+        let current = super::deploy();
+        let count = current.sub_account_count;
+        near_sdk::env::state_write(&current);
+        let again = crate::TlaRegistry::migrate();
+        assert_eq!(
+            again.sub_account_count, count,
+            "a redeploy that does not change the shape must not be fatal"
+        );
+    }
+
     #[test]
     fn the_legacy_struct_still_matches_the_deployed_state() {
-        let raw = near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64");
+        let raw = deployed_state();
         let old = LegacyTlaRegistry::try_from_slice(&raw)
             .expect("deployed state no longer decodes as LegacyTlaRegistry");
         assert_eq!(old.sub_account_count, 58);
@@ -2362,14 +2402,14 @@ mod migration {
 mod keyless_upgrade {
     use super::*;
     use crate::admin::UPGRADE_DELAY_NS;
-    use near_sdk::json_types::Base58CryptoHash;
+    use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 
-    fn code() -> Vec<u8> {
-        vec![7u8; 32]
+    fn code() -> Base64VecU8 {
+        Base64VecU8(vec![7u8; 32])
     }
 
     fn hash() -> Base58CryptoHash {
-        Base58CryptoHash::from(near_sdk::env::sha256_array(code()))
+        Base58CryptoHash::from(near_sdk::env::sha256_array(&code().0))
     }
 
     #[test]
@@ -2400,7 +2440,7 @@ mod keyless_upgrade {
         c.approve_upgrade(hash()).unwrap();
         ctx(COUNCIL, 1, UPGRADE_DELAY_NS + 1);
         assert!(matches!(
-            c.upgrade(vec![9u8; 32]),
+            c.upgrade(Base64VecU8(vec![9u8; 32])),
             Err(ContractError::HashMismatch)
         ));
     }

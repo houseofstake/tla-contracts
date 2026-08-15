@@ -113,8 +113,10 @@ impl MpcRecovery {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: LegacyMpcRecovery =
-            env::state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        let Some(old) = hos_common::try_state_read::<LegacyMpcRecovery>() else {
+            return hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        };
         Self {
             owner: old.owner,
             installer: old.installer,
@@ -143,9 +145,10 @@ impl MpcRecovery {
     }
 
     #[payable]
-    pub fn upgrade(&mut self, code: Vec<u8>) -> Promise {
+    pub fn upgrade(&mut self, code: Base64VecU8) -> Promise {
         self.assert_one_yocto();
         self.assert_owner();
+        let code = code.0;
         require!(!code.is_empty(), error::EMPTY_CODE);
         let approved = self
             .approved_code_hash
@@ -164,7 +167,7 @@ impl MpcRecovery {
             hash: (&Base58CryptoHash::from(approved)).into(),
         }
         .emit();
-        Promise::new(env::current_account_id()).deploy_contract(code)
+        hos_common::deploy_and_migrate(code)
     }
 
     /// Rotating the watcher set is the only way to replace a compromised

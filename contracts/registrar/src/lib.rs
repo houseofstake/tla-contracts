@@ -84,6 +84,12 @@ impl Registrar {
         }
     }
 
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        hos_common::try_state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE))
+    }
+
     #[payable]
     pub fn create_sub_account(
         &mut self,
@@ -203,14 +209,15 @@ impl Registrar {
         Event::MinBalanceSet { min_balance }.emit();
     }
 
-    pub fn upgrade_self(&mut self, code: Vec<u8>) -> Promise {
+    pub fn upgrade_self(&mut self, code: near_sdk::json_types::Base64VecU8) -> Promise {
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
         );
+        let code = code.0;
         require!(!code.is_empty(), error::EMPTY_CODE);
         Event::SelfUpgraded {}.emit();
-        Promise::new(env::current_account_id()).deploy_contract(code)
+        hos_common::deploy_and_migrate(code)
     }
 
     pub fn registry(&self) -> &AccountId {
@@ -447,7 +454,7 @@ mod tests {
     fn outsider_cannot_upgrade() {
         let mut c = deploy();
         ctx("attacker.testnet", 0);
-        let _ = c.upgrade_self(vec![1]);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
     }
 
     #[test]

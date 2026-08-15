@@ -77,17 +77,12 @@ pub struct WalletInit {
     pub timeout_secs: u32,
 }
 
-/// What an item answers about itself, without anyone having to trust the
-/// collection's index. Mirrors TEP-62's `get_nft_data`, which reports
-/// `(init?, index, collection, owner, content)` from the item rather than the
-/// collection.
 #[near(serializers = [json])]
 pub struct NftItemInfo {
     pub init: bool,
     pub collection_id: AccountId,
     pub token_id: String,
     pub owner_id: AccountId,
-    pub parent_id: String,
 }
 
 #[near(serializers = [json])]
@@ -265,9 +260,6 @@ impl TenantWallet {
         }
     }
 
-    /// `collection_id` names the index this account belongs to. It confers no
-    /// authority, so naming the wrong one cannot move or take the account: the
-    /// pairing check simply fails and the item is refused.
     #[init(ignore_state)]
     pub fn hos_migrate(collection_id: AccountId) -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
@@ -395,24 +387,12 @@ impl TenantWallet {
         }
     }
 
-    /// The item's own account of itself. A caller pairs this with the
-    /// collection's `nft_token` and refuses the item unless both agree, so
-    /// neither side is trusted alone. `parent_id` needs no lookup to check:
-    /// only that account could have created this one, which is what makes a
-    /// forged collection claim detectable.
     pub fn nft_item_info(&self) -> NftItemInfo {
-        let token_id = env::current_account_id();
-        let parent_id = token_id
-            .as_str()
-            .split_once('.')
-            .map(|(_, parent)| parent.to_string())
-            .unwrap_or_default();
         NftItemInfo {
             init: self.wallet.extensions.contains(&self.owner),
             collection_id: self.collection_id.clone(),
-            token_id: token_id.to_string(),
+            token_id: env::current_account_id().to_string(),
             owner_id: self.owner.clone(),
-            parent_id,
         }
     }
 

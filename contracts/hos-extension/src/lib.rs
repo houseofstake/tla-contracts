@@ -5,7 +5,7 @@ use crate::error::ContractError;
 use crate::events::Event;
 use hos_common::{OperatingState, RotationCause};
 use near_sdk::borsh::BorshSerialize;
-use near_sdk::json_types::{Base58CryptoHash, U128, U64};
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U128, U64};
 use near_sdk::store::IterableSet;
 use near_sdk::{
     env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
@@ -128,8 +128,10 @@ impl HosExtension {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let old: LegacyHosExtension =
-            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        let Some(old) = hos_common::try_state_read::<LegacyHosExtension>() else {
+            return hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str("no state to migrate"));
+        };
         Self {
             admins: old.admins,
             registry: old.registry,
@@ -228,9 +230,10 @@ impl HosExtension {
     }
 
     #[handle_result]
-    pub fn upgrade(&mut self, code: Vec<u8>) -> Result<Promise, ContractError> {
+    pub fn upgrade(&mut self, code: Base64VecU8) -> Result<Promise, ContractError> {
         self.assert_one_yocto()?;
         self.assert_admin()?;
+        let code = code.0;
         if code.is_empty() {
             return Err(ContractError::EmptyCode);
         }
@@ -250,7 +253,7 @@ impl HosExtension {
             by: env::predecessor_account_id(),
         }
         .emit();
-        Ok(Promise::new(env::current_account_id()).deploy_contract(code))
+        Ok(hos_common::deploy_and_migrate(code))
     }
 
     #[handle_result]

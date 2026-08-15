@@ -119,6 +119,7 @@ pub struct TlaRegistry {
     pub(crate) nft_contract_metadata: Option<NftContractMetadata>,
     pub(crate) approved_code_hash: Option<[u8; 32]>,
     pub(crate) approved_at: Option<u64>,
+    pub(crate) upgrade_delay_ns: u64,
 }
 
 #[near(serializers = [borsh])]
@@ -170,6 +171,7 @@ impl TlaRegistry {
         grace_period_ns: U64,
         treasury: AccountId,
         council: AccountId,
+        upgrade_delay_ns: Option<U64>,
     ) -> Self {
         require!(
             grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
@@ -222,14 +224,19 @@ impl TlaRegistry {
             nft_contract_metadata: None,
             approved_code_hash: None,
             approved_at: None,
+            upgrade_delay_ns: upgrade_delay_ns
+                .map(|value| value.0)
+                .unwrap_or(admin::UPGRADE_DELAY_NS),
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let mut old: LegacyTlaRegistry =
-            env::state_read().unwrap_or_else(|| env::panic_str("no state to migrate"));
+        let Some(mut old) = hos_common::try_state_read::<LegacyTlaRegistry>() else {
+            return hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str("no state to migrate"));
+        };
         drain_capped(&mut old.listings);
         drain_capped(&mut old.accepted_offers);
         Self {
@@ -271,6 +278,7 @@ impl TlaRegistry {
             nft_contract_metadata: None,
             approved_code_hash: None,
             approved_at: None,
+            upgrade_delay_ns: admin::UPGRADE_DELAY_NS,
         }
     }
 

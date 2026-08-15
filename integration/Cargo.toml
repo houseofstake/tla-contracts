@@ -16,6 +16,7 @@ near-sdk = { version = "=5.29.0", features = ["unit-testing"] }
 defuse-wallet = { git = "https://github.com/near/intents", rev = "6095765fbdf71bebb7e00dfdaca8c5040adc4fe2", default-features = false, features = ["near-contract", "json"] }
 defuse-wallet-ed25519 = { git = "https://github.com/near/intents", rev = "6095765fbdf71bebb7e00dfdaca8c5040adc4fe2", default-features = false, features = ["signer"] }
 defuse-crypto = { git = "https://github.com/near/intents", rev = "6095765fbdf71bebb7e00dfdaca8c5040adc4fe2", default-features = false, features = ["borsh", "ed25519", "fmt", "signing"] }
+defuse-core = { git = "https://github.com/near/intents", rev = "6095765fbdf71bebb7e00dfdaca8c5040adc4fe2", default-features = false }
 near-workspaces = "=0.22.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 serde_json = "1"
@@ -24,3 +25,4 @@ bs58 = "0.5"
 anyhow = "1"
 bip39 = { version = "2", features = ["rand"] }
 slip10_ed25519 = "0.1"
+base64 = "0.22"
