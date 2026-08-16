@@ -82,9 +82,6 @@ impl RotationCause {
         }
     }
 
-    /// A venue holds a name without ever having a beneficial claim on what sits
-    /// on the account, so payout must stay with the depositor. Repointing it at
-    /// the venue sends the next sweep somewhere no one can recover it from.
     pub fn repoints_payout(self) -> bool {
         match self {
             Self::Deposit => false,

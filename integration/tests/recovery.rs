@@ -1,10 +1,11 @@
 mod common;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use common::*;
 use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::Signer as DalekSigner;
 use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::SigningKey;
 use near_sdk::json_types::{Base64VecU8, U64};
+use near_workspaces::types::NearToken;
 use near_workspaces::Contract;
 use serde_json::json;
 
@@ -78,6 +79,198 @@ async fn deploy_recovery(
         .await?
         .into_result()?;
     Ok(recovery)
+}
+
+fn name_recovery_message(
+    contract: &str,
+    tla_id: &str,
+    name: &str,
+    new_owner: &str,
+    expected_owner: &str,
+    deadline_ns: u64,
+) -> Vec<u8> {
+    let mut m = vec![3u8];
+    push_str(&mut m, contract);
+    push_str(&mut m, tla_id);
+    push_str(&mut m, name);
+    push_str(&mut m, new_owner);
+    push_str(&mut m, expected_owner);
+    m.extend_from_slice(&deadline_ns.to_le_bytes());
+    m
+}
+
+#[tokio::test]
+async fn a_watcher_quorum_recovers_a_leased_name_end_to_end() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let watchers = [watcher_key(41), watcher_key(42), watcher_key(43)];
+    let registry = deploy_registry(&fleet).await?;
+    let recovery = fleet.recovery.clone();
+    let tla = fleet.registrar.id().clone();
+    let tenant = rent(&fleet, &registry, &tla, "alice").await?;
+
+    fleet
+        .council
+        .call(recovery.id(), "set_watchers")
+        .args_json(json!({
+            "watchers": watchers.iter().map(pubkey_str).collect::<Vec<_>>(),
+            "threshold": 2,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    fleet
+        .council
+        .call(recovery.id(), "set_registry")
+        .args_json(json!({ "registry": registry.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    fleet
+        .council
+        .call(registry.id(), "add_recovery_authority")
+        .args_json(json!({ "account_id": recovery.id() }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deadline_ns = now_secs() as u64 * 1_000_000_000 + 3_600_000_000_000;
+    let message = name_recovery_message(
+        recovery.id().as_str(),
+        tla.as_str(),
+        "alice",
+        fleet.relay.id().as_str(),
+        fleet.bob.id().as_str(),
+        deadline_ns,
+    );
+    let signatures: Vec<serde_json::Value> = watchers[..2]
+        .iter()
+        .map(|w| {
+            json!({
+                "public_key": pubkey_str(w),
+                "signature": sign(w, &message),
+            })
+        })
+        .collect();
+
+    let recovered = fleet
+        .relay
+        .call(recovery.id(), "recover_name")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": "alice",
+            "new_owner": fleet.relay.id(),
+            "expected_owner": fleet.bob.id(),
+            "deadline_ns": deadline_ns.to_string(),
+            "signatures": signatures,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = recovered.receipt_failures().first() {
+        bail!("a quorum-backed name recovery must land: {failure:?}");
+    }
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.relay.id().as_str(),
+        "the leased account itself must follow the recovery"
+    );
+    let holder: Option<serde_json::Value> = fleet
+        .worker
+        .view(registry.id(), "nft_token")
+        .args_json(json!({ "token_id": tenant.as_str() }))
+        .await?
+        .json()?;
+    assert_eq!(
+        holder.as_ref().and_then(|t| t["owner_id"].as_str()),
+        Some(fleet.relay.id().as_str()),
+        "and the nft record must agree with it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_single_watcher_cannot_recover_a_leased_name() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let watchers = [watcher_key(51), watcher_key(52)];
+    let registry = deploy_registry(&fleet).await?;
+    let recovery = fleet.recovery.clone();
+    let tla = fleet.registrar.id().clone();
+    let tenant = rent(&fleet, &registry, &tla, "alice").await?;
+
+    fleet
+        .council
+        .call(recovery.id(), "set_watchers")
+        .args_json(json!({
+            "watchers": watchers.iter().map(pubkey_str).collect::<Vec<_>>(),
+            "threshold": 2,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    fleet
+        .council
+        .call(recovery.id(), "set_registry")
+        .args_json(json!({ "registry": registry.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    fleet
+        .council
+        .call(registry.id(), "add_recovery_authority")
+        .args_json(json!({ "account_id": recovery.id() }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deadline_ns = now_secs() as u64 * 1_000_000_000 + 3_600_000_000_000;
+    let message = name_recovery_message(
+        recovery.id().as_str(),
+        tla.as_str(),
+        "alice",
+        fleet.relay.id().as_str(),
+        fleet.bob.id().as_str(),
+        deadline_ns,
+    );
+    let attempt = fleet
+        .relay
+        .call(recovery.id(), "recover_name")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": "alice",
+            "new_owner": fleet.relay.id(),
+            "expected_owner": fleet.bob.id(),
+            "deadline_ns": deadline_ns.to_string(),
+            "signatures": [{
+                "public_key": pubkey_str(&watchers[0]),
+                "signature": sign(&watchers[0], &message),
+            }],
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        !attempt.is_success() || !attempt.receipt_failures().is_empty(),
+        "one watcher must not be able to take a live name"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "the holder keeps the name"
+    );
+    Ok(())
 }
 
 #[tokio::test]

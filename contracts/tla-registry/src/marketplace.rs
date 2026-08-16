@@ -43,6 +43,7 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
         new_owner: AccountId,
+        expected_owner: AccountId,
     ) -> Result<Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_recovery_authority()?;
@@ -58,6 +59,9 @@ impl TlaRegistry {
             .ok_or(ContractError::SubAccountNotFound)?
             .owner
             .clone();
+        if from != expected_owner {
+            return Err(ContractError::OwnerMoved);
+        }
         if new_owner == from {
             return Err(ContractError::SameOwner);
         }
@@ -92,7 +96,11 @@ impl TlaRegistry {
         #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
-        if !matches!(swapped, Ok(true)) {
+        let still_theirs = self
+            .sub_accounts
+            .get(&key)
+            .is_some_and(|sub| sub.owner == from);
+        if !matches!(swapped, Ok(true)) || !still_theirs {
             Event::TransferFailed {
                 full_name: key,
                 from,
@@ -110,6 +118,7 @@ impl TlaRegistry {
             .emit();
             return;
         }
+        crate::nft::emit_nft_transfer(&from, &to, &key, None);
         self.emit_activity(Event::SubAccountRecovered {
             full_name: key,
             tla_id,
@@ -146,6 +155,7 @@ impl TlaRegistry {
             .emit();
             return;
         }
+        crate::nft::emit_nft_transfer(&from, &to, &key, None);
         self.emit_activity(Event::SubAccountTransferred {
             full_name: key,
             tla_id,

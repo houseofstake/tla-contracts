@@ -67,7 +67,7 @@ pub(crate) fn emit_nft_mint(owner_id: &AccountId, token_id: &str) {
     );
 }
 
-fn emit_nft_transfer(
+pub(crate) fn emit_nft_transfer(
     old_owner_id: &AccountId,
     new_owner_id: &AccountId,
     token_id: &str,

@@ -38,4 +38,12 @@ pub enum Event {
     Upgraded { hash: String },
     #[event_version("1.0.0")]
     WatchersChanged { threshold: u32, count: u32 },
+    #[event_version("1.0.0")]
+    RegistryChanged { registry: AccountId },
+    #[event_version("1.0.0")]
+    NameRecoveryApproved {
+        tla_id: AccountId,
+        name: String,
+        new_owner: AccountId,
+    },
 }

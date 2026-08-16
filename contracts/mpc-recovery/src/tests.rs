@@ -85,6 +85,153 @@ fn watcher_sigs(
         .collect()
 }
 
+const TLA: &str = "mytla.testnet";
+const REGISTRY: &str = "registry.testnet";
+
+fn name_sigs(
+    sks: &[&SigningKey],
+    pks: &[PublicKey],
+    new_owner: &AccountId,
+    expected_owner: &AccountId,
+    deadline_ns: u64,
+) -> Vec<WatcherSignature> {
+    let msg = proof::name_recovery_message(
+        &AccountId::from_str(OWNER).unwrap(),
+        &AccountId::from_str(TLA).unwrap(),
+        "alice",
+        new_owner,
+        expected_owner,
+        deadline_ns,
+    );
+    sks.iter()
+        .zip(pks)
+        .map(|(sk, pk)| WatcherSignature {
+            public_key: pk.clone(),
+            signature: Base64VecU8::from(sk.sign(&msg).to_bytes().to_vec()),
+        })
+        .collect()
+}
+
+fn deploy_with_registry(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecovery {
+    let mut c = deploy(watcher_keys, threshold);
+    ctx(OWNER, 0, 0);
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .predecessor_account_id(AccountId::from_str(OWNER).unwrap())
+        .attached_deposit(near_sdk::NearToken::from_yoctonear(1))
+        .build());
+    c.set_registry(AccountId::from_str(REGISTRY).unwrap());
+    c
+}
+
+fn name_ctx(ts: u64) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .predecessor_account_id(AccountId::from_str("anyone.testnet").unwrap())
+        .attached_deposit(near_sdk::NearToken::from_yoctonear(1))
+        .block_timestamp(ts)
+        .build());
+}
+
+#[test]
+fn a_name_recovery_needs_a_watcher_quorum() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, 1_000);
+    name_ctx(500);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(1_000),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "watcher quorum not met")]
+fn one_watcher_cannot_recover_a_name_alone() {
+    let (w1, wk1) = keypair();
+    let (_w2, wk2) = keypair();
+    let mut c = deploy_with_registry(&[wk1.clone(), wk2], 2);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let sigs = name_sigs(&[&w1], &[wk1], &new_owner, &expected, 1_000);
+    name_ctx(500);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(1_000),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "quorum for this recovery has expired")]
+fn a_stale_quorum_cannot_be_replayed_later() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, 1_000);
+    name_ctx(1_001);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(1_000),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "watcher quorum not met")]
+fn a_quorum_for_one_holder_does_not_move_a_name_held_by_another() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let signed_for = AccountId::from_str(VICTIM).unwrap();
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &signed_for, 1_000);
+    name_ctx(500);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        AccountId::from_str("someone-else.testnet").unwrap(),
+        U64(1_000),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "no registry configured")]
+fn name_recovery_is_refused_until_the_registry_is_wired() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let mut c = deploy(&[wk1.clone(), wk2.clone()], 2);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, 1_000);
+    name_ctx(500);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(1_000),
+        sigs,
+    );
+}
+
 #[test]
 fn happy_path_to_approved() {
     let (w1, wk1) = keypair();

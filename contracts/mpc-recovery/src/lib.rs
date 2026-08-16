@@ -19,6 +19,7 @@ use crate::state::{Account, Phase, Policy};
 
 const SIGN_GAS: Gas = Gas::from_tgas(60);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
+const GAS_FOR_RECOVER_NAME: Gas = Gas::from_tgas(120);
 const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const MIN_TIMELOCK_SECS: u32 = 60;
@@ -43,6 +44,7 @@ pub struct MpcRecovery {
     round_floor: LookupMap<AccountId, u64>,
     approved_code_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
+    registry: Option<AccountId>,
 }
 
 /// The shape written before this contract could upgrade itself. Only read by
@@ -107,6 +109,7 @@ impl MpcRecovery {
             round_floor: LookupMap::new(b"r"),
             approved_code_hash: None,
             approved_at: None,
+            registry: None,
         }
     }
 
@@ -128,6 +131,7 @@ impl MpcRecovery {
             round_floor: old.round_floor,
             approved_code_hash: None,
             approved_at: None,
+            registry: None,
         }
     }
 
@@ -197,6 +201,79 @@ impl MpcRecovery {
         );
         self.installer = installer.clone();
         Event::InstallerChanged { installer }.emit();
+    }
+
+    #[payable]
+    pub fn set_registry(&mut self, registry: AccountId) {
+        self.assert_one_yocto();
+        self.assert_owner();
+        require!(
+            registry != env::current_account_id(),
+            error::REGISTRY_IS_SELF
+        );
+        self.registry = Some(registry.clone());
+        Event::RegistryChanged { registry }.emit();
+    }
+
+    #[payable]
+    pub fn recover_name(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        new_owner: AccountId,
+        expected_owner: AccountId,
+        deadline_ns: U64,
+        signatures: Vec<WatcherSignature>,
+    ) -> Promise {
+        self.assert_one_yocto();
+        let registry = self
+            .registry
+            .clone()
+            .unwrap_or_else(|| env::panic_str(error::NO_REGISTRY));
+        require!(
+            env::block_timestamp() < deadline_ns.0,
+            error::QUORUM_EXPIRED
+        );
+        let message = proof::name_recovery_message(
+            &env::current_account_id(),
+            &tla_id,
+            &name,
+            &new_owner,
+            &expected_owner,
+            deadline_ns.0,
+        );
+        let sigs: Vec<(PublicKey, [u8; 64])> = signatures
+            .into_iter()
+            .filter_map(|w| {
+                let bytes: Vec<u8> = w.signature.into();
+                <[u8; 64]>::try_from(bytes.as_slice())
+                    .ok()
+                    .map(|sig| (w.public_key, sig))
+            })
+            .collect();
+        require!(
+            proof::verify_quorum(&message, &sigs, &self.watchers, self.threshold),
+            error::NO_QUORUM
+        );
+        Event::NameRecoveryApproved {
+            tla_id: tla_id.clone(),
+            name: name.clone(),
+            new_owner: new_owner.clone(),
+        }
+        .emit();
+        Promise::new(registry).function_call(
+            "recover_sub_account".to_string(),
+            near_sdk::serde_json::json!({
+                "tla_id": tla_id,
+                "name": name,
+                "new_owner": new_owner,
+                "expected_owner": expected_owner,
+            })
+            .to_string()
+            .into_bytes(),
+            NearToken::from_yoctonear(1),
+            GAS_FOR_RECOVER_NAME,
+        )
     }
 
     pub fn install_policy(
@@ -474,6 +551,10 @@ impl MpcRecovery {
 
     pub fn transfer_authority(&self) -> AccountId {
         self.transfer_authority.clone()
+    }
+
+    pub fn registry(&self) -> Option<AccountId> {
+        self.registry.clone()
     }
 
     pub fn watchers(&self) -> Vec<PublicKey> {

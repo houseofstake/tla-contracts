@@ -2,6 +2,7 @@ use near_sdk::{env, AccountId, PublicKey};
 
 const DOMAIN_REQUEST: u8 = 1;
 const DOMAIN_VERDICT: u8 = 2;
+const DOMAIN_NAME_RECOVERY: u8 = 3;
 
 fn message_core(
     domain: u8,
@@ -36,6 +37,24 @@ pub fn verdict_message(
 ) -> Vec<u8> {
     let mut m = message_core(DOMAIN_VERDICT, contract, account, new_owner, round);
     m.push(approve as u8);
+    m
+}
+
+pub fn name_recovery_message(
+    contract: &AccountId,
+    tla_id: &AccountId,
+    name: &str,
+    new_owner: &AccountId,
+    expected_owner: &AccountId,
+    deadline_ns: u64,
+) -> Vec<u8> {
+    let mut m = vec![DOMAIN_NAME_RECOVERY];
+    push_str(&mut m, contract.as_str());
+    push_str(&mut m, tla_id.as_str());
+    push_str(&mut m, name);
+    push_str(&mut m, new_owner.as_str());
+    push_str(&mut m, expected_owner.as_str());
+    m.extend_from_slice(&deadline_ns.to_le_bytes());
     m
 }
 

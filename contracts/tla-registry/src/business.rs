@@ -72,8 +72,8 @@ impl TlaRegistry {
             .sub_accounts
             .get_mut(&key)
             .ok_or(ContractError::SubAccountNotFound)?;
-        if caller != sub.owner && licensee.as_ref() != Some(&caller) {
-            return Err(ContractError::OnlyOwner);
+        if licensee.as_ref() != Some(&caller) {
+            return Err(ContractError::OnlyLicensee);
         }
         let retraction_at = sub
             .retraction_at

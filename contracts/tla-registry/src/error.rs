@@ -74,6 +74,7 @@ pub enum ContractError {
     SameOwner,
     SameOwnerKey,
     TransferToSubAccount,
+    OwnerMoved,
 }
 
 #[derive(Debug, Serialize)]

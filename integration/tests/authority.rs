@@ -68,6 +68,7 @@ async fn recovery_moves_a_name_with_nothing_armed_beforehand() -> Result<()> {
             "tla_id": tla,
             "name": "alice",
             "new_owner": fleet.relay.id(),
+            "expected_owner": fleet.bob.id(),
         }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()

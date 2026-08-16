@@ -1,6 +1,6 @@
 mod common;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use common::*;
 use near_sdk::json_types::{U128, U64};
 use near_workspaces::network::Testnet;
@@ -477,6 +477,34 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
     } else {
         println!("  {registrar_id} already registered");
     }
+
+    println!("\n== wire name recovery (quorum lives in mpc-recovery, registry must accept it) ==");
+    council
+        .call(recovery.id(), "set_registry")
+        .args_json(json!({ "registry": registry.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    council
+        .call(registry.id(), "add_recovery_authority")
+        .args_json(json!({ "account_id": recovery.id() }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let wired: Option<String> = worker.view(recovery.id(), "registry").await?.json()?;
+    let authorities: Vec<String> = worker
+        .view(registry.id(), "get_recovery_authorities")
+        .await?
+        .json()?;
+    if wired.as_deref() != Some(registry.id().as_str())
+        || !authorities.iter().any(|a| a == recovery.id().as_str())
+    {
+        bail!("name recovery is not wired: registry={wired:?} authorities={authorities:?}");
+    }
+    println!("  {} <-> {} both directions", recovery.id(), registry.id());
 
     println!(
         "\n== marketplace fleet live: registry={} ext={} rec={} ==",

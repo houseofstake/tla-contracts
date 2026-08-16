@@ -218,6 +218,57 @@ mod tla_admin {
         assert!(matches!(view.lifecycle, LifecycleStatus::Active));
     }
 
+    fn emitted_nft_transfers() -> Vec<near_sdk::serde_json::Value> {
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .filter(|l| l.starts_with("EVENT_JSON:"))
+            .filter_map(|l| {
+                near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(
+                    l.trim_start_matches("EVENT_JSON:"),
+                )
+                .ok()
+            })
+            .filter(|j| j["standard"] == "nep171" && j["event"] == "nft_transfer")
+            .collect()
+    }
+
+    #[test]
+    fn a_recovery_tells_nep171_that_the_token_moved() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_sub_account_recovered(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        let events = emitted_nft_transfers();
+        assert_eq!(
+            events.len(),
+            1,
+            "a wallet tracking nep171 must see recovery move the token"
+        );
+        assert_eq!(events[0]["data"][0]["old_owner_id"], ALICE);
+        assert_eq!(events[0]["data"][0]["new_owner_id"], BOB);
+    }
+
+    #[test]
+    fn a_direct_transfer_tells_nep171_that_the_token_moved() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_sub_account_transferred(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert_eq!(emitted_nft_transfers().len(), 1);
+    }
+
     #[test]
     fn register_tla_emits_nep297_event() {
         let mut c = deploy();
@@ -865,7 +916,7 @@ mod recovery {
         rent_alice_sub(&mut c, "alice");
         ctx(BOB, 1, 2);
         assert!(matches!(
-            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB)),
+            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE)),
             Err(ContractError::OnlyRecoveryAuthority)
         ));
     }
@@ -876,7 +927,7 @@ mod recovery {
         rent_alice_sub(&mut c, "alice");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB)),
+            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE)),
             Err(ContractError::OnlyRecoveryAuthority)
         ));
     }
@@ -887,8 +938,29 @@ mod recovery {
         rent_alice_sub(&mut c, "alice");
         ctx(CAROL, 1, 2);
         assert!(c
-            .recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB))
+            .recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE))
             .is_ok());
+    }
+
+    #[test]
+    fn recovery_refuses_a_name_that_moved_since_the_request() {
+        let mut c = deploy_with_recovery();
+        rent_alice_sub(&mut c, "alice");
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(c.sub_account_reassign(&key, &acc(BOB), &acc(BOB)));
+        ctx(CAROL, 1, 2);
+        assert!(
+            matches!(
+                c.recover_sub_account(
+                    acc(TLA),
+                    "alice".to_string(),
+                    acc("dave.testnet"),
+                    acc(ALICE)
+                ),
+                Err(ContractError::OwnerMoved)
+            ),
+            "a name sold or deposited since the request must not be recovered away"
+        );
     }
 
     #[test]
@@ -897,7 +969,7 @@ mod recovery {
         rent_alice_sub(&mut c, "alice");
         ctx(CAROL, 0, 2);
         assert!(matches!(
-            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB)),
+            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(BOB), acc(ALICE)),
             Err(ContractError::RequiresOneYocto)
         ));
     }
@@ -908,7 +980,7 @@ mod recovery {
         rent_alice_sub(&mut c, "alice");
         ctx(CAROL, 1, 2);
         assert!(matches!(
-            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(ALICE)),
+            c.recover_sub_account(acc(TLA), "alice".to_string(), acc(ALICE), acc(ALICE)),
             Err(ContractError::SameOwner)
         ));
     }
@@ -918,7 +990,7 @@ mod recovery {
         let mut c = deploy_with_recovery();
         ctx(CAROL, 1, 2);
         assert!(matches!(
-            c.recover_sub_account(acc(TLA), "nobody".to_string(), acc(BOB)),
+            c.recover_sub_account(acc(TLA), "nobody".to_string(), acc(BOB), acc(ALICE)),
             Err(ContractError::SubAccountNotFound)
         ));
     }
