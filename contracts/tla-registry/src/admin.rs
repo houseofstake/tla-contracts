@@ -7,6 +7,7 @@ use near_sdk::{env, near, AccountId};
 
 const MAX_ALLOWLIST_SIZE: u32 = 16;
 const MAX_SWEEPABLE_SIZE: u32 = 64;
+const MAX_VENUES: u32 = 8;
 const MIN_RETRACTION_NOTICE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 #[near]
@@ -143,6 +144,44 @@ impl TlaRegistry {
             return Ok(());
         }
         Event::PaymentAuthorityRemoved {
+            account: account_id,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn add_venue(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if account_id == env::current_account_id() {
+            return Err(ContractError::VenueIsRegistry);
+        }
+        if self.venues.len() >= MAX_VENUES {
+            return Err(ContractError::AllowlistFull);
+        }
+        if !self.venues.insert(account_id.clone()) {
+            return Ok(());
+        }
+        Event::VenueAdded {
+            account: account_id,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn remove_venue(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if !self.venues.remove(&account_id) {
+            return Ok(());
+        }
+        Event::VenueRemoved {
             account: account_id,
             by: env::predecessor_account_id(),
         }

@@ -440,6 +440,15 @@ async fn open_market(fee_pips: u32) -> Result<Market> {
     let registry = deploy_registry(&fleet).await?;
     let tla = fleet.registrar.id().clone();
     let verifier = deploy_verifier(&fleet, fee_pips).await?;
+    fleet
+        .council
+        .call(registry.id(), "add_venue")
+        .args_json(json!({ "account_id": verifier.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
     let ft = deploy_ft(&fleet).await?;
 
     let tenant = rent(&fleet, &registry, &tla, "alice").await?;
@@ -803,7 +812,12 @@ async fn a_holder_exits_with_one_call_and_no_signature() -> Result<()> {
         "the balance inside the verifier is spent"
     );
     assert_eq!(
-        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        owner_account(
+            &market.fleet.worker,
+            &market.tenant,
+            market.fleet.extension.id()
+        )
+        .await?,
         market.fleet.bob.id().as_str(),
         "and the leased account is back under its holder"
     );
@@ -816,7 +830,12 @@ async fn a_deposited_name_keeps_its_payout_with_the_seller() -> Result<()> {
     market.deposit_the_name().await?;
 
     assert_eq!(
-        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        owner_account(
+            &market.fleet.worker,
+            &market.tenant,
+            market.fleet.extension.id()
+        )
+        .await?,
         market.verifier.id().as_str(),
         "the verifier holds the name while it is on the book"
     );
@@ -830,6 +849,35 @@ async fn a_deposited_name_keeps_its_payout_with_the_seller() -> Result<()> {
         payout,
         market.fleet.bob.id().as_str(),
         "but it never earns the balance, or a later sweep pays a contract no one can withdraw from"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unlisted_receiver_does_not_get_venue_treatment() -> Result<()> {
+    let market = open_market(0).await?;
+    market
+        .fleet
+        .council
+        .call(market.registry.id(), "remove_venue")
+        .args_json(json!({ "account_id": market.verifier.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    market.deposit_the_name().await?;
+
+    let payout: String = market
+        .fleet
+        .worker
+        .view(&market.tenant, "hos_payout_account")
+        .await?
+        .json()?;
+    assert_eq!(
+        payout,
+        market.verifier.id().as_str(),
+        "a receiver the council never named is a plain new owner, not a venue"
     );
     Ok(())
 }
@@ -863,7 +911,12 @@ async fn a_stranger_cannot_withdraw_a_name_they_do_not_hold() -> Result<()> {
         "and the holder's balance is untouched"
     );
     assert_eq!(
-        owner_account(&market.fleet.worker, &market.tenant, market.fleet.extension.id()).await?,
+        owner_account(
+            &market.fleet.worker,
+            &market.tenant,
+            market.fleet.extension.id()
+        )
+        .await?,
         market.verifier.id().as_str(),
         "the name stays inside the verifier"
     );
@@ -955,7 +1008,9 @@ async fn a_buyer_funds_and_settles_in_one_call() -> Result<()> {
     );
 
     assert!(
-        market.buy_in_one_call(&buyer, PRICE, vec![ask, bid]).await?,
+        market
+            .buy_in_one_call(&buyer, PRICE, vec![ask, bid])
+            .await?,
         "one call must deposit the buyer's own tokens and settle the pair"
     );
     assert_eq!(
@@ -979,7 +1034,10 @@ async fn replaying_a_one_call_purchase_refunds_the_buyer() -> Result<()> {
     let buyer = market.buyer_account.clone();
     mint_ft(&market.ft, &buyer, PRICE * 2).await?;
 
-    let pair = vec![market.sell_side(PRICE as i128).await, market.buy_side(1).await];
+    let pair = vec![
+        market.sell_side(PRICE as i128).await,
+        market.buy_side(1).await,
+    ];
 
     assert!(
         market.buy_in_one_call(&buyer, PRICE, pair.clone()).await?,

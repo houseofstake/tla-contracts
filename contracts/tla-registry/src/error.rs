@@ -46,6 +46,7 @@ pub enum ContractError {
     WithdrawalAmountZero,
     TokenNotInAllowlist,
     AllowlistFull,
+    VenueIsRegistry,
     AllRentTiersZero,
     CreationDepositZero,
     CannotRemoveLastAdmin,

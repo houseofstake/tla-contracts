@@ -55,7 +55,6 @@ fn deploy() -> TlaRegistry {
         U64(GRACE_NS),
         acc(TREASURY),
         acc(COUNCIL),
-        None,
     )
 }
 
@@ -619,6 +618,80 @@ mod rental {
     }
 
     #[test]
+    fn a_fresh_registry_reports_every_missing_deploy_step() {
+        let c = deploy();
+        let state = c.deployment_readiness();
+        assert!(!state.ready);
+        assert!(!state.recovery_wired, "no recovery authority yet");
+        assert!(!state.venue_set, "no venue yet");
+        assert!(
+            !state.metadata_set,
+            "name still derives from the account id"
+        );
+        assert!(state.wiring_sane, "constructor already refuses self-wiring");
+    }
+
+    #[test]
+    fn readiness_flips_only_once_every_step_is_done() {
+        let mut c = deploy_with_open_tla();
+        assert!(!c.deployment_readiness().ready);
+        ctx(COUNCIL, 1, 1);
+        c.add_recovery_authority(acc(BOB)).unwrap();
+        assert!(!c.deployment_readiness().ready, "venue still missing");
+        ctx(COUNCIL, 1, 1);
+        c.add_venue(acc("venue.testnet")).unwrap();
+        assert!(!c.deployment_readiness().ready, "metadata still missing");
+        ctx(ADMIN, 1, 1);
+        c.admin_set_nft_metadata("Names".to_string(), "NAME".to_string(), None, None, None)
+            .unwrap();
+        let done = c.deployment_readiness();
+        assert!(
+            done.ready,
+            "every step done but readiness still false: {done:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_council_may_name_a_venue() {
+        let mut c = deploy_with_open_tla();
+        ctx(BOB, 1, 1);
+        assert!(matches!(
+            c.add_venue(acc("venue.testnet")),
+            Err(ContractError::OnlyCouncil)
+        ));
+        ctx(COUNCIL, 1, 1);
+        c.add_venue(acc("venue.testnet")).unwrap();
+        assert_eq!(c.get_venues(), vec![acc("venue.testnet")]);
+        ctx(COUNCIL, 1, 1);
+        c.remove_venue(acc("venue.testnet")).unwrap();
+        assert!(c.get_venues().is_empty());
+    }
+
+    #[test]
+    fn the_registry_cannot_name_itself_a_venue() {
+        let mut c = deploy_with_open_tla();
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.add_venue(near_sdk::env::current_account_id()),
+            Err(ContractError::VenueIsRegistry)
+        ));
+    }
+
+    #[test]
+    fn the_venue_list_is_bounded() {
+        let mut c = deploy_with_open_tla();
+        for i in 0..8 {
+            ctx(COUNCIL, 1, 1);
+            c.add_venue(acc(&format!("venue{i}.testnet"))).unwrap();
+        }
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.add_venue(acc("one-too-many.testnet")),
+            Err(ContractError::AllowlistFull)
+        ));
+    }
+
+    #[test]
     fn a_stranger_can_pay_to_renew_a_name_they_do_not_own() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
@@ -1113,14 +1186,7 @@ mod reclaim {
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
         ctx(ADMIN, 0, 0);
-        let _ = TlaRegistry::new(
-            acc(ADMIN),
-            acc(HOSEXT),
-            U64(0),
-            acc(TREASURY),
-            acc(COUNCIL),
-            None,
-        );
+        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0), acc(TREASURY), acc(COUNCIL));
     }
 
     #[test]
@@ -1857,7 +1923,6 @@ mod council_split {
             U64(GRACE_NS),
             acc(TREASURY),
             acc(OTHER_COUNCIL),
-            None,
         )
     }
 

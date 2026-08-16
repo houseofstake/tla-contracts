@@ -1,6 +1,6 @@
 mod common;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use common::*;
 use near_sdk::json_types::{Base64VecU8, U64};
 use near_workspaces::types::NearToken;
@@ -77,18 +77,19 @@ async fn the_council_upgrades_a_registry_that_holds_no_key() -> Result<()> {
         .await?
         .into_result()?;
 
-    let shipped = fleet
+    let too_soon = fleet
         .council
         .call(registry.id(), "upgrade")
         .args_json(json!({ "code": Base64VecU8(code) }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
-        .await?
-        .into_result()?;
-    if let Some(failure) = shipped.receipt_failures().first() {
-        bail!("keyless upgrade receipt failed: {failure:?}");
-    }
+        .await?;
+    let refusal = format!("{:?}", too_soon.into_result().err());
+    assert!(
+        refusal.contains("approval_too_young"),
+        "matching code still waits out the delay, got {refusal}"
+    );
 
     let sub: serde_json::Value = registry
         .view("get_sub_account")
@@ -98,10 +99,14 @@ async fn the_council_upgrades_a_registry_that_holds_no_key() -> Result<()> {
     assert_eq!(
         sub["owner"],
         fleet.bob.id().as_str(),
-        "state must survive a deploy that nothing signed for the account"
+        "state must survive a refused deploy"
     );
-    let spent: Option<String> = registry.view("approved_upgrade_hash").await?.json()?;
-    assert!(spent.is_none(), "an approval must not survive its upgrade");
+    let pending: Option<String> = registry.view("approved_upgrade_hash").await?.json()?;
+    assert_eq!(
+        pending.as_deref(),
+        Some(hash.as_str()),
+        "a refused upgrade must leave its approval standing"
+    );
 
     Ok(())
 }

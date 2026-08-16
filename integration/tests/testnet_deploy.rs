@@ -506,6 +506,32 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
     }
     println!("  {} <-> {} both directions", recovery.id(), registry.id());
 
+    println!("\n== venue allowlist (a receiver we never named is a plain new owner) ==");
+    match std::env::var("INTENTS_VERIFIER") {
+        Ok(venue) if !venue.is_empty() => {
+            council
+                .call(registry.id(), "add_venue")
+                .args_json(json!({ "account_id": venue }))
+                .deposit(NearToken::from_yoctonear(1))
+                .max_gas()
+                .transact()
+                .await?
+                .into_result()?;
+            println!("  named {venue}");
+        }
+        _ => println!("  INTENTS_VERIFIER unset, skipping; deposits will settle as plain transfers"),
+    }
+
+    println!("\n== deployment readiness ==");
+    let readiness: serde_json::Value = worker
+        .view(registry.id(), "deployment_readiness")
+        .await?
+        .json()?;
+    println!("  {readiness}");
+    if readiness["ready"] != serde_json::Value::Bool(true) {
+        println!("  NOT READY: every false field above is an unfinished deploy step");
+    }
+
     println!(
         "\n== marketplace fleet live: registry={} ext={} rec={} ==",
         registry.id(),

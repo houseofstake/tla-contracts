@@ -58,6 +58,10 @@ pub enum Event {
     #[event_version("1.0.0")]
     AdminRemoved { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
+    VenueAdded { account: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
+    VenueRemoved { account: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
     PaymentAuthorityAdded { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
     PaymentAuthorityRemoved { account: AccountId, by: AccountId },

@@ -175,12 +175,33 @@ impl TlaRegistry {
         self.payment_authorities.iter().cloned().collect()
     }
 
+    pub fn get_venues(&self) -> Vec<AccountId> {
+        self.venues.iter().cloned().collect()
+    }
+
     pub fn get_recovery_authorities(&self) -> Vec<AccountId> {
         self.recovery_authorities.iter().cloned().collect()
     }
 
     pub fn get_ft_allowlist(&self) -> Vec<AccountId> {
         self.ft_allowlist.iter().cloned().collect()
+    }
+
+    pub fn deployment_readiness(&self) -> DeploymentReadiness {
+        let this = near_sdk::env::current_account_id();
+        let rate_ready = self.near_usd_rate_micro != 0;
+        let recovery_ready = !self.recovery_authorities.is_empty();
+        let venue_ready = !self.venues.is_empty();
+        let metadata_ready = self.nft_contract_metadata.name != this.as_str();
+        let wiring_ready = self.hos_extension != this && self.treasury != this;
+        DeploymentReadiness {
+            rate_set: rate_ready,
+            recovery_wired: recovery_ready,
+            venue_set: venue_ready,
+            metadata_set: metadata_ready,
+            wiring_sane: wiring_ready,
+            ready: rate_ready && recovery_ready && venue_ready && metadata_ready && wiring_ready,
+        }
     }
 }
 

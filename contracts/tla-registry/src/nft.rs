@@ -36,6 +36,7 @@ pub struct NftTransferCall {
     pub to: AccountId,
     pub memo: Option<String>,
     pub msg: String,
+    pub cause: RotationCause,
 }
 
 #[allow(dead_code)]
@@ -128,12 +129,13 @@ impl TlaRegistry {
         self.assert_marketplace_open()?;
         let (tla_id, name, from, sub_account) =
             self.open_nft_transfer(&receiver_id, &token_id, approval_id)?;
+        let cause = self.rotation_for_receiver(&receiver_id);
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
                 sub_account,
                 Some(receiver_id.clone()),
-                RotationCause::Deposit,
+                cause,
                 Some(from.clone()),
             )
             .then(
@@ -150,6 +152,7 @@ impl TlaRegistry {
                         to: receiver_id,
                         memo,
                         msg,
+                        cause,
                     }),
             ))
     }
@@ -191,16 +194,10 @@ impl TlaRegistry {
             to,
             memo,
             msg,
+            cause,
         } = call;
         let token_id = sub_account_key(&tla_id, &name);
-        self.commit_nft_rotation(
-            &tla_id,
-            &name,
-            &from,
-            &to,
-            memo.as_ref(),
-            (RotationCause::Deposit, swapped),
-        );
+        self.commit_nft_rotation(&tla_id, &name, &from, &to, memo.as_ref(), (cause, swapped));
         ext_nft_receiver::ext(to.clone())
             .with_static_gas(GAS_FOR_NFT_ON_TRANSFER)
             .with_unused_gas_weight(1)
@@ -439,6 +436,14 @@ impl TlaRegistry {
             from: from.clone(),
             to: to.clone(),
         });
+    }
+
+    fn rotation_for_receiver(&self, receiver_id: &AccountId) -> RotationCause {
+        if self.venues.contains(receiver_id) {
+            RotationCause::Deposit
+        } else {
+            RotationCause::Transfer
+        }
     }
 
     fn split_token_id(&self, token_id: &str) -> Result<(AccountId, String), ContractError> {

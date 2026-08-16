@@ -203,6 +203,17 @@ pub struct TlaView {
     pub annual_rent: U128,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(crate = "near_sdk::serde")]
+pub struct DeploymentReadiness {
+    pub rate_set: bool,
+    pub recovery_wired: bool,
+    pub venue_set: bool,
+    pub metadata_set: bool,
+    pub wiring_sane: bool,
+    pub ready: bool,
+}
+
 #[derive(Serialize)]
 #[serde(crate = "near_sdk::serde")]
 pub struct SubAccountView {

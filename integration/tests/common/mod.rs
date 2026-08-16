@@ -254,7 +254,6 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
             "grace_period_ns": U64(GRACE_NS),
             "treasury": fleet.council.id(),
             "council": fleet.council.id(),
-            "upgrade_delay_ns": U64(0),
         }))
         .max_gas()
         .transact()

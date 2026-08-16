@@ -76,6 +76,7 @@ pub(crate) enum StorageKey {
     SweepableTokens,
     SuspendedUntil,
     TokenMetadataStore,
+    Venues,
 }
 
 #[near(contract_state)]
@@ -119,6 +120,7 @@ pub struct TlaRegistry {
     pub(crate) approved_code_hash: Option<[u8; 32]>,
     pub(crate) approved_at: Option<u64>,
     pub(crate) upgrade_delay_ns: u64,
+    pub(crate) venues: IterableSet<AccountId>,
 }
 
 #[near(serializers = [borsh])]
@@ -170,7 +172,6 @@ impl TlaRegistry {
         grace_period_ns: U64,
         treasury: AccountId,
         council: AccountId,
-        upgrade_delay_ns: Option<U64>,
     ) -> Self {
         require!(
             grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
@@ -222,9 +223,8 @@ impl TlaRegistry {
             nft_contract_metadata: nft::initial_metadata(),
             approved_code_hash: None,
             approved_at: None,
-            upgrade_delay_ns: upgrade_delay_ns
-                .map(|value| value.0)
-                .unwrap_or(admin::UPGRADE_DELAY_NS),
+            upgrade_delay_ns: admin::UPGRADE_DELAY_NS,
+            venues: IterableSet::new(StorageKey::Venues),
         }
     }
 
@@ -276,6 +276,7 @@ impl TlaRegistry {
             approved_code_hash: None,
             approved_at: None,
             upgrade_delay_ns: admin::UPGRADE_DELAY_NS,
+            venues: IterableSet::new(StorageKey::Venues),
         }
     }
 
