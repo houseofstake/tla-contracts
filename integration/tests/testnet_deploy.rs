@@ -166,12 +166,10 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
                 .into_result()?;
             println!("  topped up {deployer_id} by {top_up}");
         }
-        // TEMPORARY: the deployer live on testnet predates assert_one_yocto on
-        // gd_approve and rejects any deposit. Restore the 1 yoctoNEAR once the
-        // deployer itself has been upgraded to this source.
         council
             .call(&deployer_id, "gd_approve")
             .args_json(json!({ "hash": wallet_hash }))
+            .deposit(NearToken::from_yoctonear(1))
             .max_gas()
             .transact()
             .await?
