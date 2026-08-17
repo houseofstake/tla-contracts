@@ -114,6 +114,7 @@ pub struct NftItemInfo {
     pub token_id: String,
     pub owner_id: AccountId,
     pub rotation_seq: U64,
+    pub rotation_epoch: u32,
 }
 
 pub enum ItemStatus {
@@ -139,6 +140,7 @@ Against TEP-62's five fields, nothing is added to its shape, one is dropped, and
 | | `spec` | Which revision of this interface the answer conforms to. |
 | | `status` | Whether the item would accept work, which `init` alone cannot express. |
 | | `rotation_seq` | Distinguishes an index that is catching up from one that is wrong. |
+| | `rotation_epoch` | Which generation of stored state that sequence counts within. |
 
 `token_id` is a `String` rather than an `AccountId` because NEP-171 defines it as a string, and
 conformance is worth more than encoding an incidental invariant.
@@ -156,8 +158,17 @@ conformance is worth more than encoding an incidental invariant.
 6. `status` MUST be `Active` if and only if the item would accept a request from an authorised
    caller at the current block. Every other value MUST name the first condition that would
    refuse it.
-7. `rotation_seq` MUST increase on every change of `owner_id` and MUST NOT decrease.
-8. An implementation MUST NOT report `Active` while any gate it enforces would refuse. Deriving
+7. `rotation_seq` MUST increase on every rotation, including one that parks the item and
+   therefore leaves `owner_id` unchanged. It counts rotations the collection records, not
+   changes of owner, because a consumer must notice a park it would otherwise read as a
+   still-valid name.
+8. `rotation_epoch` MUST change whenever a migration restarts `rotation_seq`, and MUST NOT
+   change otherwise. A sequence is meaningful only against another sequence from the same
+   epoch. Migrations that introduce or replace the sequence may restart it, so an
+   implementation that hid the restart would leave consumers unable to tell a fresh
+   migration from a collection inventing rotations. Reporting the epoch is what allows the
+   restart to be safe rather than silent.
+9. An implementation MUST NOT report `Active` while any gate it enforces would refuse. Deriving
    `status` from the same predicate the contract already enforces is the only way to guarantee
    this; recomputing it separately will drift.
 
@@ -233,7 +244,7 @@ Each clause rules out a distinct forgery and none is redundant:
 The item and the index are updated in separate receipts, so they disagree briefly on every
 rotation. A consumer MUST NOT treat every disagreement as evidence of compromise.
 
-When both halves report `rotation_seq`:
+When both halves report a `rotation_seq` **and the same `rotation_epoch`**:
 
 | observation | meaning | consumer action |
 | --- | --- | --- |
@@ -241,8 +252,14 @@ When both halves report `rotation_seq`:
 | `item < index` | the index claims a rotation the account never made | refuse, do not retry |
 | equal, owners differ | genuine corruption | refuse, do not retry |
 
-When the collection reports no sequence, a consumer cannot tell direction and MUST treat an
-owner disagreement as retryable, refusing until it converges or a bound elapses.
+A consumer MUST compare sequences only within one epoch. Across an epoch change the numbers
+describe different generations of stored state, and the lower one is the newer: a migration
+restarts the count, so treating `item < index` as an invented rotation would report every
+migrated account as corrupt.
+
+When either half reports no sequence, or the two report different epochs, a consumer cannot
+tell direction and MUST treat an owner disagreement as retryable, refusing until it converges
+or a bound elapses.
 
 #### T3, and the horizon on caching it
 

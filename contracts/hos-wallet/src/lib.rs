@@ -24,7 +24,7 @@ use hos_common::RotationCause;
 
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
-const IMPL_VERSION: u32 = 3;
+const IMPL_VERSION: u32 = 4;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
@@ -87,11 +87,9 @@ pub struct NftItemInfo {
     pub token_id: String,
     pub owner_id: AccountId,
     pub rotation_seq: U64,
+    pub rotation_epoch: u32,
 }
 
-/// The first condition that would refuse a request, in the order
-/// `assert_renter_active` checks them. `Active` means the account would accept
-/// work right now; every other value names what a consumer must resolve first.
 #[near(serializers = [json])]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ItemStatus {
@@ -133,16 +131,18 @@ pub struct SpendGrant {
 
 #[near(serializers = [borsh])]
 pub struct LegacyTenantWallet {
-    wallet: State<NoPublicKey>,
-    authority: AccountId,
-    owner: AccountId,
-    payout_account: AccountId,
-    lease_until_ns: u64,
-    state: OperatingState,
-    frozen: FreezeState,
-    authority_freeze_until_ns: u64,
-    transfer_armed: bool,
-    spend_grants: BTreeMap<AccountId, SpendGrant>,
+    pub wallet: State<NoPublicKey>,
+    pub authority: AccountId,
+    pub owner: AccountId,
+    pub collection_id: AccountId,
+    pub payout_account: AccountId,
+    pub lease_until_ns: u64,
+    pub state: OperatingState,
+    pub frozen: FreezeState,
+    pub authority_freeze_until_ns: u64,
+    pub spend_grants: BTreeMap<AccountId, SpendGrant>,
+    pub revert_to: Option<AccountId>,
+    pub revert_until_ns: u64,
 }
 
 #[near(
@@ -308,8 +308,8 @@ impl TenantWallet {
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
             spend_grants: old.spend_grants,
-            revert_to: None,
-            revert_until_ns: 0,
+            revert_to: old.revert_to,
+            revert_until_ns: old.revert_until_ns,
             rotation_seq: 0,
         }
     }
@@ -416,6 +416,7 @@ impl TenantWallet {
             token_id: env::current_account_id().to_string(),
             owner_id: self.owner.clone(),
             rotation_seq: U64(self.rotation_seq),
+            rotation_epoch: IMPL_VERSION,
         }
     }
 
@@ -693,9 +694,6 @@ impl TenantWallet {
         );
     }
 
-    /// The single predicate behind both the runtime gate and the reported
-    /// status, so a consumer reading `nft_item_info` can never be told the
-    /// account would accept work that `assert_renter_active` would refuse.
     fn blocking_condition(&self) -> Option<ItemStatus> {
         if self.state != OperatingState::Active {
             return Some(ItemStatus::Suspended);

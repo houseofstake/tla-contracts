@@ -1013,26 +1013,28 @@ fn an_owner_who_leaves_cannot_ask_for_a_further_transfer() {
     assert!(outcome.is_err(), "the previous owner is no longer a holder");
 }
 
-fn legacy_state(c: TenantWallet, armed: bool) -> LegacyTenantWallet {
+fn legacy_state(c: TenantWallet) -> LegacyTenantWallet {
     LegacyTenantWallet {
         wallet: c.wallet,
         authority: acc(AUTHORITY),
         owner: acc(OWNER),
+        collection_id: acc(REGISTRY),
         payout_account: acc(PAYOUT),
         lease_until_ns: c.lease_until_ns,
         state: OperatingState::Active,
         frozen: FreezeState::Unfrozen,
         authority_freeze_until_ns: 0,
-        transfer_armed: armed,
         spend_grants: c.spend_grants,
+        revert_to: None,
+        revert_until_ns: 0,
     }
 }
 
 #[test]
-fn migrate_carries_the_owner_across_and_drops_any_arming() {
+fn migrate_carries_the_owner_across() {
     let c = deploy();
     let lease = c.lease_until_ns;
-    let legacy = legacy_state(c, true);
+    let legacy = legacy_state(c);
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
     let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
@@ -1044,7 +1046,7 @@ fn migrate_carries_the_owner_across_and_drops_any_arming() {
 #[test]
 fn migrate_cannot_be_used_to_hand_the_wallet_to_another_account() {
     let c = deploy();
-    let mut legacy = legacy_state(c, false);
+    let mut legacy = legacy_state(c);
     legacy.wallet.extensions.insert(acc("co-owner.testnet"));
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
@@ -1060,7 +1062,7 @@ fn migrate_cannot_be_used_to_hand_the_wallet_to_another_account() {
 #[should_panic(expected = "only the lease authority")]
 fn migrate_is_refused_to_anyone_but_the_authority() {
     let c = deploy();
-    let legacy = legacy_state(c, false);
+    let legacy = legacy_state(c);
     ctx(OWNER, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
     TenantWallet::hos_migrate(acc(REGISTRY));
@@ -1070,7 +1072,7 @@ fn migrate_is_refused_to_anyone_but_the_authority() {
 #[should_panic(expected = "only the owner")]
 fn migrate_refuses_an_owner_outside_the_extension_set() {
     let c = deploy();
-    let mut legacy = legacy_state(c, false);
+    let mut legacy = legacy_state(c);
     legacy.owner = acc("stranger.testnet");
     ctx(AUTHORITY, 0, now_ns());
     env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
@@ -1218,7 +1220,7 @@ mod deployed_shape {
     use near_sdk::base64::Engine;
     use near_sdk::borsh::BorshDeserialize;
 
-    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAAB0ZXN0dHR0dHQzMS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAdGVzdHR0dHR0MzEudGVzdG5ldBMAAAB0ZXN0dHR0dHQzMS50ZXN0bmV0gGp3K8eVORkAAAAAAAAAAAAAAAAAAAA=";
+    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAABmdW5kci1ob3MtNS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldBgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldHM+cEIcUjkZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
     fn raw() -> Vec<u8> {
         near_sdk::base64::engine::general_purpose::STANDARD
@@ -1231,9 +1233,15 @@ mod deployed_shape {
         let old = LegacyTenantWallet::try_from_slice(&raw())
             .expect("deployed wallet no longer decodes as LegacyTenantWallet");
         assert_eq!(old.authority.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.owner.as_str(), "testttttt31.testnet");
-        assert_eq!(old.payout_account.as_str(), "testttttt31.testnet");
-        assert!(!old.transfer_armed);
+        assert_eq!(old.owner.as_str(), "fundr-hos-5.testnet");
+        assert_eq!(
+            old.collection_id.as_str(),
+            "registry.hosdemo.testnet",
+            "collection_id sits where a stale legacy struct expects payout_account, \
+             so reading the wrong value here is the first sign of drift"
+        );
+        assert_eq!(old.payout_account.as_str(), "fundr-hos-5.testnet");
+        assert_eq!(old.revert_until_ns, 0);
         assert!(old.spend_grants.is_empty());
         assert!(old.wallet.extensions.contains(&old.owner));
     }
@@ -1422,6 +1430,34 @@ mod sharded_item {
             before + 1,
             "an index carrying a lower sequence is behind and will catch up; one \
              carrying a higher sequence claims a rotation the account never made"
+        );
+    }
+
+    #[test]
+    fn parking_a_name_advances_the_sequence_even_though_the_owner_is_unchanged() {
+        let mut c = init(now_ns(), now_ns() + 1);
+        let before = c.nft_item_info().rotation_seq.0;
+        ctx(AUTHORITY, 1, now_ns() + 2);
+        c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+        let info = c.nft_item_info();
+        assert_eq!(info.owner_id, acc(OWNER), "a park does not hand the name to anyone");
+        assert_eq!(
+            info.rotation_seq.0,
+            before + 1,
+            "the sequence counts rotations rather than changes of owner, because a \
+             park is a rotation the collection records and a consumer must notice"
+        );
+        assert_eq!(info.status, ItemStatus::Parked);
+    }
+
+    #[test]
+    fn the_sequence_is_only_comparable_within_one_rotation_epoch() {
+        let c = deploy();
+        let info = c.nft_item_info();
+        assert_eq!(
+            info.rotation_epoch, IMPL_VERSION,
+            "a migration restarts rotation_seq, so an item states which generation \
+             its sequence belongs to and a consumer refuses to compare across two"
         );
     }
 }
