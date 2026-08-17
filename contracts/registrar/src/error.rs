@@ -15,3 +15,5 @@ pub const APPROVAL_TOO_YOUNG: &str = "approved upgrade is still inside its delay
 pub const NO_STATE: &str = "no state to migrate";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be the minted account";
 pub const OWNER_ACCOUNT_IS_SELF: &str = "owner account must not be the minted account";
+pub const COUNCIL_IS_SELF: &str = "council must not be this account, which ends with no keys";
+pub const REGISTRY_IS_SELF: &str = "registry must not be this account, which ends with no keys";

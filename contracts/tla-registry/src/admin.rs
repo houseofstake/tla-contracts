@@ -5,7 +5,7 @@ use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::{env, near, AccountId};
 
-const MAX_ALLOWLIST_SIZE: u32 = 16;
+pub(crate) const MAX_ALLOWLIST_SIZE: u32 = 16;
 const MAX_SWEEPABLE_SIZE: u32 = 64;
 const MAX_VENUES: u32 = 8;
 const MIN_RETRACTION_NOTICE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
@@ -233,8 +233,11 @@ impl TlaRegistry {
         if config.account_creation_deposit_yocto.0 == 0 {
             return Err(ContractError::CreationDepositZero);
         }
-        if config.resale_commission_bps > 10_000 {
-            return Err(ContractError::InvalidCommissionRate);
+        if config.rent_tier_5_usd_micro.0 < config.rent_tier_8_usd_micro.0
+            || config.rent_tier_8_usd_micro.0 < config.rent_tier_10_usd_micro.0
+            || config.rent_tier_10_usd_micro.0 < config.rent_tier_12plus_usd_micro.0
+        {
+            return Err(ContractError::RentTiersNotDescending);
         }
         if config.max_rate_move_bps > 10_000 || config.quote_slippage_bps > 10_000 {
             return Err(ContractError::InvalidRateBounds);
@@ -441,6 +444,22 @@ impl TlaRegistry {
         self.approved_code_hash = None;
         self.approved_at = None;
         Ok(hos_common::deploy_and_migrate(code))
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn seal(
+        &mut self,
+        public_key: near_sdk::PublicKey,
+    ) -> Result<near_sdk::Promise, ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        Event::Sealed {
+            public_key: (&public_key).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(near_sdk::Promise::new(env::current_account_id()).delete_key(public_key))
     }
 
     pub fn approved_upgrade_hash(&self) -> Option<near_sdk::json_types::Base58CryptoHash> {

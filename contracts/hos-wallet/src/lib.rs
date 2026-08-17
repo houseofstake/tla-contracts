@@ -5,6 +5,7 @@ mod state;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use defuse_wallet::actions::NearAction;
 use defuse_wallet::contract::Wallet;
 use defuse_wallet::events::{Actor, WalletEvent};
 use defuse_wallet::{
@@ -866,6 +867,13 @@ impl TenantWallet {
             require!(
                 promise.refund_to.is_none(),
                 error::REFUND_TARGET_NOT_ALLOWED
+            );
+            require!(
+                promise
+                    .actions
+                    .iter()
+                    .all(|action| matches!(action, NearAction::Transfer(_))),
+                error::GRANT_TRANSFERS_ONLY
             );
         }
         let spent = grant

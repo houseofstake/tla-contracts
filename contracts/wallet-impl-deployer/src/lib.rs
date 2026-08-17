@@ -21,6 +21,7 @@ mod error {
     pub const EMPTY_CODE: &str = "code must not be empty";
     pub const COST_OVERFLOW: &str = "storage cost overflow";
     pub const REQUIRES_ONE_YOCTO: &str = "requires an attached deposit of exactly 1 yoctoNEAR";
+    pub const COUNCIL_IS_SELF: &str = "council must not be this account, which ends with no keys";
     pub const NO_APPROVED_UPGRADE: &str = "no approved upgrade hash";
     pub const UPGRADE_HASH_MISMATCH: &str = "code does not match the approved upgrade hash";
     pub const UPGRADE_TOO_YOUNG: &str =
@@ -98,6 +99,7 @@ impl ImplDeployer {
     /// 48 hour default. The sandbox passes 0 so tests do not have to advance
     /// two days of blocks.
     pub fn new(council: AccountId, approval_delay_ns: Option<near_sdk::json_types::U64>) -> Self {
+        require!(council != env::current_account_id(), error::COUNCIL_IS_SELF);
         Self {
             council,
             current_hash: None,
@@ -348,6 +350,13 @@ mod tests {
     fn deploy() -> ImplDeployer {
         ctx(COUNCIL, 0);
         ImplDeployer::new(acc(COUNCIL), None)
+    }
+
+    #[test]
+    #[should_panic(expected = "council must not be this account")]
+    fn init_rejects_a_council_that_is_the_deployer_itself() {
+        ctx(COUNCIL, 0);
+        let _ = ImplDeployer::new(acc(IMPL), None);
     }
 
     fn code() -> Vec<u8> {

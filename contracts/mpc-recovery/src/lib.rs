@@ -93,6 +93,7 @@ impl MpcRecovery {
             threshold > 0 && (threshold as usize) <= watchers.len(),
             error::BAD_THRESHOLD
         );
+        require!(owner != env::current_account_id(), error::OWNER_IS_SELF);
         let mut seen = BTreeSet::new();
         for watcher in &watchers {
             require!(hos_common::is_ed25519(watcher), error::WATCHER_NOT_ED25519);
@@ -134,6 +135,18 @@ impl MpcRecovery {
             approved_at: None,
             registry: None,
         }
+    }
+
+    #[payable]
+    pub fn seal(&mut self, public_key: PublicKey) -> Promise {
+        self.assert_one_yocto();
+        self.assert_owner();
+        Event::Sealed {
+            public_key: String::from(&public_key),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Promise::new(env::current_account_id()).delete_key(public_key)
     }
 
     #[payable]

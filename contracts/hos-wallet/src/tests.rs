@@ -408,6 +408,29 @@ fn an_extension_cannot_grant_itself_spend() {
 }
 
 #[test]
+#[should_panic(expected = "a spend grant covers plain transfers only")]
+fn a_grantee_cannot_reach_a_token_contract_through_a_function_call() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(1), &["usdc.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    let drain = NearPromise::new(acc("usdc.testnet")).function_call(
+        FunctionCall::name("ft_transfer").attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([drain]));
+}
+
+#[test]
+fn the_owner_keeps_the_function_call_path_a_grantee_loses() {
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_millinear(1), &["usdc.testnet"]);
+    ctx(OWNER, 1, now_ns());
+    let call = NearPromise::new(acc("usdc.testnet")).function_call(
+        FunctionCall::name("ft_transfer").attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
 fn evicting_an_extension_drops_its_grant() {
     let mut c = deploy();
     install_and_grant(&mut c, NearToken::from_millinear(10), &["carol.testnet"]);

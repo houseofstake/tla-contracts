@@ -1,4 +1,5 @@
 pub const ONLY_OWNER: &str = "only owner";
+pub const OWNER_IS_SELF: &str = "owner must not be this account, which ends with no keys";
 pub const ONLY_INSTALLER: &str = "only installer or owner";
 pub const ONLY_OWNER_REINSTALL: &str = "only owner may replace an existing policy";
 pub const ONLY_TRANSFER_AUTHORITY: &str = "only transfer authority";

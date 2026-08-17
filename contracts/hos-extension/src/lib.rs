@@ -9,7 +9,7 @@ use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U128, U64};
 use near_sdk::store::IterableSet;
 use near_sdk::{
     env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError, PromiseOrValue,
+    PromiseError, PromiseOrValue, PublicKey,
 };
 
 const CONTRACT_VERSION: u8 = 1;
@@ -110,6 +110,10 @@ impl HosExtension {
         treasury: AccountId,
         council: AccountId,
     ) -> Self {
+        near_sdk::require!(
+            council != env::current_account_id(),
+            "council must not be this account, which ends with no keys"
+        );
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);
         Self {
@@ -257,8 +261,23 @@ impl HosExtension {
         Ok(hos_common::deploy_and_migrate(code))
     }
 
+    #[payable]
+    #[handle_result]
+    pub fn seal(&mut self, public_key: PublicKey) -> Result<Promise, ContractError> {
+        self.assert_one_yocto()?;
+        self.assert_council()?;
+        Event::Sealed {
+            public_key: (&public_key).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(Promise::new(env::current_account_id()).delete_key(public_key))
+    }
+
+    #[payable]
     #[handle_result]
     pub fn skim(&mut self, amount: U128) -> Result<Promise, ContractError> {
+        self.assert_one_yocto()?;
         self.assert_admin()?;
         let to = self.treasury.clone();
         let reserve = env::storage_byte_cost()

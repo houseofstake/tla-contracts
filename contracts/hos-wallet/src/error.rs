@@ -35,6 +35,8 @@ pub const NOTHING_TO_SWEEP: &str = "nothing to sweep";
 pub const NO_SPEND_GRANT: &str = "this extension has no spend grant";
 pub const GRANT_EXPIRED: &str = "spend grant expired";
 pub const RECEIVER_NOT_GRANTED: &str = "receiver is not in the spend grant";
+pub const GRANT_TRANSFERS_ONLY: &str =
+    "a spend grant covers plain transfers only, because a budget cannot bound what a function call moves";
 pub const REFUND_TARGET_NOT_ALLOWED: &str = "a granted spend cannot redirect refunds";
 pub const GRANT_CAP_EXCEEDED: &str = "spend exceeds the granted cap";
 pub const EMPTY_GRANT: &str = "a spend grant needs at least one receiver";

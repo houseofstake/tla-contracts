@@ -854,6 +854,52 @@ async fn a_deposited_name_keeps_its_payout_with_the_seller() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_plain_transfer_into_a_venue_also_keeps_the_payout_with_the_seller() -> Result<()> {
+    let market = open_market(0).await?;
+    market
+        .fleet
+        .bob
+        .call(market.registry.id(), "nft_transfer")
+        .args_json(json!({
+            "receiver_id": market.verifier.id(),
+            "token_id": market.token_id,
+            "approval_id": null,
+            "memo": null,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let payout: String = market
+        .fleet
+        .worker
+        .view(&market.tenant, "hos_payout_account")
+        .await?
+        .json()?;
+    assert_eq!(
+        payout,
+        market.fleet.bob.id().as_str(),
+        "reaching a venue by plain transfer rather than transfer_call must not hand the seller's \
+         payout claim to the venue, or the proceeds land somewhere the seller cannot withdraw from"
+    );
+
+    let sub: serde_json::Value = market
+        .registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": market.fleet.registrar.id(), "name": "alice" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        sub["payout_account"],
+        market.fleet.bob.id().as_str(),
+        "and the registry's own record must agree with the wallet"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unlisted_receiver_does_not_get_venue_treatment() -> Result<()> {
     let market = open_market(0).await?;
     market

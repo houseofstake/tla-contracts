@@ -163,15 +163,25 @@ fn non_registry_cannot_sweep() {
 #[test]
 fn admin_can_skim_within_available_balance() {
     let mut c = deploy();
-    ctx(ADMIN, 0);
+    ctx(ADMIN, 1);
     assert!(c.skim(U128(1)).is_ok());
 }
 
 #[test]
 fn non_admin_cannot_skim() {
     let mut c = deploy();
-    ctx(REGISTRY, 0);
+    ctx(REGISTRY, 1);
     assert!(matches!(c.skim(U128(1)), Err(ContractError::OnlyAdmin)));
+}
+
+#[test]
+fn a_restricted_key_cannot_skim() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    assert!(matches!(
+        c.skim(U128(1)),
+        Err(ContractError::RequiresOneYocto)
+    ));
 }
 
 fn ctx_at(predecessor: &str, deposit: u128, ts: u64) {
@@ -249,7 +259,7 @@ fn a_landed_upgrade_clears_the_approval_so_it_cannot_be_replayed() {
 #[test]
 fn skim_always_pays_the_treasury_fixed_at_deploy() {
     let mut c = deploy();
-    ctx(ADMIN, 0);
+    ctx(ADMIN, 1);
     assert!(c.skim(U128(1)).is_ok());
     assert_eq!(c.treasury, acc(DEST));
 }
@@ -403,4 +413,45 @@ fn state_already_current_survives_a_same_shape_redeploy() {
     let registry = current.registry.clone();
     env::state_write(&current);
     assert_eq!(HosExtension::migrate().registry, registry);
+}
+
+fn a_key() -> near_sdk::PublicKey {
+    std::str::FromStr::from_str("ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847").unwrap()
+}
+
+#[test]
+fn the_council_can_seal_the_extension() {
+    let mut c = deploy();
+    ctx(COUNCIL, 1);
+    assert!(c.seal(a_key()).is_ok());
+}
+
+#[test]
+fn an_admin_alone_cannot_remove_the_key() {
+    let mut c = deploy();
+    ctx(ADMIN, 1);
+    assert!(matches!(c.seal(a_key()), Err(ContractError::OnlyCouncil)));
+}
+
+#[test]
+fn sealing_the_extension_needs_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(COUNCIL, 0);
+    assert!(matches!(
+        c.seal(a_key()),
+        Err(ContractError::RequiresOneYocto)
+    ));
+}
+
+#[test]
+#[should_panic(expected = "council must not be this account")]
+fn init_rejects_a_council_that_is_the_extension_itself() {
+    ctx(ADMIN, 0);
+    let _ = HosExtension::new(
+        acc(ADMIN),
+        acc(REGISTRY),
+        acc(RECOVERY),
+        acc(DEST),
+        acc("hos-extension.testnet"),
+    );
 }

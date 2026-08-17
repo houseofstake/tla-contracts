@@ -5,7 +5,7 @@ use near_sdk::json_types::{Base58CryptoHash, U64};
 use near_sdk::serde_json::json;
 use near_sdk::{
     env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
-    PromiseOrValue,
+    PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
@@ -86,6 +86,14 @@ impl Registrar {
         require!(
             config.min_balance >= ACCOUNT_STORAGE_FLOOR,
             error::BAD_MIN_BALANCE
+        );
+        require!(
+            config.council != env::current_account_id(),
+            error::COUNCIL_IS_SELF
+        );
+        require!(
+            config.registry != env::current_account_id(),
+            error::REGISTRY_IS_SELF
         );
         Self {
             registry: config.registry,
@@ -287,6 +295,21 @@ impl Registrar {
         self.approved_code_hash = None;
         self.approved_at = None;
         hos_common::deploy_and_migrate(code)
+    }
+
+    #[payable]
+    pub fn seal(&mut self, public_key: PublicKey) -> Promise {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.council,
+            error::ONLY_COUNCIL
+        );
+        Event::Sealed {
+            public_key: (&public_key).into(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Promise::new(env::current_account_id()).delete_key(public_key)
     }
 
     pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
@@ -616,6 +639,67 @@ mod tests {
         c.approve_upgrade(hash_of(&[1]));
         ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS - 1);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
+    }
+
+    fn a_key() -> PublicKey {
+        PublicKey::from_str("ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847").unwrap()
+    }
+
+    #[test]
+    fn the_council_can_seal_the_root() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1);
+        let _ = c.seal(a_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "only council")]
+    fn a_misconfigured_council_leaves_the_key_in_place() {
+        let mut c = deploy();
+        ctx("attacker.testnet", 1);
+        let _ = c.seal(a_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn sealing_the_root_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        let _ = c.seal(a_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "council must not be this account")]
+    fn init_rejects_a_council_that_is_the_root_itself() {
+        ctx(COUNCIL, 0);
+        let _ = Registrar::new(RegistrarConfig {
+            registry: acc(REGISTRY),
+            council: acc(TLA),
+            wallet_impl: acc(IMPL),
+            hos_extension: acc(EXTENSION),
+            recovery: acc(RECOVERY),
+            chain_id: "testnet".to_string(),
+            min_balance: NearToken::from_millinear(100),
+            min_label_len: 3,
+            wallet_timeout_secs: 3600,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "registry must not be this account")]
+    fn init_rejects_a_registry_that_is_the_root_itself() {
+        ctx(COUNCIL, 0);
+        let _ = Registrar::new(RegistrarConfig {
+            registry: acc(TLA),
+            council: acc(COUNCIL),
+            wallet_impl: acc(IMPL),
+            hos_extension: acc(EXTENSION),
+            recovery: acc(RECOVERY),
+            chain_id: "testnet".to_string(),
+            min_balance: NearToken::from_millinear(100),
+            min_label_len: 3,
+            wallet_timeout_secs: 3600,
+        });
     }
 
     #[test]

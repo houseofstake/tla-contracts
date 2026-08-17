@@ -1,3 +1,5 @@
+use crate::admin::MAX_ALLOWLIST_SIZE;
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -18,6 +20,12 @@ const GAS_FOR_NFT_ON_TRANSFER: Gas = Gas::from_tgas(25);
 /// Must fund the return rotation it may schedule: a force_transfer plus its
 /// callback, not just its own execution.
 const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas::from_tgas(80);
+const DEPOSIT_GATE_CB_TGAS: u64 = 180;
+const GAS_FOR_DEPOSIT_GATE_CB: Gas = Gas::from_tgas(DEPOSIT_GATE_CB_TGAS);
+const _: () = assert!(
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + DEPOSIT_GATE_CB_TGAS + 20 <= 300,
+    "the deposit gate fans out across the whole ft allowlist before it can dispatch, so an allowlist wider than one 300 Tgas call can fund would break every deposit"
+);
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(crate = "near_sdk::serde")]
@@ -26,6 +34,16 @@ pub struct Token {
     pub owner_id: AccountId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TokenMetadata>,
+}
+
+#[near(serializers = [json])]
+pub struct NftRotation {
+    pub tla_id: AccountId,
+    pub name: String,
+    pub from: AccountId,
+    pub to: AccountId,
+    pub memo: Option<String>,
+    pub cause: RotationCause,
 }
 
 #[near(serializers = [json])]
@@ -105,18 +123,26 @@ impl TlaRegistry {
     ) -> Result<Promise, ContractError> {
         let (tla_id, name, from, sub_account) =
             self.open_nft_transfer(&receiver_id, &token_id, approval_id)?;
+        let cause = self.rotation_for_receiver(&receiver_id);
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
                 sub_account,
                 Some(receiver_id.clone()),
-                RotationCause::Transfer,
+                cause,
                 Some(from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
-                    .nft_on_rotation_resolved(tla_id, name, from, receiver_id, memo),
+                    .nft_on_rotation_resolved(NftRotation {
+                        tla_id,
+                        name,
+                        from,
+                        to: receiver_id,
+                        memo,
+                        cause,
+                    }),
             ))
     }
 
@@ -137,31 +163,44 @@ impl TlaRegistry {
         let (tla_id, name, from, sub_account) =
             self.open_nft_transfer(&receiver_id, &token_id, approval_id)?;
         let cause = self.rotation_for_receiver(&receiver_id);
-        Ok(ext_hos_extension::ext(self.hos_extension.clone())
-            .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-            .force_transfer(
-                sub_account,
-                Some(receiver_id.clone()),
-                cause,
-                Some(from.clone()),
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(
-                        GAS_FOR_TRANSFER_CALLBACK
-                            .saturating_add(GAS_FOR_NFT_ON_TRANSFER)
-                            .saturating_add(GAS_FOR_RESOLVE_TRANSFER),
-                    )
-                    .nft_on_rotation_resolved_call(NftTransferCall {
-                        tla_id,
-                        name,
-                        from,
-                        to: receiver_id,
-                        memo,
-                        msg,
-                        cause,
-                    }),
-            ))
+        let call = NftTransferCall {
+            tla_id,
+            name,
+            from,
+            to: receiver_id,
+            memo,
+            msg,
+            cause,
+        };
+        let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
+        let Some(chain) = ft_balance_fanout(&allowlist, &sub_account) else {
+            return Ok(self.dispatch_transfer_call(sub_account, call));
+        };
+        Ok(chain.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_DEPOSIT_GATE_CB)
+                .nft_on_deposit_balances_checked(sub_account, call, allowlist),
+        ))
+    }
+
+    #[private]
+    #[handle_result]
+    pub fn nft_on_deposit_balances_checked(
+        &mut self,
+        sub_account: AccountId,
+        call: NftTransferCall,
+        allowlist: Vec<AccountId>,
+    ) -> Result<Promise, ContractError> {
+        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
+            Event::DepositBlockedByBalance {
+                full_name: sub_account.to_string(),
+                token,
+                reason,
+            }
+            .emit();
+            return Err(ContractError::SubAccountHoldsTokens);
+        }
+        Ok(self.dispatch_transfer_call(sub_account, call))
     }
 
     /// The rotation is the transfer. A failed rotation must fail this receipt
@@ -171,20 +210,16 @@ impl TlaRegistry {
     #[private]
     pub fn nft_on_rotation_resolved(
         &mut self,
-        tla_id: AccountId,
-        name: String,
-        from: AccountId,
-        to: AccountId,
-        memo: Option<String>,
+        rotation: NftRotation,
         #[callback_result] swapped: Result<bool, PromiseError>,
     ) {
         self.commit_nft_rotation(
-            &tla_id,
-            &name,
-            &from,
-            &to,
-            memo.as_ref(),
-            (RotationCause::Transfer, swapped),
+            &rotation.tla_id,
+            &rotation.name,
+            &rotation.from,
+            &rotation.to,
+            rotation.memo.as_ref(),
+            (rotation.cause, swapped),
         );
     }
 
@@ -445,7 +480,27 @@ impl TlaRegistry {
         });
     }
 
-    fn rotation_for_receiver(&self, receiver_id: &AccountId) -> RotationCause {
+    fn dispatch_transfer_call(&self, sub_account: AccountId, call: NftTransferCall) -> Promise {
+        ext_hos_extension::ext(self.hos_extension.clone())
+            .with_static_gas(GAS_FOR_FORCE_TRANSFER)
+            .force_transfer(
+                sub_account,
+                Some(call.to.clone()),
+                call.cause,
+                Some(call.from.clone()),
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(
+                        GAS_FOR_TRANSFER_CALLBACK
+                            .saturating_add(GAS_FOR_NFT_ON_TRANSFER)
+                            .saturating_add(GAS_FOR_RESOLVE_TRANSFER),
+                    )
+                    .nft_on_rotation_resolved_call(call),
+            )
+    }
+
+    pub(crate) fn rotation_for_receiver(&self, receiver_id: &AccountId) -> RotationCause {
         if self.venues.contains(receiver_id) {
             RotationCause::Deposit
         } else {

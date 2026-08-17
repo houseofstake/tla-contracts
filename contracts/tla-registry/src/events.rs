@@ -161,6 +161,14 @@ pub enum Event {
         reason: String,
     },
     #[event_version("1.0.0")]
+    Sealed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
+    DepositBlockedByBalance {
+        full_name: String,
+        token: Option<AccountId>,
+        reason: String,
+    },
+    #[event_version("1.0.0")]
     SubAccountRetractionScheduled {
         full_name: String,
         retraction_at: U64,

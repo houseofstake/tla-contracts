@@ -17,4 +17,6 @@ pub enum Event {
     UpgradeApproved { hash: String, by: AccountId },
     #[event_version("1.0.0")]
     SelfUpgraded {},
+    #[event_version("1.0.0")]
+    Sealed { public_key: String, by: AccountId },
 }

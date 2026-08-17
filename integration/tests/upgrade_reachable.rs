@@ -2,7 +2,7 @@ mod common;
 
 use anyhow::{bail, Result};
 use common::*;
-use near_sdk::json_types::Base64VecU8;
+use near_sdk::json_types::{Base64VecU8, U128};
 use near_workspaces::types::NearToken;
 use near_workspaces::{Account, AccountId};
 use serde_json::json;
@@ -120,6 +120,11 @@ async fn every_privileged_entry_point_is_reachable_and_key_gated() -> Result<()>
             contract: fleet.deployer.id().clone(),
             method: "gd_delete_key",
             args: json!({ "public_key": stray_key }),
+        },
+        Entry {
+            contract: fleet.extension.id().clone(),
+            method: "skim",
+            args: json!({ "amount": U128(1) }),
         },
     ];
 

@@ -136,26 +136,9 @@ pub struct ActivityView {
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
-pub struct Listing {
-    pub price: u128,
-    pub settling: bool,
-    pub seller: AccountId,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct ParkedEntry {
     pub tla_id: AccountId,
     pub parked_at: u64,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct AcceptedOffer {
-    pub buyer: AccountId,
-    pub price: u128,
-    pub settling: bool,
-    pub seller: AccountId,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
@@ -171,7 +154,6 @@ pub struct FeeConfig {
     pub account_creation_deposit_yocto: U128,
     pub business_max_subs: u32,
     pub retraction_notice_ns: U64,
-    pub resale_commission_bps: u16,
     pub max_rate_move_bps: u16,
     pub quote_slippage_bps: u16,
     pub min_near_usd_rate_micro: U128,

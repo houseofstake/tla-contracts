@@ -21,18 +21,19 @@ impl TlaRegistry {
         new_owner: AccountId,
     ) -> Result<Promise, ContractError> {
         let (sub_account, from) = self.assert_transferable(&tla_id, &name, &new_owner)?;
+        let cause = self.rotation_for_receiver(&new_owner);
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
                 sub_account,
                 Some(new_owner.clone()),
-                RotationCause::Transfer,
+                cause,
                 Some(from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
-                    .on_sub_account_transferred(tla_id, name, from, new_owner),
+                    .on_sub_account_transferred(tla_id, name, from, new_owner, cause),
             ))
     }
 
@@ -134,6 +135,7 @@ impl TlaRegistry {
         name: String,
         from: AccountId,
         to: AccountId,
+        cause: RotationCause,
         #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
@@ -146,7 +148,14 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        if !self.sub_account_reassign(&key, &to, &to) {
+        let payout = if cause.repoints_payout() {
+            to.clone()
+        } else {
+            self.sub_accounts
+                .get(&key)
+                .map_or_else(|| to.clone(), |sub| sub.payout_account.clone())
+        };
+        if !self.sub_account_reassign(&key, &to, &payout) {
             Event::TransferFailed {
                 full_name: key,
                 from,

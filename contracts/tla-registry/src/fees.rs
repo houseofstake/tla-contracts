@@ -39,7 +39,6 @@ pub fn default_fee_config() -> FeeConfig {
         account_creation_deposit_yocto: U128(ONE_NEAR / 100),
         business_max_subs: 1000,
         retraction_notice_ns: U64(7 * 24 * 60 * 60 * 1_000_000_000),
-        resale_commission_bps: 250,
         max_rate_move_bps: 2_000,
         quote_slippage_bps: 527,
         min_near_usd_rate_micro: U128(100_000),

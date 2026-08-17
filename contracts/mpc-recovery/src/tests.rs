@@ -6,6 +6,7 @@ use rand::rngs::OsRng;
 use std::str::FromStr;
 
 const OWNER: &str = "hos.testnet";
+const CONTRACT: &str = "mpc-recovery.testnet";
 const SIGNER: &str = "v1.signer-prod.testnet";
 const VICTIM: &str = "victim.testnet";
 
@@ -19,7 +20,7 @@ fn keypair() -> (SigningKey, PublicKey) {
 fn ctx(predecessor: &str, ts: u64, height: u64) {
     let acct = AccountId::from_str(predecessor).unwrap();
     testing_env!(VMContextBuilder::new()
-        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
         .predecessor_account_id(acct)
         .block_timestamp(ts)
         .block_height(height)
@@ -54,7 +55,7 @@ fn install(c: &mut MpcRecovery, attestation_key: PublicKey) {
 
 fn attest(sk: &SigningKey, new_owner: &PublicKey, round: u64) -> Base64VecU8 {
     let msg = proof::request_message(
-        &AccountId::from_str(OWNER).unwrap(),
+        &AccountId::from_str(CONTRACT).unwrap(),
         &account_id(),
         new_owner,
         round,
@@ -70,7 +71,7 @@ fn watcher_sigs(
     approve: bool,
 ) -> Vec<WatcherSignature> {
     let msg = proof::verdict_message(
-        &AccountId::from_str(OWNER).unwrap(),
+        &AccountId::from_str(CONTRACT).unwrap(),
         &account_id(),
         new_owner,
         round,
@@ -96,7 +97,7 @@ fn name_sigs(
     deadline_ns: u64,
 ) -> Vec<WatcherSignature> {
     let msg = proof::name_recovery_message(
-        &AccountId::from_str(OWNER).unwrap(),
+        &AccountId::from_str(CONTRACT).unwrap(),
         &AccountId::from_str(TLA).unwrap(),
         "alice",
         new_owner,
@@ -116,7 +117,7 @@ fn deploy_with_registry(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecove
     let mut c = deploy(watcher_keys, threshold);
     ctx(OWNER, 0, 0);
     testing_env!(VMContextBuilder::new()
-        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
         .predecessor_account_id(AccountId::from_str(OWNER).unwrap())
         .attached_deposit(near_sdk::NearToken::from_yoctonear(1))
         .build());
@@ -126,7 +127,7 @@ fn deploy_with_registry(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecove
 
 fn name_ctx(ts: u64) {
     testing_env!(VMContextBuilder::new()
-        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
         .predecessor_account_id(AccountId::from_str("anyone.testnet").unwrap())
         .attached_deposit(near_sdk::NearToken::from_yoctonear(1))
         .block_timestamp(ts)
@@ -1079,7 +1080,7 @@ fn the_owner_can_still_replace_an_existing_policy() {
 fn ctx_paying(predecessor: &str, ts: u64, deposit: u128) {
     let acct = AccountId::from_str(predecessor).unwrap();
     testing_env!(VMContextBuilder::new()
-        .current_account_id(AccountId::from_str(OWNER).unwrap())
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
         .predecessor_account_id(acct)
         .attached_deposit(NearToken::from_yoctonear(deposit))
         .block_timestamp(ts)
@@ -1255,4 +1256,52 @@ fn state_already_current_survives_a_same_shape_redeploy() {
     let owner = c.owner.clone();
     env::state_write(&c);
     assert_eq!(MpcRecovery::migrate().owner, owner);
+}
+
+fn seal_ctx(predecessor: &str, deposit: u128) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
+        .predecessor_account_id(AccountId::from_str(predecessor).unwrap())
+        .attached_deposit(near_sdk::NearToken::from_yoctonear(deposit))
+        .build());
+}
+
+#[test]
+fn the_owner_can_seal_the_recovery_contract() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    seal_ctx(OWNER, 1);
+    let _ = c.seal(mpc_public_key());
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn an_owner_that_cannot_call_cannot_remove_the_key() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    seal_ctx("attacker.testnet", 1);
+    let _ = c.seal(mpc_public_key());
+}
+
+#[test]
+#[should_panic]
+fn sealing_the_recovery_contract_needs_a_full_access_signature() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    seal_ctx(OWNER, 0);
+    let _ = c.seal(mpc_public_key());
+}
+
+#[test]
+#[should_panic(expected = "owner must not be this account")]
+fn init_rejects_an_owner_that_is_the_recovery_contract_itself() {
+    let (_, wk1) = keypair();
+    ctx(OWNER, 0, 0);
+    let _ = MpcRecovery::new(
+        AccountId::from_str(CONTRACT).unwrap(),
+        AccountId::from_str(SIGNER).unwrap(),
+        AccountId::from_str(TRANSFER_AUTHORITY).unwrap(),
+        vec![wk1],
+        1,
+    );
 }

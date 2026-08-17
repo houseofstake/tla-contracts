@@ -1,7 +1,7 @@
 use crate::error::ContractError;
 use crate::types::*;
 use crate::{fees, TlaRegistry};
-use hos_common::MintOutcome;
+use hos_common::{MintOutcome, RotationCause};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{testing_env, AccountId, NearToken, PromiseError};
@@ -134,11 +134,14 @@ fn rent_alice_sub(c: &mut TlaRegistry, name: &str) {
 fn settle_transfer(c: &mut TlaRegistry, name: &str, from: &str, to: &str) {
     ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
     c.nft_on_rotation_resolved(
-        acc(TLA),
-        name.to_string(),
-        acc(from),
-        acc(to),
-        None,
+        crate::nft::NftRotation {
+            tla_id: acc(TLA),
+            name: name.to_string(),
+            from: acc(from),
+            to: acc(to),
+            memo: None,
+            cause: RotationCause::Transfer,
+        },
         Ok(true),
     );
 }
@@ -263,6 +266,7 @@ mod tla_admin {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(true),
         );
         assert_eq!(emitted_nft_transfers().len(), 1);
@@ -945,6 +949,7 @@ mod marketplace {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(true),
         );
         let key = format!("alice.{TLA}");
@@ -963,6 +968,7 @@ mod marketplace {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(false),
         );
         let key = format!("alice.{TLA}");
@@ -1345,10 +1351,23 @@ mod refunds_and_admin {
         let mut c = deploy();
         ctx(ADMIN, 0, 1);
         let mut config = c.get_fee_config();
-        config.resale_commission_bps = 10_001;
+        config.max_rate_move_bps = 10_001;
         assert!(matches!(
             c.update_fee_config(config),
-            Err(ContractError::InvalidCommissionRate)
+            Err(ContractError::InvalidRateBounds)
+        ));
+    }
+
+    #[test]
+    fn rent_tiers_must_not_price_a_short_name_below_a_long_one() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 1);
+        let mut config = c.get_fee_config();
+        config.rent_tier_5_usd_micro = U128(1);
+        config.rent_tier_12plus_usd_micro = U128(1_000);
+        assert!(matches!(
+            c.update_fee_config(config),
+            Err(ContractError::RentTiersNotDescending)
         ));
     }
 }
@@ -2511,6 +2530,7 @@ mod paged_views {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(true),
         );
         assert!(owned(&c, ALICE).is_empty());
@@ -2527,6 +2547,7 @@ mod paged_views {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(false),
         );
         assert_eq!(owned(&c, ALICE), vec![format!("alice.{TLA}")]);
@@ -2555,11 +2576,14 @@ mod paged_views {
         rent_alice_sub(&mut c, "alice");
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
         c.nft_on_rotation_resolved(
-            acc(TLA),
-            "alice".to_string(),
-            acc(ALICE),
-            acc(BOB),
-            None,
+            crate::nft::NftRotation {
+                tla_id: acc(TLA),
+                name: "alice".to_string(),
+                from: acc(ALICE),
+                to: acc(BOB),
+                memo: None,
+                cause: RotationCause::Transfer,
+            },
             Ok(true),
         );
         assert!(owned(&c, ALICE).is_empty());
@@ -2688,6 +2712,7 @@ mod paged_views {
             "alice".to_string(),
             acc(ALICE),
             acc(BOB),
+            RotationCause::Transfer,
             Ok(true),
         );
         assert_eq!(
@@ -2721,7 +2746,7 @@ mod migration {
     use near_sdk::base64::Engine;
     use near_sdk::borsh::BorshDeserialize;
 
-    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbToAAAACAAAADXYCAAAADW0BAAAAEAEAAAASaQAAAAEAAAAUAAAAAAEAAAACAAAAAnYCAAAAAm1AQg8AAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAADoAwAAAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAAAAAECyusngGR4CAAAAAAAA6AMAAAAAKfkPJgIA+gDQBw8CoIYBAAAAAAAAAAAAAAAAAADh9QUAAAAAAAAAAAAAAAAAWEf4DQAAAADAUySlEwAAKCzp/QDrsg0f1wgAAAAAADoAAAAAAAAAAAEBAAAAA9jTFn6joYYMD0MNAAAAAAAAAAAAAgAAAAR2AgAAAARtAQAAAAUBAAAABg0AAAACAAAADnYCAAAADm0AAAAAAgAAAA92AgAAAA9tAQAAAAkBAAAACgEAAAACAAAAC3YCAAAAC20BAAAAAgAAAAx2AgAAAAxtEwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQAACn5DyYCABYAAABwYXJ0bmVyLmhvc3RsYS50ZXN0bmV0iJYYAAAAAAAAAAAAAAAAAMFut02WkcsYzhYAAAAAAAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAFXYCAAAAFW0BAAAAFg==";
+    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbUsAAAACAAAADXYCAAAADW0BAAAAEAEAAAASmQAAAAEAAAAUAAAAAAEAAAACAAAAAnYCAAAAAm1AQg8AAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAADoAwAAAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAAAAAECyusngGR4CAAAAAAAA6AMAAAAAKfkPJgIA+gDQBw8CoIYBAAAAAAAAAAAAAAAAAADh9QUAAAAAAAAAAAAAAAAAWEf4DQAAAADAUySlEwAABPjfXF60XtSc8QgAAAAAAEsAAAAAAAAAAAEBAAAAA3HdmNwR4xDz838QAAAAAAAAAAAAAgAAAAR2AgAAAARtAQAAAAUBAAAABgEAAAAJAQAAAAoBAAAAAgAAAAt2AgAAAAttAQAAAAIAAAAMdgIAAAAMbRMAAABleHQuaG9zZGVtby50ZXN0bmV0AAAp+Q8mAgAWAAAAcGFydG5lci5ob3N0bGEudGVzdG5ldDskGQAAAAAAAAAAAAAAAABcduOpgJXMGPQeAAAAAAAAFwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAABV2AgAAABVtAQAAABYJAAAAbmZ0LTEuMC4wFwAAAEhvdXNlIG9mIFN0YWtlIEFjY291bnRzBAAAAEhPU0EAAAAAAAAAAJ4iKZ0AAAEAAAACAAAAGHYCAAAAGG0=";
 
     fn deployed_state() -> Vec<u8> {
         near_sdk::base64::engine::general_purpose::STANDARD
@@ -2744,6 +2769,42 @@ mod migration {
     }
 
     #[test]
+    fn the_legacy_struct_describes_the_registry_that_is_actually_deployed() {
+        let old = LegacyTlaRegistry::try_from_slice(&deployed_state())
+            .expect("registry.hosdemo.testnet no longer decodes as LegacyTlaRegistry");
+        assert_eq!(old.hos_extension.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(old.price_oracle.as_str(), "partner.hostla.testnet");
+        assert_eq!(old.council.as_str(), "council.hosdemo.testnet");
+        assert_eq!(old.treasury.as_str(), "council.hosdemo.testnet");
+        assert_eq!(old.nft_contract_metadata.symbol, "HOSA");
+        assert_eq!(
+            old.fee_config.resale_commission_bps, 250,
+            "the deployed config still carries the retired commission, which is the field this \
+             migration exists to drop"
+        );
+        assert_eq!(old.fee_config.quote_slippage_bps, 527);
+        assert_eq!(old.fee_config.max_rate_move_bps, 2_000);
+    }
+
+    #[test]
+    fn migrating_the_deployed_state_drops_the_commission_and_keeps_everything_else() {
+        super::ctx(super::COUNCIL, 0, 0);
+        near_sdk::env::storage_write(b"STATE", &deployed_state());
+        let migrated = crate::TlaRegistry::migrate();
+        assert_eq!(migrated.hos_extension.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(migrated.price_oracle.as_str(), "partner.hostla.testnet");
+        assert_eq!(migrated.council.as_str(), "council.hosdemo.testnet");
+        assert_eq!(migrated.nft_contract_metadata.symbol, "HOSA");
+        assert_eq!(migrated.fee_config.quote_slippage_bps, 527);
+        assert_eq!(migrated.fee_config.max_rate_move_bps, 2_000);
+        assert_eq!(migrated.fee_config.min_near_usd_rate_micro.0, 100_000);
+        assert_eq!(
+            migrated.upgrade_delay_ns,
+            super::super::admin::UPGRADE_DELAY_NS
+        );
+    }
+
+    #[test]
     fn migrate_leaves_state_that_is_already_current_alone() {
         super::ctx(super::COUNCIL, 0, 0);
         let current = super::deploy();
@@ -2761,18 +2822,15 @@ mod migration {
         let raw = deployed_state();
         let old = LegacyTlaRegistry::try_from_slice(&raw)
             .expect("deployed state no longer decodes as LegacyTlaRegistry");
-        assert_eq!(old.sub_account_count, 58);
-        assert_eq!(old.total_revenue, 10_687_288_186_909_949_954_698_280);
-        assert_eq!(
-            old.total_pending_refunds,
-            16_032_711_813_090_050_045_301_720
-        );
         assert_eq!(old.grace_period_ns, 604_800_000_000_000);
-        assert_eq!(old.rate_sequence, 5_838);
-        assert_eq!(old.rate_updated_at, 1_786_681_751_917_522_625);
         assert_eq!(old.hos_extension.as_str(), "ext.hosdemo.testnet");
         assert_eq!(old.version, 1);
         assert!(!old.paused);
+        assert!(
+            old.sub_account_count > 0 && old.rate_sequence > 0,
+            "a fixture recaptured from a live registry has names and a moving rate, so zero here \
+             means the capture came from somewhere other than the fleet"
+        );
     }
 }
 
@@ -2842,5 +2900,46 @@ mod keyless_upgrade {
             c.upgrade(code()),
             Err(ContractError::NoApprovedHash)
         ));
+    }
+
+    fn a_key() -> near_sdk::PublicKey {
+        std::str::FromStr::from_str("ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847").unwrap()
+    }
+
+    #[test]
+    fn the_council_can_seal_the_registry() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(c.seal(a_key()).is_ok());
+    }
+
+    #[test]
+    fn a_council_that_cannot_call_cannot_remove_the_key() {
+        let mut c = deploy();
+        ctx(BOB, 1, 0);
+        assert!(matches!(c.seal(a_key()), Err(ContractError::OnlyCouncil)));
+    }
+
+    #[test]
+    fn sealing_the_registry_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.seal(a_key()),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "council must not be the registry")]
+    fn init_rejects_a_council_that_is_the_registry_itself() {
+        ctx(ADMIN, 0, 0);
+        let _ = TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(GRACE_NS),
+            acc(TREASURY),
+            acc("registry.testnet"),
+        );
     }
 }

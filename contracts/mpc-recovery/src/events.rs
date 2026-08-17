@@ -37,6 +37,8 @@ pub enum Event {
     #[event_version("1.0.0")]
     Upgraded {},
     #[event_version("1.0.0")]
+    Sealed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
     WatchersChanged { threshold: u32, count: u32 },
     #[event_version("1.0.0")]
     RegistryChanged { registry: AccountId },
