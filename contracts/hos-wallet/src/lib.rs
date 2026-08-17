@@ -31,6 +31,7 @@ const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 /// A revert exists to undo the rotation it follows inside one promise chain,
 /// so the window is minutes rather than open ended.
 const REVERT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
+const SHARDED_ITEM_SPEC: &str = "sharded-item-1.0.0";
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 #[ext_contract(ext_ft)]
@@ -79,10 +80,26 @@ pub struct WalletInit {
 
 #[near(serializers = [json])]
 pub struct NftItemInfo {
+    pub spec: String,
     pub init: bool,
+    pub status: ItemStatus,
     pub collection_id: AccountId,
     pub token_id: String,
     pub owner_id: AccountId,
+    pub rotation_seq: U64,
+}
+
+/// The first condition that would refuse a request, in the order
+/// `assert_renter_active` checks them. `Active` means the account would accept
+/// work right now; every other value names what a consumer must resolve first.
+#[near(serializers = [json])]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum ItemStatus {
+    Parked,
+    Suspended,
+    Expired,
+    Frozen,
+    Active,
 }
 
 #[near(serializers = [json])]
@@ -150,6 +167,7 @@ pub struct TenantWallet {
     spend_grants: BTreeMap<AccountId, SpendGrant>,
     revert_to: Option<AccountId>,
     revert_until_ns: u64,
+    rotation_seq: u64,
 }
 
 #[near]
@@ -257,6 +275,7 @@ impl TenantWallet {
             spend_grants: BTreeMap::new(),
             revert_to: None,
             revert_until_ns: 0,
+            rotation_seq: 0,
         }
     }
 
@@ -291,6 +310,7 @@ impl TenantWallet {
             spend_grants: old.spend_grants,
             revert_to: None,
             revert_until_ns: 0,
+            rotation_seq: 0,
         }
     }
 
@@ -389,11 +409,21 @@ impl TenantWallet {
 
     pub fn nft_item_info(&self) -> NftItemInfo {
         NftItemInfo {
+            spec: SHARDED_ITEM_SPEC.to_string(),
             init: self.wallet.extensions.contains(&self.owner),
+            status: self.item_status(),
             collection_id: self.collection_id.clone(),
             token_id: env::current_account_id().to_string(),
             owner_id: self.owner.clone(),
+            rotation_seq: U64(self.rotation_seq),
         }
+    }
+
+    fn item_status(&self) -> ItemStatus {
+        if !self.wallet.extensions.contains(&self.owner) {
+            return ItemStatus::Parked;
+        }
+        self.blocking_condition().unwrap_or(ItemStatus::Active)
     }
 
     pub fn hos_payout_account(&self) -> AccountId {
@@ -475,6 +505,7 @@ impl TenantWallet {
         let outgoing = self.payout_account.clone();
         let sweepable = cause.sweeps() && to.as_ref() != Some(&outgoing);
         let authority = self.authority.clone();
+        self.rotation_seq = self.rotation_seq.saturating_add(1);
         self.wallet.extensions.retain(|held| *held == authority);
         if let Some(next) = to {
             self.wallet.extensions.insert(next.clone());
@@ -662,13 +693,29 @@ impl TenantWallet {
         );
     }
 
+    /// The single predicate behind both the runtime gate and the reported
+    /// status, so a consumer reading `nft_item_info` can never be told the
+    /// account would accept work that `assert_renter_active` would refuse.
+    fn blocking_condition(&self) -> Option<ItemStatus> {
+        if self.state != OperatingState::Active {
+            return Some(ItemStatus::Suspended);
+        }
+        if self.lease_expired() {
+            return Some(ItemStatus::Expired);
+        }
+        if self.effective_frozen() != FreezeState::Unfrozen {
+            return Some(ItemStatus::Frozen);
+        }
+        None
+    }
+
     fn assert_renter_active(&self) {
-        require!(self.state == OperatingState::Active, error::NOT_ACTIVE);
-        require!(!self.lease_expired(), error::LEASE_EXPIRED);
-        require!(
-            self.effective_frozen() == FreezeState::Unfrozen,
-            error::FROZEN
-        );
+        match self.blocking_condition() {
+            None => {}
+            Some(ItemStatus::Expired) => env::panic_str(error::LEASE_EXPIRED),
+            Some(ItemStatus::Frozen) => env::panic_str(error::FROZEN),
+            Some(_) => env::panic_str(error::NOT_ACTIVE),
+        }
     }
 
     fn effective_frozen(&self) -> FreezeState {

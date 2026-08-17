@@ -1353,4 +1353,75 @@ mod sharded_item {
             timeout_secs: 3600,
         });
     }
+
+    #[test]
+    fn an_item_names_the_revision_of_the_interface_it_answers_for() {
+        assert_eq!(deploy().nft_item_info().spec, SHARDED_ITEM_SPEC);
+    }
+
+    #[test]
+    fn a_live_name_reports_itself_active() {
+        assert_eq!(deploy().nft_item_info().status, ItemStatus::Active);
+    }
+
+    #[test]
+    fn a_frozen_item_is_still_authentic_but_is_no_longer_active() {
+        let mut c = deploy();
+        ctx(OWNER, 1, now_ns());
+        c.hos_freeze();
+        let info = c.nft_item_info();
+        assert!(
+            info.init,
+            "freezing does not un-own the account, so init stays true and a consumer \
+             reading only init would think the name can act"
+        );
+        assert_eq!(info.status, ItemStatus::Frozen);
+    }
+
+    #[test]
+    fn an_expired_lease_reports_expired_rather_than_active() {
+        let c = init(now_ns(), now_ns() + 1);
+        ctx(OWNER, 0, now_ns() + 2);
+        assert_eq!(c.nft_item_info().status, ItemStatus::Expired);
+    }
+
+    #[test]
+    fn a_parked_item_reports_parked_before_any_other_reason() {
+        let mut c = init(now_ns(), now_ns() + 1);
+        ctx(AUTHORITY, 1, now_ns() + 2);
+        c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+        assert_eq!(c.nft_item_info().status, ItemStatus::Parked);
+    }
+
+    #[test]
+    fn status_active_means_exactly_that_the_account_would_accept_work() {
+        let mut c = deploy();
+        assert_eq!(c.nft_item_info().status, ItemStatus::Active);
+        ctx(OWNER, 1, now_ns());
+        c.hos_freeze();
+        assert_ne!(c.nft_item_info().status, ItemStatus::Active);
+        ctx(OWNER, 1, now_ns());
+        c.hos_unfreeze();
+        assert_eq!(
+            c.nft_item_info().status,
+            ItemStatus::Active,
+            "status is the same predicate assert_renter_active uses, so the two can \
+             never disagree about whether a request would be refused"
+        );
+    }
+
+    #[test]
+    fn every_rotation_advances_the_sequence_so_a_stale_index_is_detectable() {
+        let mut c = deploy();
+        let before = c.nft_item_info().rotation_seq.0;
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+        let after = c.nft_item_info().rotation_seq.0;
+        assert_eq!(
+            after,
+            before + 1,
+            "an index carrying a lower sequence is behind and will catch up; one \
+             carrying a higher sequence claims a rotation the account never made"
+        );
+    }
 }

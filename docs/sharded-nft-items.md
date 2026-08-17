@@ -1,276 +1,314 @@
-# Sharded NFT items on NEAR
+---
+NEP: 0000
+Title: Sharded Non-Fungible Token Items
+Author: House of Stake
+Status: Draft
+DiscussionsTo: https://github.com/near/NEPs/discussions
+Type: Standards Track
+Category: Contract
+Version: 1.0.0
+Created: 2026-08-16
+Updated: 2026-08-16
+Requires: 171
+---
 
-Status: draft, implemented in this repository and covered by tests.
+## Summary
 
-## Problem
+A standard for non-fungible tokens whose items are NEAR accounts rather than rows in a
+collection's map, and for deciding whether such an account genuinely belongs to the collection
+it names.
+
+An item implements one view, `nft_item_info`, describing itself. A consumer pairs that answer
+with the collection's `nft_token` and refuses unless the two agree. Everything else is NEP-171
+as written.
+
+## Motivation
 
 NEP-171 gives a consumer exactly one way to ask about a token: `nft_token(token_id)` on the
-contract, which returns a `Token` or null. There is no normative mechanism in NEP-171 for deciding
-whether a `token_id` genuinely belongs to the contract you are asking, and no statement about what
-happens when a token is itself an account with its own state.
+contract, returning a `Token` or null. There is no normative mechanism for deciding whether a
+`token_id` genuinely belongs to the contract being asked, and no statement about what happens
+when a token is itself an account with its own state.
 
-That is fine while a token is a row in a contract's map. It stops being fine when the token is a
-NEAR account that holds funds and acts on its own behalf, which is what a leased name is here. Then
-there are two places that claim to know who owns the thing: the account itself, and the registry's
-index. Nothing in NEP-171 makes them agree, and nothing tells a wallet which to believe.
+That is sufficient while a token is a row in a map. It stops being sufficient when the token is
+a NEAR account that holds funds and acts on its own behalf. Two places then claim to know who
+owns the thing, the account itself and the collection's index, and NEP-171 neither makes them
+agree nor tells a consumer which to believe.
 
-## What TON does
+This standard closes that gap and makes the resulting trust explicit.
 
-TON's NFT standard, TEP-62, splits an NFT into a collection contract and one contract per item. The
-item exposes a single get-method describing itself:
+## Rationale and alternatives
 
-```
-get_nft_data() -> (int init?, int index, slice collection_address, slice owner_address, cell individual_content)
-```
+### What TON does
 
-`init?` is "if not zero, then this NFT is fully initialized and ready for interaction". `index` is
-"numerical index of this NFT in the collection". `collection_address` is "address of the smart
-contract of the collection to which this NFT belongs".
+TEP-62 splits an NFT into a collection contract and one contract per item. The item exposes
+`get_nft_data() -> (init?, index, collection_address, owner_address, individual_content)`.
 
-TEP-62 itself does not specify how to verify that relationship. The verification rule lives in TON's
-documentation, and it is explicit that the claim alone is worthless:
+TEP-62 does not itself specify how to verify the relationship. TON's documentation names the
+check and is explicit that the claim alone is worthless:
 
-> Not every NFT that stores a collection address actually belongs to that collection. Verify that
-> the collection returns the item's address for the item's index.
+> Not every NFT that stores a collection address actually belongs to that collection. Verify
+> that the collection returns the item's address for the item's index.
 
-So TON does not leave this gap open. It names the check. What makes the check work on TON is that a
-contract address is derived from a hash of its code and its initial data, and the item's initial
-data contains its index and its collection. The collection can therefore compute the address that an
-item at index `i` must have, and the round trip from index to address is a real binding rather than a
-lookup that someone could have written anything into.
+What makes that check work on TON is that a contract address is derived from a hash of its code
+and initial data, so the collection can compute the address an item at index `i` must have.
 
-## What NEAR has instead
+### Why that does not port, and what replaces it
 
-NEAR has no address derivation from code and data, so the TON binding does not port directly. It has
-something else that serves the same purpose: a hierarchical account namespace with a
-protocol-enforced creation rule. `alice.hosdemo.testnet` can only be created by
-`hosdemo.testnet`. Nobody else can produce that name, at any price, by any transaction.
+NEAR has no address derivation from code and data. It has something else that serves the same
+purpose: a hierarchical account namespace with a protocol-enforced creation rule.
+`alice.example.near` can only be created by `example.near`. Nobody else can produce that name,
+at any price, by any transaction.
 
-That gives the NEAR equivalent. The item's index is its own account id, read from
-`env::current_account_id()` rather than stored, and the parent is a substring of that id. So a
-consumer holding the account id already knows which account must have created it, with no view call
-and nothing to trust.
+So the item's index is its own account id, read from `env::current_account_id()` rather than
+stored, and the parent is a substring of that id. A consumer holding the account id already
+knows which account must have created it, with no view call and nothing to trust.
 
-The collection round trip is then `nft_token(token_id)`, which NEP-171 already requires. The index is
-the account name rather than an integer, which suits a product whose whole point is readable names.
+This standard deliberately does not report the parent as a field. A consumer that has checked
+`token_id` against the account it queried can derive the parent itself. Worse, a `parent_id`
+field invites a consumer to check the parent and skip the identity check, which is the one
+comparison that catches a contract lying about which token it is.
 
-Note what this design deliberately does not do: report the parent as a field. A consumer that has
-checked `token_id` against the account it queried can derive the parent itself, so transmitting it
-would restate data the caller already holds. Worse, a `parent_id` field invites a consumer to check
-the parent and skip the identity check, which is the one comparison that actually catches a contract
-lying about which token it is. The namespace is the substrate here, not a value to send.
+### Alternative considered: binding by code hash
 
-## The interface
+Binding an item to its collection by asserting its deployed code hash is the apparent analogue
+of TON's `hash(code, data)`. Whether it is correct depends on a choice this standard does not
+make for the implementer:
 
-An item implements one additional view. Everything else is NEP-171 as written.
+- **Global contract by account id.** Code is replaced fleet-wide by the publisher. A code hash
+  check is then meaningless between publishes and breaks every consumer during one. Membership
+  rests on the namespace and on the governance of the publishing account.
+- **Global contract by hash.** Code is immutable. A code hash check is then a durable structural
+  binding, the closest NEAR equivalent to TEP-62's, at the cost of per-account migration to
+  upgrade.
+
+Implementations that value fleet upgradeability SHOULD choose the first and rely on the
+namespace. Implementations that value immutability SHOULD choose the second and MAY additionally
+assert the code hash. Neither is universally correct.
+
+### Alternative considered: an on-chain verification callback
+
+TEP-62 states its own limitation plainly: "There is no way to get current owner of NFT onchain
+because TON is an asynchronous blockchain." NEAR is asynchronous in the same way, so an on-chain
+caller reading an item through a cross-contract call inherits it exactly: by the time the
+callback lands, ownership may have moved. This standard does not fix that and MUST NOT be
+described as if it does.
+
+On-chain consumers SHOULD invert the flow instead of verifying: require the collection to be the
+actor, so that authority and action occur in the same receipt. A settlement contract calls
+`nft_transfer` on the collection rather than verifying an item and then acting on it.
+
+What NEAR permits and TON does not is an off-chain caller pinning both reads to one final block
+height, so the pair cannot be read either side of a transfer. That is the sense in which the gap
+closes, and it closes only for off-chain consumers.
+
+## Specification
+
+### Item Interface
 
 ```rust
 pub struct NftItemInfo {
+    pub spec: String,
     pub init: bool,
+    pub status: ItemStatus,
     pub collection_id: AccountId,
     pub token_id: String,
     pub owner_id: AccountId,
+    pub rotation_seq: U64,
+}
+
+pub enum ItemStatus {
+    Parked,
+    Suspended,
+    Expired,
+    Frozen,
+    Active,
 }
 
 pub fn nft_item_info(&self) -> NftItemInfo;
 ```
 
-Field by field, against TEP-62's five. Nothing is added to TEP-62's shape and one field is dropped:
+Against TEP-62's five fields, nothing is added to its shape, one is dropped, and three are new:
 
 | TEP-62 | here | why |
 | --- | --- | --- |
-| `init?` | `init` | Same meaning. False when the item is parked and has no owner. |
+| `init?` | `init` | Same meaning: the item is initialised and has an owner. |
 | `index` | `token_id` | The account id, which is this design's index. |
 | `collection_address` | `collection_id` | A claim, load-bearing only once the collection confirms it. |
 | `owner_address` | `owner_id` | The item is the authority here. |
 | `individual_content` | absent | NEP-177 metadata is served by the collection. |
+| | `spec` | Which revision of this interface the answer conforms to. |
+| | `status` | Whether the item would accept work, which `init` alone cannot express. |
+| | `rotation_seq` | Distinguishes an index that is catching up from one that is wrong. |
 
-`token_id` stays a `String` rather than an `AccountId` because NEP-171 defines it as a string, and
-conformance is worth more than encoding our incidental invariant that it always parses as an account.
+`token_id` is a `String` rather than an `AccountId` because NEP-171 defines it as a string, and
+conformance is worth more than encoding an incidental invariant.
 
-Requirements on an implementation:
+#### Requirements
 
-1. `token_id` MUST be derived from `env::current_account_id()`, never from stored state.
-2. `collection_id` MUST NOT confer any authority. Naming a collection must not let an item do
+1. `token_id` MUST be derived from `env::current_account_id()` and MUST NOT be read from stored
+   state. A consumer derives the parent from it.
+2. `collection_id` MUST NOT confer any authority. Naming a collection MUST NOT let an item do
    anything it could not otherwise do, because anyone can name any collection.
 3. An item MUST refuse to name itself as its own collection at initialization.
 4. `owner_id` MUST come from the state that actually governs the account, not a cached copy.
+5. `spec` MUST be the version string of this standard the implementation conforms to. Consumers
+   MUST ignore fields they do not recognise.
+6. `status` MUST be `Active` if and only if the item would accept a request from an authorised
+   caller at the current block. Every other value MUST name the first condition that would
+   refuse it.
+7. `rotation_seq` MUST increase on every change of `owner_id` and MUST NOT decrease.
+8. An implementation MUST NOT report `Active` while any gate it enforces would refuse. Deriving
+   `status` from the same predicate the contract already enforces is the only way to guarantee
+   this; recomputing it separately will drift.
 
-Point 4 is what makes the item worth asking. Here ownership is the extension set: the accounts
-allowed to act as the account. `init` is `extensions.contains(&owner)`, so an item that has been
-parked reports itself uninitialised for the same reason it cannot act.
+Requirement 4 is what makes the item worth asking. Requirement 6 is what stops a consumer
+reconstructing liveness out of fields whose composition rule belongs to the implementation:
+an item may be authentic, owned, and still unable to act.
 
-## The check a consumer performs
+### Collection Interface
 
-Ask both sides, refuse unless they agree.
+A collection MUST implement NEP-171 as written. This standard adds no required collection method.
+
+TEP-62 requires `get_nft_address_by_index()` because on TON an index and an address are
+different things. Here the index *is* the address, so the round trip degenerates into
+`nft_token(token_id)`, which NEP-171 already requires. A reader coming from TEP-62 should be
+told this explicitly, because they will look for an address-by-index method and not find one.
+
+A collection MAY additionally expose its own `rotation_seq` per token. When it does, a consumer
+can type a disagreement by direction rather than retrying; when it does not, a consumer MUST
+treat a disagreement as possibly transient.
+
+### Verification
+
+Verification is a ladder, not a single check. Each tier costs more and proves more, and an
+implementation MUST state which tier it requires before which action.
+
+| tier | cost | proves | sufficient for |
+| --- | --- | --- | --- |
+| T0 namespace | none, offline | only `<parent>` could have created this id | display, routing |
+| T1 index | one call | the collection asserts membership and owner | enumeration, listing |
+| T2 pair | two calls, one final block | the account itself agrees | transfer of value, authorisation |
+| T3 provenance | cached, see below | `<parent>` could only have created legitimate ids | raising T0's meaning |
+
+Consumers MUST perform T2 before any action that moves value or grants authority. Consumers
+MUST NOT treat T1 alone as proof of ownership: enumeration is the collection's word, so a
+compromised collection can list names an account does not own.
+
+#### T2, the pair
 
 ```
 item  = nft_item_info() on the account
-token = nft_token(item.token_id) on item.collection_id
+token = nft_token(item.token_id) on the collection
 
 accept only if:
-  item.collection_id == the collection you asked about
-  item.token_id      == the account you read it from
+  item.collection_id == the collection the consumer pinned from its own configuration
+  item.token_id      == the account it was read from
   item.init
   token              is not null
   token.token_id     == item.token_id
   token.owner_id     == item.owner_id
 ```
 
-The collection is pinned by the caller from its own configuration. Taking it from
-`item.collection_id` makes the first clause vacuous and defeats the whole check, because an attacker
-can then supply both halves: a forged item naming a registry they control, and a registry that
-agrees.
+Both reads MUST be pinned to the same block height, and that height MUST be final. Reading at
+optimistic finality reintroduces the race the pinning exists to remove.
 
-Each clause rules out a specific forgery, and none is redundant:
+The collection MUST be pinned by the consumer from its own configuration. Taking it from
+`item.collection_id` makes the first clause vacuous and defeats the check, because an attacker
+can then supply both halves.
 
-- **The item alone is not enough.** Any contract, deployed at any account, can return an
-  `nft_item_info` naming our collection. The collection half is what refuses it.
+Each clause rules out a distinct forgery and none is redundant:
+
+- **The item alone is not enough.** Any contract at any account can return an `nft_item_info`
+  naming any collection. The collection half refuses it.
 - **The collection alone is not enough.** `nft_token` is a map lookup. It says the collection
   believes an account is a member; it says nothing about what that account currently does.
-- **The identity clause is what makes the rest mean anything.** A contract is free to return any
-  `token_id` it likes, so comparing it against the account actually queried is what stops an item
+- **The identity clause is what makes the rest mean anything.** A contract may return any
+  `token_id`, so comparing it against the account actually queried is what stops an item
   answering for a token it is not.
-- **The owner comparison catches divergence.** The item and the index update in separate receipts.
-  If the second fails, they disagree, and a consumer that asked only one of them would act on a
-  stale answer.
+- **The owner comparison catches divergence.** The item and the index update in separate
+  receipts.
 
-The attack this closes is the one TON names: an account somewhere claiming membership of a
-collection it was never minted into.
+#### Divergence is expected, and its direction is the signal
 
-## Verify the collection once, then trust every member by its name
+The item and the index are updated in separate receipts, so they disagree briefly on every
+rotation. A consumer MUST NOT treat every disagreement as evidence of compromise.
 
-The design assumes its end state: the parent account holds no key. Everything below follows from
-that, and a deployment that still has a key on the parent is a transient to be finished, not a mode
-to design for.
+When both halves report `rotation_seq`:
 
-NEAR permits only the parent to create `<label>.<parent>`. With no key on the parent, the only
-remaining creator is the parent's own contract. That contract is the registrar, and the registrar
-refuses to mint for anyone but the registry it was configured with. The chain is short and every link
-is public:
+| observation | meaning | consumer action |
+| --- | --- | --- |
+| `item > index` | the index has not caught up | retry, bounded |
+| `item < index` | the index claims a rotation the account never made | refuse, do not retry |
+| equal, owners differ | genuine corruption | refuse, do not retry |
+
+When the collection reports no sequence, a consumer cannot tell direction and MUST treat an
+owner disagreement as retryable, refusing until it converges or a bound elapses.
+
+#### T3, and the horizon on caching it
+
+Where the parent account holds no key, the only remaining creator of `<label>.<parent>` is the
+parent's own contract, and the chain is public:
 
 1. the account id ends with `.<parent>`, which only `<parent>` could have produced;
-2. `view_access_key_list(<parent>)` is empty, so its minting authority is code and not a person;
-3. `<parent>.registry()` names the collection, and the registrar mints only when that collection asks.
+2. `view_access_key_list(<parent>)` is empty, so its minting authority is code, not a person;
+3. `<parent>` names the collection it mints for, and mints only when that collection asks.
 
-Therefore any account under `<parent>` is a name the collection authorised.
+Steps 2 and 3 are properties of the collection, not of any item, so a consumer MAY check them
+once and cache the result, after which membership of any name is a suffix comparison: free,
+offline, and available to a client that has never seen the account before. This is strictly
+cheaper than TEP-62 can express, because a TON address does not distinguish who may produce
+siblings.
 
-The consequence is the interesting part. Steps 2 and 3 are properties of the **collection**, not of
-any item, so a consumer checks them **once** and caches the answer. After that, membership of any
-name is a string suffix comparison: free, offline, and available to a client that has never heard of
-the account before.
+**This cache has a horizon and implementations MUST state it.** Steps 2 and 3 are statements
+about mutable state. Where the parent's contract is upgradeable, an upgrade can change what it
+will mint, and a consumer holding a cached proof has no way to observe that. A collection
+SHOULD therefore expose a monotonic configuration epoch, and a consumer that caches T3 SHOULD
+re-validate when it changes. A consumer that cannot observe an epoch MUST bound the lifetime of
+its cached proof.
 
-This is where NEAR does better than the standard it borrows from. TON binds an item to its collection
-through `address = hash(code, data)`. That is strong, but the address is opaque and carries no
-provenance, so a TON client must perform a round trip **per item, forever**. A NEAR account id carries
-its own provenance, so the cost collapses from once per item to once per collection. TEP-62 cannot
-express this, because a TON address does not distinguish who is permitted to produce siblings.
+TON's per-item round trip is stateless and therefore never stale. That is the cost this
+optimisation trades away, and a standard that claims the benefit without naming the cost is
+incomplete.
 
-It also gives a client something TEP-62 has no way to offer: the ability to **verify the trust
-assumption rather than accept it**. An empty key list is public evidence that nobody can hand-mint a
-sibling. On TON there is no equivalent question to ask.
+### Trust model
 
-### What the collection round trip is still for
+The collection is trusted to say who is a member. The item is trusted to say who owns it.
+Neither is trusted for the other's answer, and a consumer that accepts a disagreement has no
+defence against whichever side is wrong.
 
-Membership no longer needs it. Ownership does not either, since the item is the account itself and
-therefore authoritative. What remains is **consistency**: the item and the registry index are updated
-in separate receipts, so a failure between them leaves the index stale while the item is right.
+A collection able to rotate an item's ownership through its authority can move a name. The pair
+check detects the resulting divergence but does not prevent the rotation. That is the residual
+trust and it is not removed by removing keys, because the authority is exercised by code.
 
-Ask the collection anyway, and refuse on disagreement. Not because you doubt the item, but because a
-divergence means the system is in a state nobody designed, and settlement is indexed by the
-collection. Fail closed and let an operator repair the index.
+**Authenticity is not suitability.** A verified pair says this account is genuinely the name it
+claims and is owned by whom it says. `status` reports whether it can currently act. Consumers
+trading the asset MUST read both: a name whose lease has expired, or which is frozen, is still
+authentic.
 
-## Trust model
+## Reference Implementation
 
-The collection is trusted to say who is a member. The item is trusted to say who owns it. Neither is
-trusted for the other's answer, and a consumer that accepts a disagreement has no defence against
-whichever side is wrong.
+Item, `contracts/hos-wallet/src/lib.rs`, `nft_item_info` and `item_status`. Unit tests in
+`src/tests.rs`, `mod sharded_item`: an item describes itself; the reported owner follows a
+transfer rather than a stale index; `token_id` is read from the account rather than stored; a
+parked item reports `init: false`; an item cannot name itself as its own collection; a frozen
+item is authentic but not `Active`; an expired lease reports `Expired`; `status` is `Active`
+exactly when the account would accept work; every rotation advances the sequence.
 
-The registry contract can rotate an item's ownership through its authority, so a compromised registry
-account can move a name; the check detects the resulting divergence but does not prevent the
-rotation. That is the residual trust, and removing the registry's key does not remove it, because the
-authority is exercised by code the council governs.
+End to end against real wasm, `integration/tests/sharded_item.rs`: a minted name passes and a
+wallet deployed off-collection claiming the registry is refused; a forgery created under the
+real parent is still refused by the collection clause; a keyless parent makes the forgery
+impossible to create at all, and the same test asserts the empty key list and the parent naming
+its collection, so the whole cached chain is proven in one place; a pair whose halves disagree
+is refused.
 
-**Authenticity is not suitability.** A verified pair says this account is genuinely the name it claims
-and is owned by whom it says. It says nothing about whether the lease is live. `init` follows
-TEP-62's meaning, that the item is initialised and has an owner, and a name whose lease has expired
-but has not yet been reclaimed still reports `init: true`. Anything trading the asset MUST read
-`hos_lease` as well, or it will let someone buy a name the authority can reclaim immediately.
+Consumer, `packages/contract-client/src/item.ts`: the ladder, the pinned final-block pair, the
+direction-typed divergence, and a refusal reason per clause, each tested including an attacker
+supplying both halves.
 
-**Do not add a code hash check.** It looks like the direct analogue of TON's `hash(code, data)` and it
-is the wrong move here. A leased account holds no key, so its code can only change through the
-council-gated global contract publish, which means the only threat such a check catches is the
-council shipping malicious code, and the council is the trust root. Against that it buys nothing,
-while it breaks every consumer during a fleet republish when hashes legitimately differ. More binding,
-worse operationally, aimed at a threat outside the model.
+## Changelog
 
-## What is proven, and where
+### 1.0.0 - Initial version
 
-Contract behaviour, `contracts/hos-wallet/src/tests.rs`, `mod sharded_item`: an item describes
-itself; the reported owner follows a transfer rather than a stale index; `token_id` is read from the
-account rather than stored; a parked item reports `init: false`; an item cannot name itself as its
-own collection.
+## Copyright
 
-End to end against real wasm, `integration/tests/sharded_item.rs`:
-
-- `an_item_and_the_collection_agree_and_a_forgery_does_not`: a minted name passes; a wallet deployed
-  off-collection and claiming our registry is refused.
-- `a_forgery_created_under_the_real_parent_is_still_refused`: a child created directly under the TLA
-  account sits under a genuine parent, so naming separates nothing. The collection clause refuses it,
-  which is the case that shows why both halves exist.
-- `a_keyless_parent_makes_the_namespace_the_membership_proof`: the same forgery, attempted after the
-  parent's key is deleted, cannot be created at all. Note how the previous test is staged, by signing
-  as the parent, and that this one removes the ability to stage it. It also asserts the other two
-  links, an empty key list and the registrar naming its collection, so the whole chain a consumer
-  caches is proven in one place. Names already minted keep verifying.
-- `the_pair_refuses_an_item_and_a_collection_that_disagree`: a rotation applied to the item without
-  the index catching up, and the pair refuses the split.
-
-Consumer, `packages/contract-client/src/item.ts` in the product repository, with the refusal reasons
-enumerated and tested one per clause, including an attacker supplying both halves. Wired into
-ownership verification at `apps/server/src/providers/near-ownership.ts`, which pins the collection
-from configuration and fails closed if the chain cannot be reached.
-
-## Conformance with TEP-62's stated intent
-
-TEP-62 states its own purpose and its own limitation, so this can be checked against the text rather
-than against a reading of it.
-
-**The rationale we inherit.** "'One NFT - one smart contract' simplifies fees calculation and allows
-to give gas-consumption guarantees." Every leased name is its own account running its own contract,
-so the property TEP-62 is arguing for holds here for the same reason it holds there.
-
-**The drawback we half close, and the half matters.** TEP-62 says plainly: "There is no way to get
-current owner of NFT onchain because TON is an asynchronous blockchain." NEAR is asynchronous in the
-same way, so an on-chain caller reading an item through a cross-contract call inherits exactly this
-limitation: by the time the callback lands, ownership may have moved. This design does not fix that
-and must not be described as if it does.
-
-What NEAR permits and TON does not is an off-chain caller pinning both reads to one block height. A
-wallet, indexer or marketplace asks the item and the collection at the same height, so the pair
-cannot be read either side of a transfer and the answer is atomic. That is the sense in which the
-gap closes, and it closes only for off-chain consumers, which is who actually needs it here.
-
-**Deliberate omissions that match theirs.** TEP-62 excludes approvals because "you cannot send the
-message 'is there an approval?' because the response may become irrelevant while the response message
-is getting to you." We exclude NEP-178 for a related reason from the other end: `nft_transfer` rejects
-a set `approval_id` rather than ignoring it, and Intents always passes `None`, so an approval would
-add surface nothing uses. TEP-62 also declines to mandate royalties because guaranteeing them means
-prohibiting free transfers; commission here is handled in settlement, not by the token, for the same
-reason.
-
-**Where the mapping is not one to one.** TEP-62 requires a collection to implement
-`get_nft_address_by_index()`, because on TON an index and an address are different things and the
-round trip from one to the other is what proves membership. Here the index *is* the address: the
-token id is the account id. So the round trip degenerates into `nft_token(token_id)` returning a
-token, which NEP-171 already requires. A reader coming from TEP-62 should be told this explicitly,
-because they will look for an address-by-index method and not find one.
-
-## Relationship to existing NEPs
-
-This adds one view and changes nothing else. NEP-171 transfer semantics, NEP-177 metadata, NEP-181
-enumeration and NEP-297 events are implemented as written and are unaffected. NEP-178 approvals are
-deliberately absent: `nft_transfer` rejects a set `approval_id` rather than ignoring it.
-
-A consumer that does not know about `nft_item_info` sees an ordinary NEP-171 collection and loses
-nothing it has today. A consumer that does gains the ability to refuse an impostor.
+Copyright and related rights waived via [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
