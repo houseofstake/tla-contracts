@@ -115,9 +115,17 @@ async fn layout_holds_for(worker: &Testnet, name: &str) -> Result<()> {
         name,
         "state",
         serde_json::to_value(decoded.state)?,
-        lease.get("state").cloned().unwrap_or(serde_json::Value::Null),
+        lease
+            .get("state")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
     )?;
-    agree(name, "owner", decoded.owner.to_string(), text(&item, "owner_id", name)?)?;
+    agree(
+        name,
+        "owner",
+        decoded.owner.to_string(),
+        text(&item, "owner_id", name)?,
+    )?;
     agree(
         name,
         "collection_id",
@@ -125,8 +133,12 @@ async fn layout_holds_for(worker: &Testnet, name: &str) -> Result<()> {
         text(&item, "collection_id", name)?,
     )?;
 
-    let mut from_bytes: Vec<String> =
-        decoded.wallet.extensions.iter().map(|a| a.to_string()).collect();
+    let mut from_bytes: Vec<String> = decoded
+        .wallet
+        .extensions
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
     let mut from_view = reported_extensions;
     from_bytes.sort();
     from_view.sort();

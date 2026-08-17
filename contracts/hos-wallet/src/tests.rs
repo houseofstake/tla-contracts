@@ -1440,7 +1440,11 @@ mod sharded_item {
         ctx(AUTHORITY, 1, now_ns() + 2);
         c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
         let info = c.nft_item_info();
-        assert_eq!(info.owner_id, acc(OWNER), "a park does not hand the name to anyone");
+        assert_eq!(
+            info.owner_id,
+            acc(OWNER),
+            "a park does not hand the name to anyone"
+        );
         assert_eq!(
             info.rotation_seq.0,
             before + 1,

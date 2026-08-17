@@ -517,7 +517,9 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
                 .into_result()?;
             println!("  named {venue}");
         }
-        _ => println!("  INTENTS_VERIFIER unset, skipping; deposits will settle as plain transfers"),
+        _ => {
+            println!("  INTENTS_VERIFIER unset, skipping; deposits will settle as plain transfers")
+        }
     }
 
     println!("\n== deployment readiness ==");
