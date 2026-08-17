@@ -105,6 +105,7 @@ impl Registrar {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        Event::SelfUpgraded {}.emit();
         let Some(old) = hos_common::try_state_read::<LegacyRegistrar>() else {
             return hos_common::try_state_read::<Self>()
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE));
@@ -220,7 +221,9 @@ impl Registrar {
         MintOutcome::CreationFailed
     }
 
+    #[payable]
     pub fn set_min_label_len(&mut self, min_label_len: u8) {
+        assert_one_yocto();
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
@@ -233,7 +236,9 @@ impl Registrar {
         Event::MinLabelLenSet { min_label_len }.emit();
     }
 
+    #[payable]
     pub fn set_min_balance(&mut self, min_balance: NearToken) {
+        assert_one_yocto();
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
@@ -243,7 +248,9 @@ impl Registrar {
         Event::MinBalanceSet { min_balance }.emit();
     }
 
+    #[payable]
     pub fn approve_upgrade(&mut self, code_hash: Base58CryptoHash) {
+        assert_one_yocto();
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
@@ -257,7 +264,9 @@ impl Registrar {
         .emit();
     }
 
+    #[payable]
     pub fn upgrade_self(&mut self, code: near_sdk::json_types::Base64VecU8) -> Promise {
+        assert_one_yocto();
         require!(
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
@@ -277,7 +286,6 @@ impl Registrar {
         );
         self.approved_code_hash = None;
         self.approved_at = None;
-        Event::SelfUpgraded {}.emit();
         hos_common::deploy_and_migrate(code)
     }
 
@@ -315,6 +323,13 @@ impl Registrar {
             wallet_timeout_secs: self.wallet_timeout_secs,
         }
     }
+}
+
+fn assert_one_yocto() {
+    require!(
+        env::attached_deposit() == NearToken::from_yoctonear(1),
+        error::REQUIRES_ONE_YOCTO
+    );
 }
 
 #[cfg(test)]
@@ -460,7 +475,7 @@ mod tests {
     #[test]
     fn council_sets_min_label_len() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.set_min_label_len(4);
         assert_eq!(c.min_label_len(), 4);
     }
@@ -469,7 +484,7 @@ mod tests {
     #[should_panic(expected = "only council")]
     fn registry_cannot_set_min_label_len() {
         let mut c = deploy();
-        ctx(REGISTRY, 0);
+        ctx(REGISTRY, 1);
         c.set_min_label_len(4);
     }
 
@@ -477,14 +492,14 @@ mod tests {
     #[should_panic(expected = "min label length out of bounds")]
     fn zero_min_label_len_rejected() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.set_min_label_len(0);
     }
 
     #[test]
     fn council_sets_min_balance_to_the_storage_floor() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.set_min_balance(ACCOUNT_STORAGE_FLOOR);
         assert_eq!(c.min_balance(), ACCOUNT_STORAGE_FLOOR);
     }
@@ -493,7 +508,7 @@ mod tests {
     #[should_panic(expected = "only council")]
     fn registry_cannot_set_min_balance() {
         let mut c = deploy();
-        ctx(REGISTRY, 0);
+        ctx(REGISTRY, 1);
         c.set_min_balance(NearToken::from_millinear(50));
     }
 
@@ -501,8 +516,32 @@ mod tests {
     #[should_panic(expected = "min balance below the account storage floor")]
     fn min_balance_below_storage_floor_rejected() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.set_min_balance(NearToken::from_millinear(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_set_min_balance() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        c.set_min_balance(ACCOUNT_STORAGE_FLOOR);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_approve_an_upgrade() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        c.approve_upgrade(hash_of(&[1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_upgrade_the_root() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0);
+        let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
     }
 
     #[test]
@@ -526,7 +565,7 @@ mod tests {
     #[should_panic(expected = "only council")]
     fn outsider_cannot_upgrade() {
         let mut c = deploy();
-        ctx("attacker.testnet", 0);
+        ctx("attacker.testnet", 1);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
     }
 
@@ -534,7 +573,7 @@ mod tests {
         testing_env!(VMContextBuilder::new()
             .current_account_id(acc(TLA))
             .predecessor_account_id(acc(predecessor))
-            .attached_deposit(NearToken::from_yoctonear(0))
+            .attached_deposit(NearToken::from_yoctonear(1))
             .block_timestamp(ts)
             .build());
     }
@@ -547,7 +586,7 @@ mod tests {
     #[should_panic(expected = "only council")]
     fn outsider_cannot_approve_an_upgrade() {
         let mut c = deploy();
-        ctx("attacker.testnet", 0);
+        ctx("attacker.testnet", 1);
         c.approve_upgrade(hash_of(&[1]));
     }
 
@@ -555,7 +594,7 @@ mod tests {
     #[should_panic(expected = "no upgrade has been approved")]
     fn the_root_cannot_be_upgraded_without_a_prior_approval() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
     }
 
@@ -563,7 +602,7 @@ mod tests {
     #[should_panic(expected = "code does not match the approved hash")]
     fn approved_code_cannot_be_swapped_for_other_code() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.approve_upgrade(hash_of(&[1]));
         ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![2]));
@@ -573,7 +612,7 @@ mod tests {
     #[should_panic(expected = "approved upgrade is still inside its delay")]
     fn the_root_cannot_be_upgraded_inside_the_delay() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.approve_upgrade(hash_of(&[1]));
         ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS - 1);
         let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
@@ -582,7 +621,7 @@ mod tests {
     #[test]
     fn an_approved_upgrade_lands_once_the_delay_has_passed() {
         let mut c = deploy();
-        ctx(COUNCIL, 0);
+        ctx(COUNCIL, 1);
         c.approve_upgrade(hash_of(&[1]));
         assert_eq!(c.approved_upgrade_hash(), Some(hash_of(&[1])));
         ctx_at(COUNCIL, TS + UPGRADE_DELAY_NS);

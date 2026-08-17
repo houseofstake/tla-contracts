@@ -102,6 +102,7 @@ impl TlaRegistry {
             return;
         }
         self.parked_names.remove(&key);
+        crate::nft::emit_nft_mint(&settlement.owner, &key);
         self.sub_account_count = self.sub_account_count.saturating_add(1);
         self.total_revenue = self.total_revenue.saturating_add(settlement.rent_yocto.0);
         self.refund_excess(

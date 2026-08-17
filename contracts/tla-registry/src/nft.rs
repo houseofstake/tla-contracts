@@ -68,6 +68,13 @@ pub(crate) fn emit_nft_mint(owner_id: &AccountId, token_id: &str) {
     );
 }
 
+pub(crate) fn emit_nft_burn(owner_id: &AccountId, token_id: &str) {
+    log_nft_event(
+        "nft_burn",
+        json!({ "owner_id": owner_id, "token_ids": [token_id] }),
+    );
+}
+
 pub(crate) fn emit_nft_transfer(
     old_owner_id: &AccountId,
     new_owner_id: &AccountId,

@@ -76,6 +76,7 @@ impl ImplDeployer {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        Event::SelfUpgraded {}.emit();
         let Some(old) = hos_common::try_state_read::<LegacyImplDeployer>() else {
             return hos_common::try_state_read::<Self>()
                 .unwrap_or_else(|| env::panic_str("no state to migrate"));
@@ -244,7 +245,6 @@ impl ImplDeployer {
         );
         self.approved_upgrade_hash = None;
         self.approved_upgrade_at = None;
-        Event::SelfUpgraded {}.emit();
         hos_common::deploy_and_migrate(code)
     }
 

@@ -30,6 +30,12 @@ pub enum Event {
         amount: U128,
     },
     #[event_version("1.0.0")]
+    SweepFailed {
+        payout_account: AccountId,
+        ft: Option<AccountId>,
+        amount: U128,
+    },
+    #[event_version("1.0.0")]
     Frozen { self_initiated: bool },
     #[event_version("1.0.0")]
     Unfrozen {},

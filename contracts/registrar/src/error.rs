@@ -1,5 +1,6 @@
 pub const ONLY_REGISTRY: &str = "only registry";
 pub const ONLY_COUNCIL: &str = "only council";
+pub const REQUIRES_ONE_YOCTO: &str = "requires an attached deposit of exactly 1 yoctoNEAR";
 pub const INVALID_NAME: &str = "invalid sub-account name";
 pub const NAME_TOO_SHORT: &str = "name shorter than the minimum label length";
 pub const INSUFFICIENT_DEPOSIT: &str = "deposit below minimum balance";

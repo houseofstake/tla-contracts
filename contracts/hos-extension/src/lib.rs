@@ -129,6 +129,10 @@ impl HosExtension {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        Event::Upgraded {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
         let Some(old) = hos_common::try_state_read::<LegacyHosExtension>() else {
             return hos_common::try_state_read::<Self>()
                 .unwrap_or_else(|| env::panic_str("no state to migrate"));
@@ -229,6 +233,7 @@ impl HosExtension {
         Ok(())
     }
 
+    #[payable]
     #[handle_result]
     pub fn upgrade(&mut self, code: Base64VecU8) -> Result<Promise, ContractError> {
         self.assert_one_yocto()?;
@@ -249,10 +254,6 @@ impl HosExtension {
         }
         self.approved_code_hash = None;
         self.approved_at = None;
-        Event::Upgraded {
-            by: env::predecessor_account_id(),
-        }
-        .emit();
         Ok(hos_common::deploy_and_migrate(code))
     }
 

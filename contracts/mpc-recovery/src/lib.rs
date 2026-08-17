@@ -116,6 +116,7 @@ impl MpcRecovery {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        Event::Upgraded {}.emit();
         let Some(old) = hos_common::try_state_read::<LegacyMpcRecovery>() else {
             return hos_common::try_state_read::<Self>()
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE));
@@ -167,10 +168,7 @@ impl MpcRecovery {
         );
         self.approved_code_hash = None;
         self.approved_at = None;
-        Event::Upgraded {
-            hash: (&Base58CryptoHash::from(approved)).into(),
-        }
-        .emit();
+        let _ = approved;
         hos_common::deploy_and_migrate(code)
     }
 

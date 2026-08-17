@@ -440,10 +440,6 @@ impl TlaRegistry {
         }
         self.approved_code_hash = None;
         self.approved_at = None;
-        Event::Upgraded {
-            by: env::predecessor_account_id(),
-        }
-        .emit();
         Ok(hos_common::deploy_and_migrate(code))
     }
 

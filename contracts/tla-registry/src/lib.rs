@@ -231,6 +231,10 @@ impl TlaRegistry {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        Event::Upgraded {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
         let Some(mut old) = hos_common::try_state_read::<LegacyTlaRegistry>() else {
             return hos_common::try_state_read::<Self>()
                 .unwrap_or_else(|| env::panic_str("no state to migrate"));

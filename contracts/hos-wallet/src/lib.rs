@@ -24,10 +24,16 @@ use hos_common::RotationCause;
 
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
-const IMPL_VERSION: u32 = 4;
+pub const IMPL_VERSION: u32 = 5;
+pub const ROTATION_EPOCH: u32 = 4;
+const _: () = assert!(
+    ROTATION_EPOCH <= IMPL_VERSION,
+    "the epoch names the impl version whose migration last reset rotation_seq, so it can never run ahead of the code reporting it"
+);
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
+const GAS_FOR_SWEEP_RESOLVE: Gas = Gas::from_tgas(5);
 /// A revert exists to undo the rotation it follows inside one promise chain,
 /// so the window is minutes rather than open ended.
 const REVERT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
@@ -143,6 +149,7 @@ pub struct LegacyTenantWallet {
     pub spend_grants: BTreeMap<AccountId, SpendGrant>,
     pub revert_to: Option<AccountId>,
     pub revert_until_ns: u64,
+    pub rotation_seq: u64,
 }
 
 #[near(
@@ -294,6 +301,10 @@ impl TenantWallet {
             error::ONLY_OWNER
         );
         require!(
+            old.wallet.extensions.contains(&old.authority),
+            error::AUTHORITY_PROTECTED
+        );
+        require!(
             collection_id != env::current_account_id(),
             error::COLLECTION_IS_SELF
         );
@@ -310,7 +321,7 @@ impl TenantWallet {
             spend_grants: old.spend_grants,
             revert_to: old.revert_to,
             revert_until_ns: old.revert_until_ns,
-            rotation_seq: 0,
+            rotation_seq: old.rotation_seq,
         }
     }
 
@@ -383,6 +394,10 @@ impl TenantWallet {
             .unwrap_or_else(|_| env::panic_str(error::AUTHORIZATION_NOT_JSON));
         require!(blob.owner != self.authority, error::AUTHORITY_NOT_OWNER);
         require!(
+            !self.spend_grants.contains_key(&blob.owner),
+            error::GRANTEE_NOT_OWNER
+        );
+        require!(
             self.wallet.extensions.contains(&blob.owner),
             error::NOT_AN_OWNER
         );
@@ -416,7 +431,7 @@ impl TenantWallet {
             token_id: env::current_account_id().to_string(),
             owner_id: self.owner.clone(),
             rotation_seq: U64(self.rotation_seq),
-            rotation_epoch: IMPL_VERSION,
+            rotation_epoch: ROTATION_EPOCH,
         }
     }
 
@@ -450,7 +465,7 @@ impl TenantWallet {
             lease_until_ns.0 >= self.lease_until_ns,
             error::LEASE_NOT_MONOTONIC
         );
-        require!(state != OperatingState::Parked, error::BAD_LEASE_STATE);
+        require!(state == OperatingState::Active, error::BAD_LEASE_STATE);
         self.lease_until_ns = lease_until_ns.0;
         self.state = state;
         Event::LeaseSet {
@@ -508,6 +523,7 @@ impl TenantWallet {
         let authority = self.authority.clone();
         self.rotation_seq = self.rotation_seq.saturating_add(1);
         self.wallet.extensions.retain(|held| *held == authority);
+        self.check_lockout();
         if let Some(next) = to {
             self.wallet.extensions.insert(next.clone());
             self.owner = next.clone();
@@ -580,12 +596,14 @@ impl TenantWallet {
             .as_yoctonear()
             .saturating_sub(self.reserve());
         require!(amount > 0, error::NOTHING_TO_SWEEP);
-        Event::SweptNear {
-            payout_account: self.payout_account.clone(),
-            amount: U128(amount),
-        }
-        .emit();
-        Promise::new(self.payout_account.clone()).transfer(NearToken::from_yoctonear(amount))
+        let payout_account = self.payout_account.clone();
+        Promise::new(payout_account.clone())
+            .transfer(NearToken::from_yoctonear(amount))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SWEEP_RESOLVE)
+                    .hos_resolve_sweep(payout_account, None, U128(amount)),
+            )
     }
 
     #[payable]
@@ -593,20 +611,52 @@ impl TenantWallet {
         self.assert_sweepable();
         require!(amount.0 > 0, error::NOTHING_TO_SWEEP);
         require!(ft != env::current_account_id(), error::SELF_TARGET);
-        Event::SweptFt {
-            payout_account: self.payout_account.clone(),
-            ft: ft.clone(),
-            amount,
-        }
-        .emit();
-        ext_ft::ext(ft)
+        let payout_account = self.payout_account.clone();
+        ext_ft::ext(ft.clone())
             .with_attached_deposit(ONE_YOCTO)
             .with_static_gas(GAS_FOR_FT_TRANSFER)
             .ft_transfer(
-                self.payout_account.clone(),
+                payout_account.clone(),
                 amount,
                 Some("hos-tla payout".to_string()),
             )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SWEEP_RESOLVE)
+                    .hos_resolve_sweep(payout_account, Some(ft), amount),
+            )
+    }
+
+    #[private]
+    pub fn hos_resolve_sweep(
+        &mut self,
+        payout_account: AccountId,
+        ft: Option<AccountId>,
+        amount: U128,
+    ) -> bool {
+        if !near_sdk::is_promise_success() {
+            Event::SweepFailed {
+                payout_account,
+                ft,
+                amount,
+            }
+            .emit();
+            return false;
+        }
+        match ft {
+            Some(ft) => Event::SweptFt {
+                payout_account,
+                ft,
+                amount,
+            }
+            .emit(),
+            None => Event::SweptNear {
+                payout_account,
+                amount,
+            }
+            .emit(),
+        }
+        true
     }
 }
 
@@ -752,13 +802,13 @@ impl TenantWallet {
         if amount == 0 {
             return;
         }
-        Event::SweptNear {
-            payout_account: outgoing.clone(),
-            amount: U128(amount),
-        }
-        .emit();
-        Promise::new(outgoing)
+        Promise::new(outgoing.clone())
             .transfer(NearToken::from_yoctonear(amount))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SWEEP_RESOLVE)
+                    .hos_resolve_sweep(outgoing, None, U128(amount)),
+            )
             .detach();
     }
 

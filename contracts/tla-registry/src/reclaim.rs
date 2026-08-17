@@ -143,9 +143,10 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        let Some(_removed) = self.sub_account_remove(&key) else {
+        let Some(removed) = self.sub_account_remove(&key) else {
             return;
         };
+        crate::nft::emit_nft_burn(&removed.owner, &key);
         self.sub_account_count = self.sub_account_count.saturating_sub(1);
         self.business_count_decrement_if_business(&tla_id);
         let now = env::block_timestamp();

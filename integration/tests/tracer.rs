@@ -20,7 +20,12 @@ async fn tracer_mint_owner_path_rotate_patch() -> Result<()> {
     assert_eq!(public_key, "", "a leased account reports no public key");
     let lease: serde_json::Value = fleet.worker.view(&alice, "hos_lease").await?.json()?;
     assert_eq!(lease["state"], "Active");
-    assert_eq!(lease["impl_version"], 3);
+    assert_eq!(
+        lease["impl_version"],
+        hos_wallet::IMPL_VERSION,
+        "the account must report the version of the wasm this run published, and taking it \
+         from the contract rather than a literal keeps the assertion from rotting on a bump"
+    );
 
     let bob_before = balance_of(&fleet.worker, fleet.bob.id()).await?;
     let outcome = fleet

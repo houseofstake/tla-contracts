@@ -816,6 +816,22 @@ fn resolve_auth_names_one_owner_even_when_a_co_owner_exists() {
 }
 
 #[test]
+#[should_panic(expected = "a spend grantee cannot authorise as an owner")]
+fn resolve_auth_refuses_an_extension_that_only_holds_a_spend_grant() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    ctx(OWNER, 1, now_ns());
+    c.hos_grant_spend(
+        acc(BUYER),
+        vec![acc(PAYOUT)],
+        U128(1),
+        U64(now_ns() + 1_000_000_000),
+    );
+    let _ = c.w_resolve_auth(vec![], auth_blob_for("login", BUYER));
+}
+
+#[test]
 fn resolve_auth_binds_the_expected_payload_to_the_edge() {
     let c = deploy();
     let out = c.w_resolve_auth(vec![], auth_blob("login"));
@@ -1027,6 +1043,7 @@ fn legacy_state(c: TenantWallet) -> LegacyTenantWallet {
         spend_grants: c.spend_grants,
         revert_to: None,
         revert_until_ns: 0,
+        rotation_seq: c.rotation_seq,
     }
 }
 
@@ -1220,7 +1237,7 @@ mod deployed_shape {
     use near_sdk::base64::Engine;
     use near_sdk::borsh::BorshDeserialize;
 
-    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAABmdW5kci1ob3MtNS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldBgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldHM+cEIcUjkZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAABmdW5kci1ob3MtNS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldBgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldHM+cEIcUjkZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
 
     fn raw() -> Vec<u8> {
         near_sdk::base64::engine::general_purpose::STANDARD
@@ -1242,13 +1259,22 @@ mod deployed_shape {
         );
         assert_eq!(old.payout_account.as_str(), "fundr-hos-5.testnet");
         assert_eq!(old.revert_until_ns, 0);
+        assert_eq!(old.rotation_seq, 0);
         assert!(old.spend_grants.is_empty());
         assert!(old.wallet.extensions.contains(&old.owner));
+        assert!(old.wallet.extensions.contains(&old.authority));
     }
 
     #[test]
-    fn a_deployed_wallet_cannot_read_itself_until_it_migrates() {
-        assert!(TenantWallet::try_from_slice(&raw()).is_err());
+    fn a_deployed_wallet_loads_under_this_code_without_migrating() {
+        let live = TenantWallet::try_from_slice(&raw()).expect(
+            "publishing global code every leased account cannot read is a fleet-wide outage \
+             that lasts until a migration lands on each one. If this fails, the layout changed \
+             and the release needs a migration sweep planned before the publish, not after",
+        );
+        assert_eq!(live.owner.as_str(), "fundr-hos-5.testnet");
+        assert_eq!(live.authority.as_str(), "ext.hosdemo.testnet");
+        assert_eq!(live.collection_id.as_str(), "registry.hosdemo.testnet");
     }
 }
 
@@ -1459,9 +1485,49 @@ mod sharded_item {
         let c = deploy();
         let info = c.nft_item_info();
         assert_eq!(
-            info.rotation_epoch, IMPL_VERSION,
-            "a migration restarts rotation_seq, so an item states which generation \
-             its sequence belongs to and a consumer refuses to compare across two"
+            info.rotation_epoch, ROTATION_EPOCH,
+            "an item states which generation its sequence belongs to, so a consumer \
+             refuses to compare two sequences that never shared a counter"
+        );
+    }
+
+    #[test]
+    fn a_migration_that_carries_the_sequence_leaves_the_epoch_alone() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+        let before = c.nft_item_info();
+        let carried = before.rotation_seq.0;
+        assert!(carried > 0, "the fixture needs a sequence worth carrying");
+
+        let legacy = LegacyTenantWallet {
+            wallet: c.wallet,
+            authority: acc(AUTHORITY),
+            owner: acc(BUYER),
+            collection_id: acc(REGISTRY),
+            payout_account: acc(BUYER),
+            lease_until_ns: c.lease_until_ns,
+            state: OperatingState::Active,
+            frozen: FreezeState::Unfrozen,
+            authority_freeze_until_ns: 0,
+            spend_grants: c.spend_grants,
+            revert_to: c.revert_to,
+            revert_until_ns: c.revert_until_ns,
+            rotation_seq: carried,
+        };
+        ctx(AUTHORITY, 0, now_ns());
+        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+        let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
+        let after = migrated.nft_item_info();
+
+        assert_eq!(
+            after.rotation_seq.0, carried,
+            "this migration does not restart the counter, so it must carry it"
+        );
+        assert_eq!(
+            after.rotation_epoch, before.rotation_epoch,
+            "the epoch moves only with a reset. Moving it here would tell every holder \
+             their recorded sequence is incomparable when it is still the same counter"
         );
     }
 }
