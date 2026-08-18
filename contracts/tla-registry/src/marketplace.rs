@@ -151,6 +151,9 @@ impl TlaRegistry {
         if new_owner == sub_account {
             return Err(ContractError::TransferToSubAccount);
         }
+        if self.sub_accounts.contains_key(new_owner.as_str()) {
+            return Err(ContractError::TransferToRegisteredName);
+        }
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
@@ -287,6 +290,11 @@ impl TlaRegistry {
         if !self.venues.contains(&owner) {
             self.assert_not_paused()?;
             self.assert_sellable(&key, tla_id)?;
+            if !self.venues.contains(new_owner)
+                && self.sub_accounts.contains_key(new_owner.as_str())
+            {
+                return Err(ContractError::TransferToRegisteredName);
+            }
         }
         Ok((sub_account, owner))
     }

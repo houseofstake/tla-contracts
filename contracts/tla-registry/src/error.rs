@@ -74,6 +74,7 @@ pub enum ContractError {
     NotEd25519,
     SameOwner,
     TransferToSubAccount,
+    TransferToRegisteredName,
     OwnerMoved,
 }
 

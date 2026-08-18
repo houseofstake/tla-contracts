@@ -946,6 +946,79 @@ mod marketplace {
     }
 
     #[test]
+    fn transfer_rejects_another_registered_name_as_recipient() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.transfer_sub_account(acc(TLA), "alice".to_string(), acc(&format!("bob.{TLA}"))),
+            Err(ContractError::TransferToRegisteredName)
+        ));
+    }
+
+    #[test]
+    fn transfer_still_allows_an_ordinary_account_as_recipient() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .transfer_sub_account(acc(TLA), "alice".to_string(), acc(BOB))
+            .is_ok());
+    }
+
+    #[test]
+    fn depositing_into_a_venue_is_not_caught_by_the_registered_name_guard() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "venue");
+        let venue = format!("venue.{TLA}");
+        ctx(COUNCIL, 1, 1);
+        c.add_venue(acc(&venue)).unwrap();
+        ctx(ALICE, 1, 2);
+        assert!(c
+            .transfer_sub_account(acc(TLA), "alice".to_string(), acc(&venue))
+            .is_ok());
+    }
+
+    #[test]
+    fn withdrawing_from_a_venue_is_never_refused_by_the_registered_name_guard() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "holder");
+        let venue = acc("venue.testnet");
+        ctx(COUNCIL, 1, 1);
+        c.add_venue(venue.clone()).unwrap();
+        let key = format!("alice.{TLA}");
+        if let Some(sub) = c.sub_accounts.get_mut(&key) {
+            sub.owner = venue.clone();
+        }
+        ctx(venue.as_str(), 1, 2);
+        assert!(c
+            .transfer_sub_account(acc(TLA), "alice".to_string(), acc(&format!("holder.{TLA}")))
+            .is_ok());
+    }
+
+    #[test]
+    fn recovery_rejects_another_registered_name_as_destination() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        rent_alice_sub(&mut c, "bob");
+        ctx(COUNCIL, 1, 1);
+        c.add_recovery_authority(acc(BOB)).unwrap();
+        ctx(BOB, 1, 2);
+        assert!(matches!(
+            c.recover_sub_account(
+                acc(TLA),
+                "alice".to_string(),
+                acc(&format!("bob.{TLA}")),
+                acc(ALICE)
+            ),
+            Err(ContractError::TransferToRegisteredName)
+        ));
+    }
+
+    #[test]
     fn transfer_rejects_a_caller_who_no_longer_owns_the_name() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
