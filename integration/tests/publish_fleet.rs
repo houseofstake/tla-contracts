@@ -104,7 +104,9 @@ async fn publish_and_migrate_the_fleet() -> Result<()> {
             .into_result()?;
         println!("approved {hash}");
 
-        council
+        let payer_id = std::env::var("PUBLISH_PAYER").unwrap_or_else(|_| COUNCIL.to_string());
+        let payer = Account::from_secret_key(payer_id.parse()?, load_key(&payer_id)?, &worker);
+        payer
             .call(&deployer_id, "gd_deploy")
             .args_json(json!({ "code": common::code_arg(&code) }))
             .deposit(cost)
@@ -112,7 +114,7 @@ async fn publish_and_migrate_the_fleet() -> Result<()> {
             .transact()
             .await?
             .into_result()?;
-        println!("published {hash}");
+        println!("published {hash}, paid by {payer_id}");
     }
 
     println!("\nmigrating {} accounts", names.len());

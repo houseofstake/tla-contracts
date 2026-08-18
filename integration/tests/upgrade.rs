@@ -163,3 +163,73 @@ async fn a_registry_deployed_without_the_field_takes_the_full_delay() -> Result<
 
     Ok(())
 }
+
+#[tokio::test]
+async fn a_keyless_contract_completes_an_upgrade_and_keeps_its_state() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let deployer = fleet.deployer.clone();
+
+    let council_before: serde_json::Value = deployer.view("config").await?.json()?;
+    let hash_before: Option<String> = deployer.view("current_hash").await?.json()?;
+
+    let key = fleet.deployer.as_account().secret_key().public_key();
+    fleet
+        .deployer
+        .as_account()
+        .batch(deployer.id())
+        .delete_key(key)
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(
+        fleet
+            .worker
+            .view_access_keys(deployer.id())
+            .await?
+            .is_empty(),
+        "the deployer must hold no key for this to prove the post-seal escape hatch"
+    );
+
+    let code = wasm("wallet_impl_deployer");
+    let hash = bs58::encode(Sha256::digest(&code)).into_string();
+    fleet
+        .council
+        .call(deployer.id(), "approve_self_upgrade")
+        .args_json(json!({ "hash": hash }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let upgraded = fleet
+        .council
+        .call(deployer.id(), "upgrade_self")
+        .args_json(json!({ "code": Base64VecU8(code) }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    upgraded.into_result()?;
+
+    let council_after: serde_json::Value = deployer.view("config").await?.json()?;
+    assert_eq!(
+        council_before["council"], council_after["council"],
+        "migrate must carry the council across a keyless self upgrade"
+    );
+    let hash_after: Option<String> = deployer.view("current_hash").await?.json()?;
+    assert_eq!(
+        hash_before, hash_after,
+        "migrate must carry the published implementation hash across the upgrade"
+    );
+    assert!(
+        fleet
+            .worker
+            .view_access_keys(deployer.id())
+            .await?
+            .is_empty(),
+        "an upgrade must not reintroduce a key onto a sealed account"
+    );
+
+    Ok(())
+}

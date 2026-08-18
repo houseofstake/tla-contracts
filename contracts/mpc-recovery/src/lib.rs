@@ -207,11 +207,10 @@ impl MpcRecovery {
         Event::WatchersChanged { threshold, count }.emit();
     }
 
+    #[payable]
     pub fn set_installer(&mut self, installer: AccountId) {
-        require!(
-            env::predecessor_account_id() == self.owner,
-            error::ONLY_OWNER
-        );
+        self.assert_one_yocto();
+        self.assert_owner();
         self.installer = installer.clone();
         Event::InstallerChanged { installer }.emit();
     }

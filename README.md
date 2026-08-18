@@ -16,7 +16,7 @@ that set so a lease can be reclaimed and a sale settled without the owner taking
 | `hos-wallet` | The tenant wallet. Published once as a global contract and referenced by every leased account. Holds the extension set, the lease window, the payout account and the freeze state. |
 | `wallet-impl-deployer` | Publishes `hos-wallet`. A code hash is approved first, then anyone may publish code matching it. |
 | `registrar` | Mints leased accounts. Creates the sub-account, funds it, attaches the wallet implementation and initialises it in one batch. |
-| `tla-registry` | The lease ledger. Rental, renewal, pricing, marketplace, reclaim and business sub-account rules. |
+| `tla-registry` | The lease ledger and the NEP-171 collection. Rental, renewal, pricing, reclaim, business sub-account rules, and the only contract holding money. |
 | `hos-extension` | Acts on leased accounts on behalf of the registry. Pushes lease updates, forces transfers, sweeps a reclaimed account. |
 | `mpc-recovery` | Recovery for ordinary NEAR accounts, which have no wallet contract to call. A watcher quorum authorises an MPC-signed `AddKey` after a timelock. |
 | `hos-common` | Types and helpers shared by more than one contract. |
@@ -43,6 +43,21 @@ first check and is refused by the second, and cannot spend from a leased account
 authority" rather than "is the renter", so any co-owner the renter adds inherits the same rights. An
 owner can add and remove co-owners through the same path.
 
+An owner can also delegate spending without handing over a key. `hos_grant_spend` gives one extension a
+scope: the accounts it may pay, a ceiling in NEAR, a budget per fungible token, and a list of the exact
+items it may move. A grant covers plain transfers, `ft_transfer` and `nft_transfer`, and nothing else,
+because those are the only calls whose arguments state what leaves the account. The amount in an
+`ft_transfer` is read on chain and charged against that token's budget. Without that the ceiling would
+be decorative, since the deposit attached to a token call is one yocto while the sum being moved sits in
+the arguments.
+
+Non-fungible assets are fenced rather than budgeted. There is no quantity to meter, so the grant names
+the token ids that may leave, and a count would be a false ceiling: five transfers of a collectible and
+five transfers of an account holding real balances are the same number. A grant can never name this
+account's own collection, which is what stops an agent moving or listing a name its owner holds.
+Re-granting raises the ceilings without clearing what has been spent, so topping up an agent cannot
+un-spend the meter. Revoking is the way to reset it.
+
 While a lease runs, the owner alone decides who holds the account. `assert_extension_editor` lets the
 authority reach the extension set only once the lease has expired, which is the reclaim window. The
 authority can never remove itself, expired or not.
@@ -63,11 +78,16 @@ given, and moves the payout account to match. Co-owners the previous owner added
 is no key to rotate and no token to move, so a sale, a reclaim or a recovery all end the previous
 owner's control the same way.
 
-While a lease is live the owner must authorise the move first. `hos_arm_transfer` is callable by a
-non-authority extension on an active unfrozen lease, and `hos_transfer_ownership` refuses without it.
-Arming is consumed by the transfer, so every move needs a fresh authorisation. After expiry no arming
-is required, which is the reclaim window. The registry already restricts when it will call this, and
-the arming check is a second condition the wallet enforces on its own.
+The wallet takes `hos_transfer_ownership` from the authority alone, and what constrains it sits above.
+`hos-extension` accepts a rotation only from the registry, and every registry path that reaches one
+carries its own gate: a plain transfer or a sale requires the caller to be the current owner, a reclaim
+requires the lease to have ended, and a recovery requires the watcher quorum. There is no path by which
+an admin or the council moves a live name.
+
+The payout account is read before it is repointed, so the balance leaves with the party giving the name
+up rather than the one receiving it. `RotationCause` decides both halves of that: `Deposit`, used when a
+name goes into a marketplace venue, is the one cause that does not repoint the payout, and `Recovery`
+and `Revert` are the two that do not sweep.
 
 Freezing runs in both directions. Any extension may call `hos_freeze`. A freeze is recorded as
 `SelfFrozen` when the caller is not the authority and `AuthorityFrozen` when it is. `hos_unfreeze`
@@ -88,17 +108,53 @@ previous rate. Rent itself is derived from the label length and the premium cate
 The lifecycle states a sub-account can hold are `Registered`, `Active`, `Grace`, `Reclaimable` and
 `Suspended`.
 
+## Names as tokens
+
+`tla-registry` is the collection. A name is a NEP-171 token whose id is the full account id, with
+NEP-177 metadata, NEP-181 enumeration and NEP-297 events. Minting a name emits `nft_mint`, every
+ownership rotation emits `nft_transfer`, and reclaim emits `nft_burn`.
+
+NEP-178 approvals are deliberately absent. `nft_transfer` rejects a set `approval_id` rather than
+ignoring it, because settlement always passes `None` and an approval nobody uses is attack surface
+nobody audits. NEP-199 payouts are absent for the same reason: nothing is taken on resale.
+
+Because a token here is an account holding its own funds rather than a row in the collection's map, two
+places claim to know who owns it. Each leased account answers `nft_item_info` describing itself, and a
+consumer pairs that with the collection's `nft_token` and refuses unless the two agree. That pattern is
+written up as a NEP draft in `docs/sharded-nft-items.md`, and the registrar's `config_epoch` exists to
+serve it: it moves on every upgrade and configuration change so a consumer caching a membership proof
+knows when to re-check.
+
 ## Marketplace
 
-A name can be listed at an ask, unlisted, sold outright, or sold by accepting an offer made against it.
-Transfers and sales complete in callbacks rather than in the entrypoint. `split_resale` divides a sale
-price into a commission, taken in basis points, and the remainder.
+There is no marketplace in these contracts. There are no listings, no offers and no commission. Resale
+settles on NEAR Intents, and the registry's job is to keep a seller's claim attached to the seller
+while their name is in someone else's custody.
+
+A name is deposited with `nft_transfer_call` to a venue the council has allowlisted. That rotation
+carries `RotationCause::Deposit`, which leaves the payout account pointing at the seller, so proceeds
+and any later sweep still reach them rather than the venue. All three entry points derive the cause
+from the receiver, so a venue reached through a plain `nft_transfer` gets the same treatment.
+
+Gates sit on the way in and never on the way out. Depositing a name, or transferring one to another
+user, is refused while the account holds a balance of an allowlisted fungible token. Withdrawing a name
+from a venue is not gated at all, by anything: not the token balance, not a pause, not the TLA's status,
+not the lease lifecycle. A refused entrance is harmless because the asset stays where it was, while a
+refused exit is a trap, and a name that merely accrued an unsolicited token would otherwise be stuck in
+custody permanently.
+
+That token check is hygiene rather than a control, and it is worth stating plainly. It covers only the
+council's allowlist, and it only runs at the entrance, so an account can be emptied, deposited, and then
+funded while it sits in the venue. NEAR is different and is genuinely enforced, because the rotation
+sweeps it to the outgoing payout account.
 
 The registry keeps a per-account refund balance. `claim_refund` pays the caller whatever is recorded
-against their own account id, and fails if there is nothing pending or the contract cannot cover it.
+against their own account id, clearing the entry before the transfer and restoring it if the transfer
+fails. `withdraw` reserves every pending refund before releasing anything, so a treasury withdrawal
+cannot spend money a user is owed.
 
-Business TLAs add a sub-account cap and a scheduled retraction. A retraction is set with a deadline the
-registry stores and can be cancelled before it lands.
+Business TLAs add a sub-account cap and a scheduled retraction. Scheduling and cancelling both sit with
+the licensee, so the party that can start the notice period is the party that can stop it.
 
 ## Reclaim
 
@@ -136,9 +192,11 @@ This is not trustless. It trusts the watcher set by design.
 ## Publishing the wallet implementation
 
 `wallet-impl-deployer` splits approval from publication. The council approves a code hash, which stamps
-the approval time. Once 48 hours have passed, anyone may call `gd_deploy` with
-code matching that hash, attaching the global storage cost, which is charged per byte and refunded
-above the amount used. A successful deploy records the hash and clears the approval. A failed one
+the approval time. Once 48 hours have passed, anyone may call `gd_deploy` with base64 encoded code
+matching that hash, attaching the global storage cost, which is charged per byte and refunded
+above the amount used. The encoding is load bearing rather than cosmetic: passing the code as a JSON
+number array costs roughly three times the argument bytes and has to be parsed one number at a time,
+which took the publish of a 347 KB implementation to 296 Tgas against a 300 Tgas ceiling. A successful deploy records the hash and clears the approval. A failed one
 refunds the deposit and leaves the approval usable, so a retry does not need a second approval. Only
 one deploy runs at a time.
 
@@ -198,11 +256,27 @@ Admin rights are not self-granting: an operations key cannot add its own co-admi
 is a rotation rather than a permanent loss. Council is a constructor parameter on both contracts, since
 on mainnet it is a DAO rather than a fixed account.
 
-Pausing is scoped. `pause` halts the registry. `pause_marketplace` halts only entering or completing a
-trade: listing, accepting an offer, and both buy paths. Unlisting and revoking an offer stay open, so a
-pause cannot trap a seller in a position they are trying to leave, and `assert_sale_idle` still stops
-either from unwinding a sale already settling. Renting, renewing, transfers, reclaim and recovery keep
-running while the marketplace is paused. `is_paused` and `is_marketplace_paused` are separate views.
+Every privileged method demands exactly one yoctoNEAR. The protocol only lets a full access key attach
+a deposit, so a restricted function-call key can never reach one of these, and a key handed to a script
+cannot escalate into governance. That holds uniformly: registering a TLA, adding or removing an admin,
+a payment authority or a recovery authority, changing the fee model, releasing revenue, setting a
+business cap, adding or removing a venue, approving and running an upgrade, sealing, and on
+`mpc-recovery` rotating the watcher set, delegating the installer and pointing at the registry.
+
+The accounts these contracts pay are fixed when they are initialised and have no setters. `treasury`
+receives revenue released by council and anything skimmed from the extension, and changing it takes a
+contract upgrade rather than a transaction. The same is true of `council` itself, the registry and
+extension each contract points at, and the recovery owner. That is deliberate, and it means the
+deployment parameters have to be right before the first `new` rather than corrected afterwards.
+
+Pausing is scoped, and both switches close entrances rather than exits. `pause` halts the registry.
+`pause_marketplace` halts only handing a name to a venue; taking one back out is a plain `nft_transfer`
+and stays open, so a pause cannot strand a name in custody. Renting, renewing, transfers, reclaim and
+recovery keep running while the marketplace is paused. `is_paused` and `is_marketplace_paused` are
+separate views.
+
+A pause also cannot hold a user's property. Sweeps deliberately skip the pause check, and a holder can
+always renew, which is asserted by a test module named for the rule rather than for the function.
 
 Withdrawal destinations are fixed at deployment. `withdraw` on the registry and `skim` on the extension
 take an amount but not a recipient, so an admin can release funds and cannot redirect them.
@@ -259,3 +333,12 @@ Pre-audit. Not deployed to mainnet.
 
 `w_resolve_auth` implements NEP-641, which is not final and has no reference implementation yet. Those
 shapes will move.
+
+`docs/sharded-nft-items.md` is a draft, not a submitted NEP. It has no number yet, because a NEP takes
+the number of the pull request that proposes it.
+
+Three limitations are deliberate rather than outstanding, and are described where they apply: the
+fungible token check on transfers is hygiene and not a laundering control, `mpc-recovery` can sign
+`AddKey` but only for accounts that already hold an MPC-derived key, and the deployer on testnet runs
+with its publish delay set to zero so the fleet can be iterated. The last of those is a mainnet
+blocker and `config` reports it.

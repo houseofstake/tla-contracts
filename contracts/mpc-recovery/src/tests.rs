@@ -27,6 +27,17 @@ fn ctx(predecessor: &str, ts: u64, height: u64) {
         .build());
 }
 
+fn ctx_yocto(predecessor: &str, ts: u64, height: u64) {
+    let acct = AccountId::from_str(predecessor).unwrap();
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(AccountId::from_str(CONTRACT).unwrap())
+        .predecessor_account_id(acct)
+        .attached_deposit(near_sdk::NearToken::from_yoctonear(1))
+        .block_timestamp(ts)
+        .block_height(height)
+        .build());
+}
+
 fn mpc_public_key() -> PublicKey {
     PublicKey::from_str("ed25519:DZdWKDt29SBdPqeyfykg8TFF5Zkb5Qzdd6FJiJMvftZG").unwrap()
 }
@@ -1020,10 +1031,19 @@ fn installer_defaults_to_the_owner_on_deploy() {
 fn set_installer_delegates_and_owner_keeps_authority() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(OWNER, 0, 0);
+    ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     assert_eq!(c.installer(), AccountId::from_str(INSTALLER).unwrap());
     assert_eq!(c.owner(), AccountId::from_str(OWNER).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "1 yoctoNEAR")]
+fn delegating_the_installer_needs_a_full_access_signature() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(OWNER, 0, 0);
+    c.set_installer(AccountId::from_str(INSTALLER).unwrap());
 }
 
 #[test]
@@ -1031,7 +1051,7 @@ fn set_installer_delegates_and_owner_keeps_authority() {
 fn set_installer_rejects_a_non_owner() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx("attacker.testnet", 0, 0);
+    ctx_yocto("attacker.testnet", 0, 0);
     c.set_installer(AccountId::from_str("attacker.testnet").unwrap());
 }
 
@@ -1040,7 +1060,7 @@ fn a_delegated_installer_can_install_a_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(OWNER, 0, 0);
+    ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(INSTALLER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
@@ -1052,7 +1072,7 @@ fn the_owner_can_still_install_after_delegating() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(OWNER, 0, 0);
+    ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
@@ -1076,7 +1096,7 @@ fn a_delegated_installer_can_finalize_an_approved_recovery() {
     let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
-    ctx(OWNER, 61 * NS_PER_SEC, 6);
+    ctx_yocto(OWNER, 61 * NS_PER_SEC, 6);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(INSTALLER, 61 * NS_PER_SEC, 6);
     let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
@@ -1093,7 +1113,7 @@ fn a_delegated_installer_can_abort_a_recovery() {
     let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
-    ctx(OWNER, 0, 6);
+    ctx_yocto(OWNER, 0, 6);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(INSTALLER, 0, 6);
     let _ = c.abort_recovery(account_id());
@@ -1111,7 +1131,7 @@ fn a_delegated_installer_cannot_replace_an_existing_policy() {
     let (_, attacker_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
-    ctx(OWNER, 0, 0);
+    ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(INSTALLER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), attacker_pk, 259_200);
