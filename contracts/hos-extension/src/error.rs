@@ -7,6 +7,7 @@ pub enum ContractError {
     OnlyAdmin,
     OnlyCouncil,
     OnlyRegistry,
+    NoPendingReset,
     Paused,
     CannotRemoveLastAdmin,
     InsufficientDeposit,

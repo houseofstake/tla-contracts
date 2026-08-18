@@ -45,13 +45,11 @@ impl TlaRegistry {
         owner: &AccountId,
         payout: &AccountId,
     ) -> bool {
-        let Some(previous) = self.sub_accounts.get(key).map(|s| s.owner.clone()) else {
+        let Some(sub) = self.sub_accounts.get_mut(key) else {
             return false;
         };
-        if let Some(sub) = self.sub_accounts.get_mut(key) {
-            sub.owner = owner.clone();
-            sub.payout_account = payout.clone();
-        }
+        let previous = std::mem::replace(&mut sub.owner, owner.clone());
+        sub.payout_account = payout.clone();
         if previous != *owner {
             index_remove(&mut self.sub_accounts_by_owner, &previous, key);
             self.owner_index_add(owner, key);

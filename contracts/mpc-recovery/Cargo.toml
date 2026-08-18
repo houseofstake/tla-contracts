@@ -3,7 +3,7 @@ name = "mpc-recovery"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
-repository = "https://github.com/neo-sky/hos-tla-contracts"
+repository = "https://github.com/houseofstake/tla-contracts"
 license = "MIT OR Apache-2.0"
 description = "MPC-mediated account recovery for House of Stake TLA wallets, with timelock and watcher-quorum verdict."
 

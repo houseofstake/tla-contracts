@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use defuse_wallet::{NearPromise, Request};
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{NearToken, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -17,6 +17,13 @@ pub const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
 pub fn wasm(name: &str) -> Vec<u8> {
     let path = format!("../target/near/{name}/{name}.wasm");
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// `gd_deploy` takes the code base64 encoded. A JSON number array costs about
+/// three times as many argument bytes and has to be parsed a number at a time,
+/// which put the publish over the per-transaction gas limit.
+pub fn code_arg(code: &[u8]) -> Base64VecU8 {
+    Base64VecU8::from(code.to_vec())
 }
 
 pub fn now_secs() -> u32 {
@@ -83,7 +90,7 @@ pub async fn deploy_fleet() -> Result<Fleet> {
     let impl_owner = subaccount(&root, "w", NearToken::from_near(10)).await?;
     let tla = subaccount(&root, "tla", NearToken::from_near(10)).await?;
     let bob = subaccount(&root, "bob", NearToken::from_near(5)).await?;
-    let relay = subaccount(&root, "relay", NearToken::from_near(80)).await?;
+    let relay = subaccount(&root, "relay", NearToken::from_near(120)).await?;
     let impl_account = impl_owner.id().clone();
 
     let deployer = impl_owner
@@ -114,7 +121,7 @@ pub async fn deploy_fleet() -> Result<Fleet> {
         NearToken::from_yoctonear(wallet_wasm.len() as u128 * GLOBAL_CODE_COST_PER_BYTE);
     relay
         .call(deployer.id(), "gd_deploy")
-        .args_json(json!({ "code": wallet_wasm }))
+        .args_json(json!({ "code": code_arg(&wallet_wasm) }))
         .deposit(publish_cost)
         .max_gas()
         .transact()
@@ -199,6 +206,12 @@ pub fn account_as(id: &AccountId, secret: &SecretKey, worker: &Worker<Sandbox>) 
     Account::from_secret_key(id.clone(), secret.clone(), worker)
 }
 pub const WATCHER_KEY: &str = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847";
+
+pub fn second_watcher_key() -> String {
+    SecretKey::from_random(near_workspaces::types::KeyType::ED25519)
+        .public_key()
+        .to_string()
+}
 pub const NEAR_USD_MICRO: u128 = 5_000_000;
 pub const GRACE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
@@ -233,8 +246,8 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
             "owner": fleet.council.id(),
             "signer": fleet.bob.id(),
             "transfer_authority": fleet.extension.id(),
-            "watchers": [WATCHER_KEY],
-            "threshold": 1,
+            "watchers": [WATCHER_KEY, second_watcher_key()],
+            "threshold": 2,
         }))
         .max_gas()
         .transact()
@@ -278,6 +291,7 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
             "premium_category": "Standard",
             "licensee": null,
         }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -298,6 +312,7 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
         .council
         .call(registry.id(), "update_fee_config")
         .args_json(json!({ "config": fee }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

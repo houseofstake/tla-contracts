@@ -56,6 +56,7 @@ async fn recovery_moves_a_name_with_nothing_armed_beforehand() -> Result<()> {
         .council
         .call(registry.id(), "add_recovery_authority")
         .args_json(json!({ "account_id": fleet.recovery.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

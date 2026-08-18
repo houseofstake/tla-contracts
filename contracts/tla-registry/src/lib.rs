@@ -38,6 +38,9 @@ const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
 const ACTIVITY_CAPACITY: u32 = 256;
 
+/// Discriminants are storage prefixes, so a retired variant keeps its position
+/// to preserve the prefixes of every variant after it. Deleting one silently
+/// repoints live collections at another key's data.
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
 #[allow(dead_code)]
@@ -56,8 +59,8 @@ pub(crate) enum StorageKey {
     PaymentAuthorities,
     RecoveryAuthorities,
     SubAccountsIndexed,
-    ListingsIndexed,
-    AcceptedOffersIndexed,
+    RetiredListingsIndexed,
+    RetiredAcceptedOffersIndexed,
     SubAccountsByOwner,
     SubAccountsByOwnerInner { owner: AccountId },
     SubAccountsByTla,
@@ -65,7 +68,7 @@ pub(crate) enum StorageKey {
     RecentActivity,
     SweepableTokens,
     SuspendedUntil,
-    TokenMetadataStore,
+    RetiredTokenMetadataStore,
     Venues,
 }
 

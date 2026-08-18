@@ -273,11 +273,13 @@ fn time_lifecycle(expires_at: u64, clock: &LifecycleClock) -> LifecycleStatus {
 }
 
 impl TlaEntry {
-    pub fn lifecycle(&self, clock: &LifecycleClock) -> LifecycleStatus {
+    pub fn lifecycle(&self, clock: &LifecycleClock, suspended_until: u64) -> LifecycleStatus {
         match self.status {
             TlaStatus::Registered => LifecycleStatus::Registered,
-            TlaStatus::Suspended => LifecycleStatus::Suspended,
-            TlaStatus::Active => time_lifecycle(self.expires_at, clock),
+            TlaStatus::Suspended if env::block_timestamp() < suspended_until => {
+                LifecycleStatus::Suspended
+            }
+            TlaStatus::Suspended | TlaStatus::Active => time_lifecycle(self.expires_at, clock),
         }
     }
 

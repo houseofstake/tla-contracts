@@ -48,13 +48,19 @@ pub fn ft_balances_clear(allowlist: &[AccountId]) -> BalanceGate {
 }
 
 fn block_reason(index: u64) -> Option<String> {
+    match read_u128(index) {
+        Ok(balance) if balance > 0 => Some(String::from("nonzero_balance")),
+        Ok(_) => None,
+        Err(reason) => Some(reason),
+    }
+}
+
+fn read_u128(index: u64) -> Result<u128, String> {
     match env::promise_result_checked(index, FT_BALANCE_MAX_LEN) {
-        Ok(bytes) => match near_sdk::serde_json::from_slice::<U128>(&bytes) {
-            Ok(balance) if balance.0 > 0 => Some(String::from("nonzero_balance")),
-            Ok(_) => None,
-            Err(_) => Some(String::from("balance_unverifiable")),
-        },
-        Err(PromiseError::Failed) => Some(String::from("balance_query_failed")),
-        Err(_) => Some(String::from("balance_query_unverifiable")),
+        Ok(bytes) => near_sdk::serde_json::from_slice::<U128>(&bytes)
+            .map(|value| value.0)
+            .map_err(|_| String::from("balance_unverifiable")),
+        Err(PromiseError::Failed) => Err(String::from("balance_query_failed")),
+        Err(_) => Err(String::from("balance_query_unverifiable")),
     }
 }

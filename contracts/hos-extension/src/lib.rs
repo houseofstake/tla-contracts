@@ -19,6 +19,7 @@ const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 const GAS_FOR_ROTATE: Gas = Gas::from_tgas(30);
 const GAS_FOR_ROTATE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESET: Gas = Gas::from_tgas(5);
+const GAS_FOR_RESET_CALLBACK: Gas = Gas::from_tgas(5);
 const GAS_FOR_LEASE: Gas = Gas::from_tgas(8);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_BALANCE_CB: Gas = Gas::from_tgas(105);
@@ -28,6 +29,11 @@ const GAS_FOR_SWEEP_CALL: Gas = Gas::from_tgas(40);
 const GAS_FOR_PAYOUT_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_PAYOUT_CB: Gas = Gas::from_tgas(120);
 const GAS_FOR_SETTLE_CB: Gas = Gas::from_tgas(8);
+
+/// Held back by `skim` on top of storage already used. A reset that cannot be
+/// recorded is a reset nobody retries, so the pending set has to have room to
+/// grow after a treasury sweep has taken everything else.
+const SKIM_BUFFER: NearToken = NearToken::from_millinear(100);
 
 const STORAGE_DEPOSIT_AMOUNT: NearToken =
     NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO);
@@ -63,13 +69,14 @@ const EXTENSION_CALL_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
 #[allow(dead_code)]
 #[ext_contract(ext_mpc_recovery)]
 trait MpcRecovery {
-    fn on_wallet_transferred(&mut self, wallet: AccountId);
+    fn on_wallet_transferred(&mut self, wallet: AccountId) -> bool;
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
 enum StorageKey {
     Admins,
+    RecoveryResetPending,
 }
 
 #[near(contract_state)]
@@ -85,6 +92,7 @@ pub struct HosExtension {
     pub(crate) approved_at: Option<u64>,
     pub(crate) council: AccountId,
     pub(crate) paused_until_ns: u64,
+    pub(crate) recovery_reset_pending: IterableSet<AccountId>,
 }
 
 #[near(serializers = [borsh])]
@@ -98,6 +106,7 @@ pub struct LegacyHosExtension {
     approved_code_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
     council: AccountId,
+    paused_until_ns: u64,
 }
 
 #[near]
@@ -127,6 +136,7 @@ impl HosExtension {
             approved_at: None,
             council,
             paused_until_ns: 0,
+            recovery_reset_pending: IterableSet::new(StorageKey::RecoveryResetPending),
         }
     }
 
@@ -151,11 +161,8 @@ impl HosExtension {
             approved_code_hash: old.approved_code_hash,
             approved_at: old.approved_at,
             council: old.council,
-            paused_until_ns: if old.paused {
-                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS)
-            } else {
-                0
-            },
+            paused_until_ns: old.paused_until_ns,
+            recovery_reset_pending: IterableSet::new(StorageKey::RecoveryResetPending),
         }
     }
 
@@ -261,6 +268,39 @@ impl HosExtension {
         Ok(hos_common::deploy_and_migrate(code))
     }
 
+    #[private]
+    pub fn after_recovery_reset(
+        &mut self,
+        wallet: AccountId,
+        #[callback_result] reset: Result<bool, PromiseError>,
+    ) {
+        if matches!(reset, Ok(true)) {
+            self.recovery_reset_pending.remove(&wallet);
+            return;
+        }
+        self.recovery_reset_pending.insert(wallet.clone());
+        Event::RecoveryResetPending { wallet }.emit();
+    }
+
+    #[handle_result]
+    pub fn retry_recovery_reset(&mut self, wallet: AccountId) -> Result<Promise, ContractError> {
+        if !self.recovery_reset_pending.contains(&wallet) {
+            return Err(ContractError::NoPendingReset);
+        }
+        Ok(ext_mpc_recovery::ext(self.recovery.clone())
+            .with_static_gas(GAS_FOR_RESET)
+            .on_wallet_transferred(wallet.clone())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_RESET_CALLBACK)
+                    .after_recovery_reset(wallet),
+            ))
+    }
+
+    pub fn pending_recovery_resets(&self) -> Vec<AccountId> {
+        self.recovery_reset_pending.iter().cloned().collect()
+    }
+
     #[payable]
     #[handle_result]
     pub fn seal(&mut self, public_key: PublicKey) -> Result<Promise, ContractError> {
@@ -282,7 +322,8 @@ impl HosExtension {
         let to = self.treasury.clone();
         let reserve = env::storage_byte_cost()
             .as_yoctonear()
-            .saturating_mul(env::storage_usage() as u128);
+            .saturating_mul(env::storage_usage() as u128)
+            .saturating_add(SKIM_BUFFER.as_yoctonear());
         let available = env::account_balance()
             .as_yoctonear()
             .saturating_sub(reserve);
@@ -387,7 +428,12 @@ impl HosExtension {
             .emit();
             let _ = ext_mpc_recovery::ext(self.recovery.clone())
                 .with_static_gas(GAS_FOR_RESET)
-                .on_wallet_transferred(wallet);
+                .on_wallet_transferred(wallet.clone())
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(GAS_FOR_RESET_CALLBACK)
+                        .after_recovery_reset(wallet),
+                );
         } else {
             Event::ForceTransferVoided { wallet }.emit();
         }

@@ -6,8 +6,12 @@ pub(crate) fn effective_sub_lifecycle(
     tla: &TlaEntry,
     retraction_notice_ns: u64,
     clock: &LifecycleClock,
+    tla_suspended_until: u64,
 ) -> LifecycleStatus {
-    if matches!(tla.lifecycle(clock), LifecycleStatus::Reclaimable) {
+    if matches!(
+        tla.lifecycle(clock, tla_suspended_until),
+        LifecycleStatus::Reclaimable
+    ) {
         return LifecycleStatus::Reclaimable;
     }
     if let Some(retraction_at) = sub.retraction_at {

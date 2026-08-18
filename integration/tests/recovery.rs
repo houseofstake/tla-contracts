@@ -133,6 +133,7 @@ async fn a_watcher_quorum_recovers_a_leased_name_end_to_end() -> Result<()> {
         .council
         .call(registry.id(), "add_recovery_authority")
         .args_json(json!({ "account_id": recovery.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -229,6 +230,7 @@ async fn a_single_watcher_cannot_recover_a_leased_name() -> Result<()> {
         .council
         .call(registry.id(), "add_recovery_authority")
         .args_json(json!({ "account_id": recovery.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

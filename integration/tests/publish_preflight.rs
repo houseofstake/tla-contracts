@@ -236,6 +236,29 @@ async fn the_fleet_is_safe_to_republish() -> Result<()> {
         );
     }
 
+    if let Ok(deployer) = std::env::var("DEPLOYER_ACCOUNT") {
+        let id: AccountId = deployer
+            .parse()
+            .context("DEPLOYER_ACCOUNT must be an account")?;
+        let cfg: serde_json::Value = worker.view(&id, "config").await?.json()?;
+        let delay = cfg
+            .get("approval_delay_ns")
+            .and_then(|v| v.as_str())
+            .context("deployer config has no approval_delay_ns")?;
+        let production = cfg
+            .get("production_delay")
+            .and_then(serde_json::Value::as_bool)
+            .context("deployer config has no production_delay")?;
+        println!("deployer approval_delay_ns: {delay} (production: {production})");
+        if std::env::var("REQUIRE_PRODUCTION_DELAY").is_ok() && !production {
+            bail!(
+                "the deployer publishes with approval_delay_ns={delay}. A publish replaces the \
+                 code under every leased account, and the delay is the only window in which an \
+                 owner can see an approved hash before that happens."
+            );
+        }
+    }
+
     let mut distinct = versions.clone();
     distinct.sort_unstable();
     distinct.dedup();

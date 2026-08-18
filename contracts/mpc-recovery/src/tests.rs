@@ -44,6 +44,15 @@ fn deploy(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecovery {
     )
 }
 
+fn spare() -> &'static (SigningKey, PublicKey) {
+    static SPARE: std::sync::OnceLock<(SigningKey, PublicKey)> = std::sync::OnceLock::new();
+    SPARE.get_or_init(keypair)
+}
+
+fn spare_watcher() -> PublicKey {
+    spare().1.clone()
+}
+
 fn account_id() -> AccountId {
     AccountId::from_str(VICTIM).unwrap()
 }
@@ -270,7 +279,7 @@ fn request_rejects_forged_attestation() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let (wrong, _) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -287,7 +296,7 @@ fn request_rejects_forged_attestation() {
 fn request_rejects_wrong_round() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -304,7 +313,7 @@ fn request_rejects_wrong_round() {
 fn request_rejects_when_active() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -328,7 +337,7 @@ fn request_rejects_when_active() {
 fn verdict_rejected_before_timelock() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -342,7 +351,13 @@ fn verdict_rejected_before_timelock() {
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+        watcher_sigs(
+            &[&w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            true,
+        ),
     );
 }
 
@@ -366,7 +381,13 @@ fn verdict_rejected_without_quorum() {
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+        watcher_sigs(
+            &[&w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            true,
+        ),
     );
 }
 
@@ -374,7 +395,7 @@ fn verdict_rejected_without_quorum() {
 fn active_verdict_cancels_back_to_idle() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -388,7 +409,13 @@ fn active_verdict_cancels_back_to_idle() {
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Cancel,
-        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, false),
+        watcher_sigs(
+            &[&w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            false,
+        ),
     );
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
@@ -401,7 +428,7 @@ fn active_verdict_cancels_back_to_idle() {
 fn finalize_rejected_without_approval() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -434,7 +461,13 @@ fn approve_recovery(
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[w1], &[wk1], &new_owner, 0, true),
+        watcher_sigs(
+            &[w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            true,
+        ),
     );
     new_owner
 }
@@ -447,7 +480,7 @@ fn block_hash() -> Base58CryptoHash {
 fn a_quorum_verdict_approves_without_touching_a_wallet() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -461,7 +494,13 @@ fn a_quorum_verdict_approves_without_touching_a_wallet() {
     let out = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+        watcher_sigs(
+            &[&w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            true,
+        ),
     );
     assert!(matches!(out, PromiseOrValue::Value(())));
     assert!(matches!(
@@ -474,7 +513,7 @@ fn a_quorum_verdict_approves_without_touching_a_wallet() {
 fn finalize_moves_an_approved_recovery_to_resolving() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -490,7 +529,7 @@ fn finalize_moves_an_approved_recovery_to_resolving() {
 fn second_finalize_rejected_while_resolving() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -503,7 +542,7 @@ fn second_finalize_rejected_while_resolving() {
 fn finalize_rejects_an_unauthorized_caller() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
@@ -514,7 +553,7 @@ fn finalize_rejects_an_unauthorized_caller() {
 fn abort_from_requested_returns_to_idle() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -537,7 +576,7 @@ fn abort_from_requested_returns_to_idle() {
 fn abort_from_approved_returns_to_idle() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 0, 6);
@@ -554,7 +593,7 @@ fn abort_from_approved_returns_to_idle() {
 fn abort_rejects_an_unauthorized_caller() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx("attacker.testnet", 0, 6);
@@ -566,7 +605,7 @@ fn abort_rejects_an_unauthorized_caller() {
 fn abort_rejects_when_idle() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     ctx(OWNER, 0, 2);
     let _ = c.abort_recovery(account_id());
@@ -577,7 +616,7 @@ fn abort_rejects_when_idle() {
 fn abort_rejects_while_resolving() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -590,7 +629,7 @@ fn abort_rejects_while_resolving() {
 fn transfer_resets_idle_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     ctx(TRANSFER_AUTHORITY, 0, 1);
     c.on_wallet_transferred(account_id());
@@ -601,7 +640,7 @@ fn transfer_resets_idle_policy() {
 fn transfer_resets_requested_policy() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -620,7 +659,7 @@ fn transfer_resets_requested_policy() {
 fn transfer_disarms_an_approved_recovery() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(TRANSFER_AUTHORITY, 0, 6);
@@ -635,7 +674,7 @@ fn transfer_disarms_an_approved_recovery() {
 fn transfer_preserves_the_round_floor_so_rounds_never_replay() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk.clone());
     approve_recovery(&mut c, &mother, &w1, wk1);
     let round = c.accounts.get(&account_id()).unwrap().round;
@@ -654,7 +693,7 @@ fn transfer_preserves_the_round_floor_so_rounds_never_replay() {
 fn transfer_rejects_non_authority() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     ctx("attacker.testnet", 0, 1);
     c.on_wallet_transferred(account_id());
@@ -678,7 +717,13 @@ fn approve_native_recovery(
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[w1], &[wk1], &new_owner, 0, true),
+        watcher_sigs(
+            &[w1, &spare().0],
+            &[wk1, spare_watcher()],
+            &new_owner,
+            0,
+            true,
+        ),
     );
     new_owner
 }
@@ -687,7 +732,7 @@ fn approve_native_recovery(
 fn native_finalize_signs_and_resolves() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     assert!(matches!(
@@ -706,7 +751,7 @@ fn native_finalize_signs_and_resolves() {
 fn native_signature_keeps_round_until_owner_claims() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -734,7 +779,7 @@ fn native_signature_keeps_round_until_owner_claims() {
 fn native_finalize_retryable_after_signature() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -757,7 +802,7 @@ fn native_finalize_retryable_after_signature() {
 fn native_on_signed_failure_restores_approved() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -775,7 +820,7 @@ fn native_on_signed_failure_restores_approved() {
 fn native_finalize_rejects_unauthorized() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx("attacker.testnet", 61 * NS_PER_SEC, 6);
@@ -787,7 +832,7 @@ fn native_finalize_rejects_unauthorized() {
 fn native_claim_rejects_unauthorized() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -807,7 +852,7 @@ fn native_claim_rejects_unauthorized() {
 fn native_claim_rejects_wrong_round() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -826,7 +871,7 @@ fn native_claim_rejects_wrong_round() {
 fn reinstall_preserves_round_when_idle() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -853,7 +898,7 @@ fn reinstall_preserves_round_when_idle() {
 fn reinstall_rejected_while_in_flight() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -873,7 +918,7 @@ fn reinstall_rejected_while_in_flight() {
 fn install_rejects_a_timelock_that_would_brick_recovery() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, u32::MAX);
 }
@@ -883,16 +928,23 @@ fn install_rejects_a_timelock_that_would_brick_recovery() {
 fn install_rejects_zero_timelock() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 0);
+}
+
+#[test]
+#[should_panic(expected = "threshold must be at least 2")]
+fn init_rejects_a_threshold_one_watcher_could_meet_alone() {
+    let (_, wk1) = keypair();
+    let _ = deploy(&[wk1, spare_watcher()], 1);
 }
 
 #[test]
 #[should_panic(expected = "duplicate watcher key")]
 fn new_rejects_duplicate_watchers() {
     let (_, wk1) = keypair();
-    let _ = deploy(&[wk1.clone(), wk1], 1);
+    let _ = deploy(&[wk1.clone(), wk1], 2);
 }
 
 #[test]
@@ -900,7 +952,7 @@ fn new_rejects_duplicate_watchers() {
 fn verdict_over_wrong_new_owner_rejected() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     let (_, other) = keypair();
@@ -915,7 +967,7 @@ fn verdict_over_wrong_new_owner_rejected() {
     let _ = c.submit_verdict(
         account_id(),
         Verdict::Approve,
-        watcher_sigs(&[&w1], &[wk1], &other, 0, true),
+        watcher_sigs(&[&w1, &spare().0], &[wk1, spare_watcher()], &other, 0, true),
     );
 }
 
@@ -923,7 +975,7 @@ fn verdict_over_wrong_new_owner_rejected() {
 fn round_preserved_across_transfer_and_reinstall() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     let (_, new_owner) = keypair();
     ctx("anyone.testnet", 1, 1);
@@ -948,7 +1000,7 @@ fn round_preserved_across_transfer_and_reinstall() {
 #[test]
 fn expected_native_path_is_account_scoped() {
     let (_, wk1) = keypair();
-    let c = deploy(&[wk1], 1);
+    let c = deploy(&[wk1, spare_watcher()], 2);
     let a = AccountId::from_str("alice.tla.testnet").unwrap();
     let b = AccountId::from_str("bob.tla.testnet").unwrap();
     assert_ne!(c.expected_native_path(a.clone()), c.expected_native_path(b));
@@ -960,14 +1012,14 @@ const INSTALLER: &str = "installer.testnet";
 #[test]
 fn installer_defaults_to_the_owner_on_deploy() {
     let (_, wk1) = keypair();
-    let c = deploy(&[wk1], 1);
+    let c = deploy(&[wk1, spare_watcher()], 2);
     assert_eq!(c.installer(), c.owner());
 }
 
 #[test]
 fn set_installer_delegates_and_owner_keeps_authority() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     assert_eq!(c.installer(), AccountId::from_str(INSTALLER).unwrap());
@@ -978,7 +1030,7 @@ fn set_installer_delegates_and_owner_keeps_authority() {
 #[should_panic(expected = "only owner")]
 fn set_installer_rejects_a_non_owner() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx("attacker.testnet", 0, 0);
     c.set_installer(AccountId::from_str("attacker.testnet").unwrap());
 }
@@ -987,7 +1039,7 @@ fn set_installer_rejects_a_non_owner() {
 fn a_delegated_installer_can_install_a_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(INSTALLER, 0, 0);
@@ -999,7 +1051,7 @@ fn a_delegated_installer_can_install_a_policy() {
 fn the_owner_can_still_install_after_delegating() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
     ctx(OWNER, 0, 0);
@@ -1012,7 +1064,7 @@ fn the_owner_can_still_install_after_delegating() {
 fn install_rejects_an_unauthorized_caller() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx("attacker.testnet", 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
 }
@@ -1021,7 +1073,7 @@ fn install_rejects_an_unauthorized_caller() {
 fn a_delegated_installer_can_finalize_an_approved_recovery() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 61 * NS_PER_SEC, 6);
@@ -1038,7 +1090,7 @@ fn a_delegated_installer_can_finalize_an_approved_recovery() {
 fn a_delegated_installer_can_abort_a_recovery() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
-    let mut c = deploy(std::slice::from_ref(&wk1), 1);
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
     install(&mut c, mother_pk);
     approve_recovery(&mut c, &mother, &w1, wk1);
     ctx(OWNER, 0, 6);
@@ -1057,7 +1109,7 @@ fn a_delegated_installer_cannot_replace_an_existing_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let (_, attacker_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     ctx(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
@@ -1070,7 +1122,7 @@ fn the_owner_can_still_replace_an_existing_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let (_, next_pk) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     install(&mut c, mother_pk);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), next_pk, 259_200);
@@ -1100,7 +1152,7 @@ const AFTER_UPGRADE_DELAY: u64 = UPGRADE_DELAY_NS + 1;
 #[test]
 fn owner_approves_then_upgrades_after_the_delay() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_upgrade(code_hash());
     assert_eq!(c.approved_upgrade_hash(), Some(code_hash()));
@@ -1114,7 +1166,7 @@ fn owner_approves_then_upgrades_after_the_delay() {
 #[should_panic(expected = "approved code must wait out the delay")]
 fn upgrade_before_the_delay_is_rejected() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_upgrade(code_hash());
     ctx_paying(OWNER, UPGRADE_DELAY_NS - 1, 1);
@@ -1125,7 +1177,7 @@ fn upgrade_before_the_delay_is_rejected() {
 #[should_panic(expected = "code does not match the approved hash")]
 fn upgrade_with_different_code_is_rejected() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_upgrade(code_hash());
     ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
@@ -1136,7 +1188,7 @@ fn upgrade_with_different_code_is_rejected() {
 #[should_panic(expected = "no approved code hash")]
 fn upgrade_without_an_approval_is_rejected() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, AFTER_UPGRADE_DELAY, 1);
     let _ = c.upgrade(code());
 }
@@ -1145,7 +1197,7 @@ fn upgrade_without_an_approval_is_rejected() {
 #[should_panic(expected = "only owner")]
 fn a_non_owner_cannot_approve_an_upgrade() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying("attacker.testnet", 0, 1);
     c.approve_upgrade(code_hash());
 }
@@ -1154,7 +1206,7 @@ fn a_non_owner_cannot_approve_an_upgrade() {
 #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
 fn a_restricted_key_cannot_approve_an_upgrade() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 0);
     c.approve_upgrade(code_hash());
 }
@@ -1164,7 +1216,7 @@ fn the_owner_can_rotate_the_watcher_set() {
     let (_, wk1) = keypair();
     let (_, wk2) = keypair();
     let (_, wk3) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.set_watchers(vec![wk2.clone(), wk3.clone()], 2);
     assert_eq!(c.watchers(), vec![wk2, wk3]);
@@ -1176,7 +1228,7 @@ fn the_owner_can_rotate_the_watcher_set() {
 fn the_watcher_set_cannot_be_rotated_down_to_one() {
     let (_, wk1) = keypair();
     let (_, wk2) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.set_watchers(vec![wk2], 1);
 }
@@ -1186,7 +1238,7 @@ fn the_watcher_set_cannot_be_rotated_down_to_one() {
 fn the_watcher_set_rejects_a_duplicate_key() {
     let (_, wk1) = keypair();
     let (_, wk2) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.set_watchers(vec![wk2.clone(), wk2], 2);
 }
@@ -1197,7 +1249,7 @@ fn a_non_owner_cannot_rotate_the_watcher_set() {
     let (_, wk1) = keypair();
     let (_, wk2) = keypair();
     let (_, wk3) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying("attacker.testnet", 0, 1);
     c.set_watchers(vec![wk2, wk3], 2);
 }
@@ -1207,7 +1259,7 @@ mod migration {
     use near_sdk::base64::Engine;
     use near_sdk::borsh::BorshDeserialize;
 
-    const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAEAAAAhAAAAAIS/j9urBasuVw52LoAoxzfkejeW2buaWME8f8jHrqeAAQAAAAEAAABhAQAAAHI=";
+    const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAMAAAAhAAAAAIS/j9urBasuVw52LoAoxzfkejeW2buaWME8f8jHrqeAIQAAAADr/z7Ju307NQA7YYP3VYhQKUN4CbJDMaT7xFKNCHdA2CEAAAAAui7tbbQ7ad8XqLuoFtbbZmmzhXxFgzdKBQP+6BhqW/cCAAAAAQAAAGEBAAAAcgAAARgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQ=";
 
     #[test]
     fn the_legacy_struct_still_matches_the_deployed_state() {
@@ -1215,13 +1267,19 @@ mod migration {
             .decode(DEPLOYED_STATE_B64)
             .expect("fixture is valid base64");
         let old = LegacyMpcRecovery::try_from_slice(&raw)
-            .expect("deployed state no longer decodes as LegacyMpcRecovery");
+            .expect("deployed state must decode as LegacyMpcRecovery or migrate cannot read it");
         assert_eq!(old.owner.as_str(), "council.hosdemo.testnet");
         assert_eq!(old.installer.as_str(), "hostla.testnet");
         assert_eq!(old.signer.as_str(), "v1.signer-prod.testnet");
         assert_eq!(old.transfer_authority.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.watchers.len(), 1);
-        assert_eq!(old.threshold, 1);
+        assert_eq!(old.watchers.len(), 3);
+        assert_eq!(old.threshold, 2);
+        assert_eq!(
+            old.registry.as_ref().map(|id| id.as_str()),
+            Some("registry.hosdemo.testnet"),
+            "the live contract is wired to the registry, and a migration that dropped it would \
+             disable name recovery without failing"
+        );
     }
 }
 
@@ -1239,6 +1297,9 @@ fn the_legacy_arm_runs_and_keeps_the_watcher_set() {
         threshold: 2,
         accounts: LookupMap::new(b"a"),
         round_floor: LookupMap::new(b"r"),
+        approved_code_hash: None,
+        approved_at: None,
+        registry: Some(AccountId::from_str(REGISTRY).unwrap()),
     });
     let migrated = MpcRecovery::migrate();
     assert_eq!(migrated.owner, AccountId::from_str(OWNER).unwrap());
@@ -1252,7 +1313,7 @@ fn the_legacy_arm_runs_and_keeps_the_watcher_set() {
 #[test]
 fn state_already_current_survives_a_same_shape_redeploy() {
     let (_, wk1) = keypair();
-    let c = deploy(&[wk1], 1);
+    let c = deploy(&[wk1, spare_watcher()], 2);
     let owner = c.owner.clone();
     env::state_write(&c);
     assert_eq!(MpcRecovery::migrate().owner, owner);
@@ -1269,7 +1330,7 @@ fn seal_ctx(predecessor: &str, deposit: u128) {
 #[test]
 fn the_owner_can_seal_the_recovery_contract() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     seal_ctx(OWNER, 1);
     let _ = c.seal(mpc_public_key());
 }
@@ -1278,7 +1339,7 @@ fn the_owner_can_seal_the_recovery_contract() {
 #[should_panic(expected = "only owner")]
 fn an_owner_that_cannot_call_cannot_remove_the_key() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     seal_ctx("attacker.testnet", 1);
     let _ = c.seal(mpc_public_key());
 }
@@ -1287,7 +1348,7 @@ fn an_owner_that_cannot_call_cannot_remove_the_key() {
 #[should_panic]
 fn sealing_the_recovery_contract_needs_a_full_access_signature() {
     let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1], 1);
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
     seal_ctx(OWNER, 0);
     let _ = c.seal(mpc_public_key());
 }
@@ -1301,7 +1362,7 @@ fn init_rejects_an_owner_that_is_the_recovery_contract_itself() {
         AccountId::from_str(CONTRACT).unwrap(),
         AccountId::from_str(SIGNER).unwrap(),
         AccountId::from_str(TRANSFER_AUTHORITY).unwrap(),
-        vec![wk1],
-        1,
+        vec![wk1, spare_watcher()],
+        2,
     );
 }

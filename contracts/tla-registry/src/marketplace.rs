@@ -1,3 +1,5 @@
+use crate::admin::MAX_ALLOWLIST_SIZE;
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -9,6 +11,12 @@ use near_sdk::{env, near, AccountId, Gas, Promise};
 
 pub(crate) const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 pub(crate) const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(20);
+const TRANSFER_GATE_CB_TGAS: u64 = 180;
+const GAS_FOR_TRANSFER_GATE_CB: Gas = Gas::from_tgas(TRANSFER_GATE_CB_TGAS);
+const _: () = assert!(
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + TRANSFER_GATE_CB_TGAS + 20 <= 300,
+    "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every transfer"
+);
 
 #[near]
 impl TlaRegistry {
@@ -22,7 +30,78 @@ impl TlaRegistry {
     ) -> Result<Promise, ContractError> {
         let (sub_account, from) = self.assert_transferable(&tla_id, &name, &new_owner)?;
         let cause = self.rotation_for_receiver(&new_owner);
-        Ok(ext_hos_extension::ext(self.hos_extension.clone())
+        if self.venues.contains(&from) {
+            return Ok(self.dispatch_sub_account_transfer(
+                sub_account,
+                tla_id,
+                name,
+                from,
+                new_owner,
+                cause,
+            ));
+        }
+        let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
+        let Some(chain) = ft_balance_fanout(&allowlist, &sub_account) else {
+            return Ok(self.dispatch_sub_account_transfer(
+                sub_account,
+                tla_id,
+                name,
+                from,
+                new_owner,
+                cause,
+            ));
+        };
+        Ok(chain.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_TRANSFER_GATE_CB)
+                .on_transfer_balances_checked(
+                    sub_account,
+                    tla_id,
+                    name,
+                    from,
+                    new_owner,
+                    cause,
+                    allowlist,
+                ),
+        ))
+    }
+
+    #[private]
+    #[handle_result]
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_transfer_balances_checked(
+        &mut self,
+        sub_account: AccountId,
+        tla_id: AccountId,
+        name: String,
+        from: AccountId,
+        new_owner: AccountId,
+        cause: RotationCause,
+        allowlist: Vec<AccountId>,
+    ) -> Result<Promise, ContractError> {
+        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
+            Event::TransferBlockedByBalance {
+                full_name: sub_account.to_string(),
+                token,
+                reason,
+            }
+            .emit();
+            return Err(ContractError::SubAccountHoldsTokens);
+        }
+        Ok(self.dispatch_sub_account_transfer(sub_account, tla_id, name, from, new_owner, cause))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_sub_account_transfer(
+        &self,
+        sub_account: AccountId,
+        tla_id: AccountId,
+        name: String,
+        from: AccountId,
+        new_owner: AccountId,
+        cause: RotationCause,
+    ) -> Promise {
+        ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
                 sub_account,
@@ -34,7 +113,7 @@ impl TlaRegistry {
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
                     .on_sub_account_transferred(tla_id, name, from, new_owner, cause),
-            ))
+            )
     }
 
     #[handle_result]
@@ -180,13 +259,19 @@ impl TlaRegistry {
         new_owner: &AccountId,
     ) -> Result<(AccountId, AccountId), ContractError> {
         crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
         validate_name(name)?;
         let key = sub_account_key(tla_id, name);
         if self.reclaim_pending.contains_key(&key) {
             return Err(ContractError::ReclaimInProgress);
         }
-        let owner = self.assert_sellable(&key, tla_id)?;
+        let sub = self
+            .sub_accounts
+            .get(&key)
+            .ok_or(ContractError::SubAccountNotFound)?;
+        if sub.tla_id != *tla_id {
+            return Err(ContractError::SubAccountTlaMismatch);
+        }
+        let owner = sub.owner.clone();
         if env::predecessor_account_id() != owner {
             return Err(ContractError::OnlyOwner);
         }
@@ -198,6 +283,10 @@ impl TlaRegistry {
             .map_err(|_| ContractError::InvalidSubAccountId)?;
         if *new_owner == sub_account {
             return Err(ContractError::TransferToSubAccount);
+        }
+        if !self.venues.contains(&owner) {
+            self.assert_not_paused()?;
+            self.assert_sellable(&key, tla_id)?;
         }
         Ok((sub_account, owner))
     }
@@ -224,15 +313,13 @@ impl TlaRegistry {
         if tla.tla_type == TlaType::Business {
             return Err(ContractError::BusinessSubNotResellable);
         }
-        if tla.status != TlaStatus::Active {
-            return Err(ContractError::SubAccountNotSellable);
-        }
         if !matches!(
             effective_sub_lifecycle(
                 sub,
                 tla,
                 self.fee_config.retraction_notice_ns.0,
                 &self.clock(),
+                self.suspension_expiry(tla_id),
             ),
             LifecycleStatus::Active
         ) {

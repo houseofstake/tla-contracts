@@ -48,7 +48,7 @@ fn ctx_callback(result: near_sdk::PromiseResult) {
 const NEAR_USD_MICRO: u128 = 5_000_000;
 
 fn deploy() -> TlaRegistry {
-    ctx(ADMIN, 0, 0);
+    ctx(ADMIN, 1, 0);
     TlaRegistry::new(
         acc(ADMIN),
         acc(HOSEXT),
@@ -60,7 +60,7 @@ fn deploy() -> TlaRegistry {
 
 fn deploy_priced() -> TlaRegistry {
     let mut c = deploy();
-    ctx(ADMIN, 0, 0);
+    ctx(ADMIN, 1, 0);
     c.admin_set_initial_rate(U128(NEAR_USD_MICRO)).unwrap();
     c
 }
@@ -71,10 +71,10 @@ fn usd_to_near(usd_micro: u128) -> u128 {
 
 fn deploy_with_open_tla() -> TlaRegistry {
     let mut c = deploy_priced();
-    ctx(COUNCIL, 0, 0);
+    ctx(COUNCIL, 1, 0);
     c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
         .unwrap();
-    ctx(ADMIN, 0, 0);
+    ctx(ADMIN, 1, 0);
     c.activate_open_tla(acc(TLA)).unwrap();
     c
 }
@@ -204,7 +204,7 @@ mod tla_admin {
     #[test]
     fn suspend_registered_tla_rejected() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         assert!(matches!(
@@ -275,7 +275,7 @@ mod tla_admin {
     #[test]
     fn register_tla_emits_nep297_event() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         let logs = near_sdk::test_utils::get_logs();
@@ -297,7 +297,7 @@ mod tla_admin {
     #[test]
     fn outsider_cannot_register() {
         let mut c = deploy();
-        ctx(ALICE, 0, 0);
+        ctx(ALICE, 1, 0);
         assert!(matches!(
             c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None),
             Err(ContractError::OnlyCouncil)
@@ -307,7 +307,7 @@ mod tla_admin {
     #[test]
     fn admin_controls_payment_authorities() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.add_payment_authority(acc(BOB)).unwrap();
         assert_eq!(c.get_payment_authorities(), vec![acc(BOB)]);
         c.remove_payment_authority(acc(BOB)).unwrap();
@@ -317,7 +317,7 @@ mod tla_admin {
     #[test]
     fn admin_controls_recovery_authorities() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.add_recovery_authority(acc(BOB)).unwrap();
         assert_eq!(c.get_recovery_authorities(), vec![acc(BOB)]);
         c.remove_recovery_authority(acc(BOB)).unwrap();
@@ -327,7 +327,7 @@ mod tla_admin {
     #[test]
     fn only_the_council_grants_the_recovery_role() {
         let mut c = deploy();
-        ctx(ALICE, 0, 0);
+        ctx(ALICE, 1, 0);
         assert!(matches!(
             c.add_recovery_authority(acc(BOB)),
             Err(ContractError::OnlyCouncil)
@@ -337,7 +337,7 @@ mod tla_admin {
     #[test]
     fn duplicate_registration_rejected() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         assert!(matches!(
             c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None),
             Err(ContractError::TlaAlreadyRegistered)
@@ -347,7 +347,7 @@ mod tla_admin {
     #[test]
     fn business_tla_requires_licensee() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         assert!(matches!(
             c.register_tla(acc(TLA), TlaType::Business, PremiumCategory::Standard, None),
             Err(ContractError::BusinessTlaRequiresLicensee)
@@ -357,7 +357,7 @@ mod tla_admin {
     #[test]
     fn open_tla_rejects_business_activation_endpoint() {
         let mut c = deploy_priced();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         let fee = usd_to_near(
@@ -374,13 +374,38 @@ mod tla_admin {
     #[test]
     fn suspend_blocks_rentals() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.suspend_tla(acc(TLA)).unwrap();
         ctx(ALICE, rent_total(&c, "alice"), 1);
         assert!(matches!(
             c.rent_sub_account(acc(TLA), "alice".to_string(), None),
             Err(ContractError::TlaNotAcceptingRentals)
         ));
+    }
+
+    #[test]
+    fn a_lapsed_suspension_frees_the_tla_without_anyone_unsuspending_it() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 1);
+        c.suspend_tla(acc(TLA)).unwrap();
+        let after = hos_common::MAX_AUTHORITY_HOLD_NS + 1;
+
+        ctx(ADMIN, 1, after);
+        assert!(
+            matches!(
+                c.get_tla(acc(TLA)).unwrap().lifecycle,
+                LifecycleStatus::Active
+            ),
+            "the hold is bounded on purpose, so a lapsed suspension must stop reporting as one"
+        );
+
+        assert!(
+            c.tlas
+                .get(&acc(TLA))
+                .unwrap()
+                .accepting_rentals(c.suspension_expiry(&acc(TLA))),
+            "renting and selling read the same lapse, so they must not disagree about it"
+        );
     }
 }
 
@@ -448,7 +473,7 @@ mod rental {
         let mut c = deploy_with_open_tla();
         let rent_near = rent_near_open(&c, "alice");
         let total = rent_total(&c, "alice");
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
 
         ctx(BOB, total, 1);
@@ -475,7 +500,7 @@ mod rental {
         let mut c = deploy_with_open_tla();
         let rent_near = rent_near_open(&c, "alice");
         let total = rent_total(&c, "alice");
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
 
         ctx(BOB, total, 1);
@@ -505,7 +530,7 @@ mod rental {
         let mut c = deploy_with_open_tla();
         let rent_near = rent_near_open(&c, "alice");
         let total = rent_total(&c, "alice");
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
 
         ctx(BOB, total, 1);
@@ -551,7 +576,7 @@ mod rental {
             Err(ContractError::OnlyPaymentAuthority)
         ));
 
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
         ctx(BOB, creation, 1);
         let _ = c
@@ -984,7 +1009,7 @@ mod recovery {
 
     fn deploy_with_recovery() -> TlaRegistry {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.add_recovery_authority(acc(CAROL)).unwrap();
         c
     }
@@ -1191,7 +1216,7 @@ mod reclaim {
     #[test]
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0), acc(TREASURY), acc(COUNCIL));
     }
 
@@ -1231,7 +1256,7 @@ mod reclaim {
             .reclaim_finalize(acc(TLA), "alice".to_string())
             .expect("reclaim takes the in-progress lock");
         assert!(c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string())
             .unwrap();
         assert!(!c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
@@ -1292,9 +1317,49 @@ mod refunds_and_admin {
     }
 
     #[test]
+    fn a_refund_cannot_be_claimed_twice() {
+        let mut c = deploy();
+        c.add_pending_refund(&acc(ALICE), 500);
+        assert_eq!(c.get_pending_refund(acc(ALICE)).0, 500);
+
+        ctx(ALICE, 0, 1);
+        assert!(c.claim_refund().is_ok());
+        assert_eq!(
+            c.get_pending_refund(acc(ALICE)).0,
+            0,
+            "the entry has to clear before the transfer, or a second call in the same block \
+             pays the same refund again"
+        );
+        assert_eq!(c.total_pending_refunds, 0);
+
+        ctx(ALICE, 0, 1);
+        assert!(matches!(
+            c.claim_refund(),
+            Err(ContractError::NoPendingRefund)
+        ));
+    }
+
+    #[test]
+    fn a_failed_refund_transfer_restores_the_entry() {
+        let mut c = deploy();
+        c.add_pending_refund(&acc(ALICE), 500);
+        ctx(ALICE, 0, 1);
+        assert!(c.claim_refund().is_ok());
+        assert_eq!(c.get_pending_refund(acc(ALICE)).0, 0);
+
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_claim_refund_settled(acc(ALICE), U128(500));
+        assert_eq!(
+            c.get_pending_refund(acc(ALICE)).0,
+            500,
+            "a refund whose transfer failed must remain claimable"
+        );
+    }
+
+    #[test]
     fn withdraw_capped_by_revenue() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.withdraw(U128(1)),
             Err(ContractError::InsufficientRevenue)
@@ -1304,7 +1369,7 @@ mod refunds_and_admin {
     #[test]
     fn pause_blocks_rent() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.pause().unwrap();
         ctx(ALICE, rent_total(&c, "alice"), 1);
         assert!(matches!(
@@ -1316,7 +1381,7 @@ mod refunds_and_admin {
     #[test]
     fn allowlist_roundtrip() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_ft_allowlist(acc("token.testnet")).unwrap();
         assert_eq!(c.get_ft_allowlist(), vec![acc("token.testnet")]);
         c.remove_ft_allowlist(acc("token.testnet")).unwrap();
@@ -1326,14 +1391,14 @@ mod refunds_and_admin {
     #[test]
     fn relisting_a_token_never_exhausts_the_sweep_ceiling() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         let token = acc("usdc.testnet");
         for _ in 0..200 {
-            ctx(ADMIN, 0, 1);
+            ctx(ADMIN, 1, 1);
             c.add_ft_allowlist(token.clone()).unwrap();
             c.remove_ft_allowlist(token.clone()).unwrap();
         }
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_ft_allowlist(token.clone()).unwrap();
         assert_eq!(
             c.get_ft_allowlist(),
@@ -1349,7 +1414,7 @@ mod refunds_and_admin {
     #[test]
     fn fee_config_guards() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         let mut config = c.get_fee_config();
         config.max_rate_move_bps = 10_001;
         assert!(matches!(
@@ -1361,7 +1426,7 @@ mod refunds_and_admin {
     #[test]
     fn rent_tiers_must_not_price_a_short_name_below_a_long_one() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         let mut config = c.get_fee_config();
         config.rent_tier_5_usd_micro = U128(1);
         config.rent_tier_12plus_usd_micro = U128(1_000);
@@ -1377,7 +1442,7 @@ mod business {
 
     fn deploy_with_business_tla() -> TlaRegistry {
         let mut c = deploy_priced();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.register_tla(
             acc(TLA),
             TlaType::Business,
@@ -1410,7 +1475,7 @@ mod business {
 
     fn rent_employee_sub(c: &mut TlaRegistry, name: &str, employee: &str) {
         let creation = c.get_fee_config().account_creation_deposit_yocto.0;
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(CAROL)).unwrap();
         ctx(CAROL, creation, 1);
         let _ = c
@@ -1445,15 +1510,30 @@ mod business {
         ctx("mallory.testnet", 1, 2);
         assert!(matches!(
             c.schedule_retraction(acc(TLA), "staff".to_string()),
-            Err(ContractError::OnlyOwner)
+            Err(ContractError::OnlyLicensee)
         ));
+    }
+
+    #[test]
+    fn an_employee_cannot_schedule_their_own_retraction() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(BOB, 1, 2);
+        assert!(
+            matches!(
+                c.schedule_retraction(acc(TLA), "staff".to_string()),
+                Err(ContractError::OnlyLicensee)
+            ),
+            "scheduling and cancelling must sit with the same party: an employee who could start \
+             the notice period but not stop it can lose the name to a licensee who never looks"
+        );
     }
 
     #[test]
     fn a_business_employee_cannot_redirect_the_licensee_payout() {
         let mut c = deploy_with_business_tla();
         let creation = c.get_fee_config().account_creation_deposit_yocto.0;
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(CAROL)).unwrap();
         ctx(CAROL, creation, 1);
         let _ = c
@@ -1493,10 +1573,10 @@ mod business {
         let default_cap = c.get_fee_config().business_max_subs;
         assert_eq!(c.get_business_sub_cap(acc(TLA)), default_cap);
         assert_eq!(c.get_business_sub_count(acc(TLA)), 0);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.set_business_sub_cap(acc(TLA), Some(7)).unwrap();
         assert_eq!(c.get_business_sub_cap(acc(TLA)), 7);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.set_business_sub_cap(acc(TLA), None).unwrap();
         assert_eq!(
             c.get_business_sub_cap(acc(TLA)),
@@ -1530,7 +1610,7 @@ mod business {
     #[test]
     fn business_cap_enforced() {
         let mut c = deploy_with_business_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.set_business_sub_cap(acc(TLA), Some(0)).unwrap();
         let total = usd_to_near(c.get_fee_config().sub_fee_per_account_usd_micro.0)
             + c.get_fee_config().account_creation_deposit_yocto.0;
@@ -1599,9 +1679,9 @@ mod price_oracle {
 
     fn deploy_initialized() -> TlaRegistry {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.admin_set_initial_rate(U128(dollars(5))).unwrap();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.set_price_oracle(acc(KEEPER)).unwrap();
         c
     }
@@ -1626,7 +1706,7 @@ mod price_oracle {
     #[test]
     fn keeper_cannot_bootstrap_uninitialized_rate() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.set_price_oracle(acc(KEEPER)).unwrap();
         ctx(KEEPER, 0, 1);
         assert!(matches!(
@@ -1638,7 +1718,7 @@ mod price_oracle {
     #[test]
     fn initial_rate_rejected_outside_absolute_bounds() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.admin_set_initial_rate(U128(dollars(1_000))),
             Err(ContractError::RateOutOfBounds)
@@ -1648,7 +1728,7 @@ mod price_oracle {
     #[test]
     fn initial_rate_cannot_be_set_twice() {
         let mut c = deploy_initialized();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.admin_set_initial_rate(U128(dollars(6))),
             Err(ContractError::RateAlreadyInitialized)
@@ -1678,7 +1758,7 @@ mod price_oracle {
     #[test]
     fn non_oracle_cannot_set_rate() {
         let mut c = deploy_initialized();
-        ctx(ADMIN, 0, 1 + COOLDOWN);
+        ctx(ADMIN, 1, 1 + COOLDOWN);
         assert!(matches!(
             c.set_near_usd_rate(U128(dollars(5))),
             Err(ContractError::OnlyPriceOracle)
@@ -1732,7 +1812,7 @@ mod price_oracle {
     #[test]
     fn a_stale_rate_stops_pricing() {
         let mut c = deploy_initialized();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         let max_age = c.get_fee_config().max_rate_age_ns.0;
@@ -1751,7 +1831,7 @@ mod price_oracle {
     #[test]
     fn pricing_rejects_a_stored_rate_outside_the_configured_band() {
         let mut c = deploy_initialized();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         c.fee_config.max_near_usd_rate_micro = U128(dollars(2));
@@ -1801,7 +1881,7 @@ mod price_oracle {
         let mut config = c.get_fee_config();
         config.min_near_usd_rate_micro = U128(dollars(1));
         config.max_near_usd_rate_micro = U128(dollars(2));
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(
             matches!(
                 c.update_fee_config(config),
@@ -1818,7 +1898,7 @@ mod price_oracle {
 
         let mut zero_cap = base.clone();
         zero_cap.business_max_subs = 0;
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.update_fee_config(zero_cap),
             Err(ContractError::InvalidBusinessCap)
@@ -1826,7 +1906,7 @@ mod price_oracle {
 
         let mut short_notice = base.clone();
         short_notice.retraction_notice_ns = U64(1);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.update_fee_config(short_notice),
             Err(ContractError::RetractionNoticeTooShort)
@@ -1834,7 +1914,7 @@ mod price_oracle {
 
         let mut age_below_cooldown = base.clone();
         age_below_cooldown.max_rate_age_ns = U64(1);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.update_fee_config(age_below_cooldown),
             Err(ContractError::InvalidRateBounds)
@@ -1842,7 +1922,7 @@ mod price_oracle {
 
         let mut no_cooldown = base.clone();
         no_cooldown.rate_update_cooldown_ns = U64(0);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.update_fee_config(no_cooldown),
             Err(ContractError::InvalidRateBounds)
@@ -1850,7 +1930,7 @@ mod price_oracle {
 
         let mut huge_fee = base;
         huge_fee.rent_tier_5_usd_micro = U128(crate::pricing::MAX_USD_MICRO + 1);
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         assert!(matches!(
             c.update_fee_config(huge_fee),
             Err(ContractError::FeeExceedsCap)
@@ -1860,7 +1940,7 @@ mod price_oracle {
     #[test]
     fn config_rejects_inverted_rate_bounds() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         let mut config = c.get_fee_config();
         config.min_near_usd_rate_micro = U128(dollars(50));
         config.max_near_usd_rate_micro = U128(dollars(10));
@@ -1873,7 +1953,7 @@ mod price_oracle {
     #[test]
     fn config_rejects_out_of_range_bps() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         let mut config = c.get_fee_config();
         config.max_rate_move_bps = 10_001;
         assert!(matches!(
@@ -1915,7 +1995,7 @@ mod price_oracle {
     #[test]
     fn charge_fails_closed_when_rate_uninitialized() {
         let mut c = deploy();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
             .unwrap();
         c.activate_open_tla(acc(TLA)).unwrap();
@@ -1935,7 +2015,7 @@ mod council_split {
     use super::*;
 
     fn deploy_split() -> TlaRegistry {
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         TlaRegistry::new(
             acc(ADMIN),
             acc(HOSEXT),
@@ -1948,7 +2028,7 @@ mod council_split {
     #[test]
     fn an_operations_admin_cannot_escalate_itself() {
         let mut c = deploy_split();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         assert!(matches!(
             c.add_admin(acc(BOB)),
             Err(ContractError::OnlyCouncil)
@@ -1958,7 +2038,7 @@ mod council_split {
     #[test]
     fn an_operations_admin_cannot_move_the_fee_model_or_release_revenue() {
         let mut c = deploy_split();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         let config = c.get_fee_config();
         assert!(matches!(
             c.update_fee_config(config),
@@ -1973,7 +2053,7 @@ mod council_split {
     #[test]
     fn an_operations_admin_cannot_grant_authorities_or_open_a_tla() {
         let mut c = deploy_split();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         assert!(matches!(
             c.add_payment_authority(acc(BOB)),
             Err(ContractError::OnlyCouncil)
@@ -1991,7 +2071,7 @@ mod council_split {
     #[test]
     fn the_council_holds_those_powers() {
         let mut c = deploy_split();
-        ctx(OTHER_COUNCIL, 0, 0);
+        ctx(OTHER_COUNCIL, 1, 0);
         c.add_admin(acc(BOB)).unwrap();
         c.add_payment_authority(acc(BOB)).unwrap();
         c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
@@ -2001,7 +2081,7 @@ mod council_split {
     #[test]
     fn operations_keeps_pause_and_unpause_so_an_incident_needs_no_multisig() {
         let mut c = deploy_split();
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         c.pause().unwrap();
         assert!(c.is_paused());
         c.unpause().unwrap();
@@ -2011,8 +2091,50 @@ mod council_split {
     #[test]
     fn the_council_cannot_run_operations() {
         let mut c = deploy_split();
-        ctx(OTHER_COUNCIL, 0, 0);
+        ctx(OTHER_COUNCIL, 1, 0);
         assert!(matches!(c.pause(), Err(ContractError::OnlyAdmin)));
+    }
+
+    #[test]
+    fn only_the_council_removes_an_admin_and_never_the_last_one() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+
+        ctx(ADMIN, 1, 0);
+        assert!(
+            matches!(c.remove_admin(acc(BOB)), Err(ContractError::OnlyCouncil)),
+            "an admin who can strip the admin set can lock the council out of its own operations"
+        );
+
+        ctx(OTHER_COUNCIL, 1, 0);
+        c.remove_admin(acc(BOB)).unwrap();
+        assert!(matches!(
+            c.remove_admin(acc(ADMIN)),
+            Err(ContractError::CannotRemoveLastAdmin)
+        ));
+        assert_eq!(c.get_admins(), vec![acc(ADMIN)]);
+    }
+
+    #[test]
+    fn only_an_admin_unsuspends_a_tla() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 1);
+        c.suspend_tla(acc(TLA)).unwrap();
+
+        ctx("mallory.testnet", 0, 1);
+        assert!(matches!(
+            c.unsuspend_tla(acc(TLA)),
+            Err(ContractError::OnlyAdmin)
+        ));
+
+        ctx(ADMIN, 1, 1);
+        c.unsuspend_tla(acc(TLA)).unwrap();
+        assert!(matches!(
+            c.unsuspend_tla(acc(TLA)),
+            Err(ContractError::TlaNotSuspended)
+        ));
+        assert_eq!(c.get_suspension_expiry(acc(TLA)).0, 0);
     }
 }
 
@@ -2020,7 +2142,7 @@ mod marketplace_pause {
     use super::*;
 
     fn pause_market(c: &mut TlaRegistry) {
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.pause_marketplace().unwrap();
     }
 
@@ -2067,7 +2189,7 @@ mod marketplace_pause {
     fn the_registry_pause_stops_every_path_including_the_exit() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.pause().unwrap();
         ctx(ALICE, 1, 3);
         assert!(matches!(
@@ -2089,7 +2211,7 @@ mod marketplace_pause {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         pause_market(&mut c);
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.unpause_marketplace().unwrap();
         ctx(ALICE, 1, 2);
         assert!(c
@@ -2122,7 +2244,7 @@ mod a_pause_never_costs_a_user_their_name {
     const WEEK_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
     fn refresh_rate(c: &mut TlaRegistry, at: u64) {
-        ctx(ADMIN, 0, at);
+        ctx(ADMIN, 1, at);
         c.set_near_usd_rate(U128(NEAR_USD_MICRO)).unwrap();
     }
 
@@ -2134,7 +2256,7 @@ mod a_pause_never_costs_a_user_their_name {
             .unwrap()
             .expires_at
             .0;
-        ctx(ADMIN, 0, expires + GRACE_NS);
+        ctx(ADMIN, 1, expires + GRACE_NS);
         c.pause().unwrap();
         (c, expires)
     }
@@ -2159,7 +2281,7 @@ mod a_pause_never_costs_a_user_their_name {
     fn a_holder_gets_a_fresh_grace_window_after_the_pause_lifts() {
         let (mut c, expires) = expired_and_paused("alice");
         let long_after = expires + GRACE_NS + 2;
-        ctx(ADMIN, 0, long_after);
+        ctx(ADMIN, 1, long_after);
         c.unpause().unwrap();
         ctx(ALICE, 0, long_after + 1);
         assert!(
@@ -2176,7 +2298,7 @@ mod a_pause_never_costs_a_user_their_name {
     #[test]
     fn a_pause_lapses_by_itself_at_the_ceiling() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.pause().unwrap();
         assert!(c.is_paused());
         ctx(ALICE, 0, 1 + WEEK_NS + 1);
@@ -2189,7 +2311,7 @@ mod a_pause_never_costs_a_user_their_name {
     #[test]
     fn a_suspension_lapses_by_itself_at_the_ceiling() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.suspend_tla(acc(TLA)).unwrap();
         ctx(BOB, rent_total(&c, "bob"), 2);
         assert!(matches!(
@@ -2219,7 +2341,7 @@ mod a_pause_never_traps_a_user {
             .unwrap()
             .rent_yocto
             .0;
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.pause().unwrap();
         ctx(ALICE, rent, 2);
         assert!(
@@ -2237,7 +2359,7 @@ mod a_pause_never_traps_a_user {
             .unwrap()
             .expires_at
             .0;
-        ctx(ADMIN, 0, 2);
+        ctx(ADMIN, 1, 2);
         c.pause().unwrap();
         ctx(ALICE, 1, expires + GRACE_NS + 1);
         assert!(
@@ -2251,7 +2373,7 @@ mod a_pause_never_traps_a_user {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         let token = acc("usdc.testnet");
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_ft_allowlist(token.clone()).unwrap();
         c.remove_ft_allowlist(token.clone()).unwrap();
         let expires = c
@@ -2274,7 +2396,7 @@ mod a_pause_never_traps_a_user {
     #[test]
     fn a_pause_still_stops_new_rentals() {
         let mut c = deploy_with_open_tla();
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.pause().unwrap();
         ctx(BOB, rent_total(&c, "bob"), 1);
         assert!(matches!(
@@ -2478,7 +2600,7 @@ mod paged_views {
             .unwrap()
             .rent_yocto
             .0;
-        ctx(ADMIN, 0, 1);
+        ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
         ctx(BOB, creation, 1);
         let _ = c
@@ -2921,6 +3043,47 @@ mod keyless_upgrade {
     }
 
     #[test]
+    fn releasing_revenue_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.withdraw(U128(1)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn granting_the_recovery_role_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.add_recovery_authority(acc(BOB)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn adding_an_admin_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.add_admin(acc(BOB)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn changing_fees_needs_a_full_access_signature() {
+        let mut c = deploy();
+        let config = c.get_fee_config();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.update_fee_config(config),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
     fn sealing_the_registry_needs_a_full_access_signature() {
         let mut c = deploy();
         ctx(COUNCIL, 0, 0);
@@ -2933,7 +3096,7 @@ mod keyless_upgrade {
     #[test]
     #[should_panic(expected = "council must not be the registry")]
     fn init_rejects_a_council_that_is_the_registry_itself() {
-        ctx(ADMIN, 0, 0);
+        ctx(ADMIN, 1, 0);
         let _ = TlaRegistry::new(
             acc(ADMIN),
             acc(HOSEXT),

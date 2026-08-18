@@ -1,4 +1,5 @@
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
+use crate::admin::MAX_ALLOWLIST_SIZE;
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -11,7 +12,12 @@ use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
 const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
-const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
+const BALANCES_CB_TOTAL_TGAS: u64 = 80;
+const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(BALANCES_CB_TOTAL_TGAS);
+const _: () = assert!(
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + BALANCES_CB_TOTAL_TGAS + 20 <= 300,
+    "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every reclaim"
+);
 
 pub(crate) const SWEEP_ATTACHED_REQUIRED: NearToken =
     NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO + 1);
@@ -188,6 +194,7 @@ impl TlaRegistry {
                 tla,
                 self.fee_config.retraction_notice_ns.0,
                 &self.clock(),
+                self.suspension_expiry(tla_id),
             ),
             LifecycleStatus::Reclaimable
         ) {

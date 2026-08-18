@@ -24,7 +24,7 @@ const DEPOSIT_GATE_CB_TGAS: u64 = 180;
 const GAS_FOR_DEPOSIT_GATE_CB: Gas = Gas::from_tgas(DEPOSIT_GATE_CB_TGAS);
 const _: () = assert!(
     MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + DEPOSIT_GATE_CB_TGAS + 20 <= 300,
-    "the deposit gate fans out across the whole ft allowlist before it can dispatch, so an allowlist wider than one 300 Tgas call can fund would break every deposit"
+    "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every deposit"
 );
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -124,26 +124,62 @@ impl TlaRegistry {
         let (tla_id, name, from, sub_account) =
             self.open_nft_transfer(&receiver_id, &token_id, approval_id)?;
         let cause = self.rotation_for_receiver(&receiver_id);
-        Ok(ext_hos_extension::ext(self.hos_extension.clone())
+        let rotation = NftRotation {
+            tla_id,
+            name,
+            from: from.clone(),
+            to: receiver_id,
+            memo,
+            cause,
+        };
+        if self.venues.contains(&from) {
+            return Ok(self.dispatch_rotation(sub_account, rotation));
+        }
+        let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
+        let Some(chain) = ft_balance_fanout(&allowlist, &sub_account) else {
+            return Ok(self.dispatch_rotation(sub_account, rotation));
+        };
+        Ok(chain.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_DEPOSIT_GATE_CB)
+                .nft_on_transfer_balances_checked(sub_account, rotation, allowlist),
+        ))
+    }
+
+    #[private]
+    #[handle_result]
+    pub fn nft_on_transfer_balances_checked(
+        &mut self,
+        sub_account: AccountId,
+        rotation: NftRotation,
+        allowlist: Vec<AccountId>,
+    ) -> Result<Promise, ContractError> {
+        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
+            Event::TransferBlockedByBalance {
+                full_name: sub_account.to_string(),
+                token,
+                reason,
+            }
+            .emit();
+            return Err(ContractError::SubAccountHoldsTokens);
+        }
+        Ok(self.dispatch_rotation(sub_account, rotation))
+    }
+
+    fn dispatch_rotation(&self, sub_account: AccountId, rotation: NftRotation) -> Promise {
+        ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_FORCE_TRANSFER)
             .force_transfer(
                 sub_account,
-                Some(receiver_id.clone()),
-                cause,
-                Some(from.clone()),
+                Some(rotation.to.clone()),
+                rotation.cause,
+                Some(rotation.from.clone()),
             )
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
-                    .nft_on_rotation_resolved(NftRotation {
-                        tla_id,
-                        name,
-                        from,
-                        to: receiver_id,
-                        memo,
-                        cause,
-                    }),
-            ))
+                    .nft_on_rotation_resolved(rotation),
+            )
     }
 
     #[handle_result]

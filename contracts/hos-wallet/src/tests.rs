@@ -189,15 +189,101 @@ fn the_authority_cannot_add_an_extension_while_the_lease_runs() {
 }
 
 fn install_and_grant(c: &mut TenantWallet, cap: NearToken, receivers: &[&str]) {
+    install_and_grant_tokens(c, cap, receivers, &[]);
+}
+
+fn install_and_grant_tokens(
+    c: &mut TenantWallet,
+    cap: NearToken,
+    receivers: &[&str],
+    tokens: &[(&str, u128)],
+) {
     ctx(OWNER, 1, now_ns());
     c.w_execute_extension(request([add_co_owner(BUYER)]));
+    grant_tokens(c, cap, receivers, tokens);
+}
+
+fn grant_tokens(c: &mut TenantWallet, cap: NearToken, receivers: &[&str], tokens: &[(&str, u128)]) {
+    grant_full(c, cap, receivers, tokens, &[]);
+}
+
+fn grant_items(c: &mut TenantWallet, receivers: &[&str], items: &[(&str, &[&str])]) {
+    grant_full(c, NearToken::ZERO, receivers, &[], items);
+}
+
+fn install_and_grant_items(c: &mut TenantWallet, receivers: &[&str], items: &[(&str, &[&str])]) {
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    grant_items(c, receivers, items);
+}
+
+fn grant_full(
+    c: &mut TenantWallet,
+    cap: NearToken,
+    receivers: &[&str],
+    tokens: &[(&str, u128)],
+    items: &[(&str, &[&str])],
+) {
     ctx(OWNER, 1, now_ns());
     c.hos_grant_spend(
         acc(BUYER),
         receivers.iter().map(|r| acc(r)).collect(),
         U128(cap.as_yoctonear()),
+        tokens
+            .iter()
+            .map(|(token, budget)| TokenAllowance {
+                token: acc(token),
+                budget: U128(*budget),
+            })
+            .collect(),
+        items
+            .iter()
+            .map(|(collection, token_ids)| ItemAllowance {
+                collection: acc(collection),
+                token_ids: token_ids.iter().map(|id| (*id).to_string()).collect(),
+            })
+            .collect(),
         U64(now_ns() + HOUR_NS),
     );
+}
+
+fn nft_transfer(collection: &str, to: &str, token_id: &str) -> NearPromise {
+    NearPromise::new(acc(collection)).function_call(
+        FunctionCall::name("nft_transfer")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": to,
+                "token_id": token_id,
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    )
+}
+
+fn ft_transfer(token: &str, to: &str, amount: u128) -> NearPromise {
+    NearPromise::new(acc(token)).function_call(
+        FunctionCall::name("ft_transfer")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": to,
+                "amount": U128(amount),
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    )
+}
+
+fn legacy_grants(grants: BTreeMap<AccountId, SpendGrant>) -> BTreeMap<AccountId, LegacySpendGrant> {
+    grants
+        .into_iter()
+        .map(|(extension, grant)| {
+            (
+                extension,
+                LegacySpendGrant {
+                    receivers: grant.receivers,
+                    budget_yocto: grant.budget_yocto,
+                    spent_yocto: grant.spent_yocto,
+                    expires_at: grant.expires_at,
+                },
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -403,20 +489,474 @@ fn an_extension_cannot_grant_itself_spend() {
         acc(BUYER),
         vec![acc("attacker.testnet")],
         U128(NearToken::from_near(5).as_yoctonear()),
+        vec![],
+        vec![],
         U64(now_ns() + YEAR_NS),
     );
 }
 
 #[test]
-#[should_panic(expected = "a spend grant covers plain transfers only")]
-fn a_grantee_cannot_reach_a_token_contract_through_a_function_call() {
+#[should_panic(expected = "token is not in the spend grant")]
+fn a_grantee_cannot_reach_a_token_the_grant_never_named() {
     let mut c = deploy();
-    install_and_grant(&mut c, NearToken::from_millinear(1), &["usdc.testnet"]);
-    ctx(BUYER, 1, now_ns());
-    let drain = NearPromise::new(acc("usdc.testnet")).function_call(
-        FunctionCall::name("ft_transfer").attach_deposit(NearToken::from_yoctonear(1)),
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::from_millinear(1),
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
     );
-    c.w_execute_extension(Request::new().external([drain]));
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdt.testnet",
+        "carol.testnet",
+        1,
+    )]));
+}
+
+#[test]
+fn a_grantee_can_move_a_granted_token_within_its_budget() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdc.testnet",
+        "carol.testnet",
+        40,
+    )]));
+    let grant = c.hos_spend_grant(acc(BUYER)).unwrap();
+    assert_eq!(
+        grant.tokens.get(&acc("usdc.testnet")).unwrap().spent.0,
+        40,
+        "a token spend must be metered in that token's own units"
+    );
+    assert_eq!(
+        grant.spent_yocto.0, 0,
+        "the yocto a token demands as proof of signature is not spend"
+    );
+}
+
+#[test]
+#[should_panic(expected = "spend exceeds the granted cap for this token")]
+fn a_token_budget_bounds_the_amount_inside_the_arguments() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdc.testnet",
+        "carol.testnet",
+        101,
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "spend exceeds the granted cap for this token")]
+fn token_spending_accumulates_across_calls() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    for _ in 0..2 {
+        ctx(BUYER, 1, now_ns());
+        c.w_execute_extension(Request::new().external([ft_transfer(
+            "usdc.testnet",
+            "carol.testnet",
+            60,
+        )]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "receiver is not in the spend grant")]
+fn a_token_call_cannot_pay_an_account_outside_the_grant() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdc.testnet",
+        "attacker.testnet",
+        1,
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "ft_transfer and nft_transfer only")]
+fn a_grantee_cannot_call_ft_transfer_call() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("usdc.testnet")).function_call(
+        FunctionCall::name("ft_transfer_call")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": "carol.testnet",
+                "amount": U128(1),
+                "msg": "",
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "arguments are not readable")]
+fn a_token_call_carrying_an_unreadable_argument_is_refused() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("usdc.testnet")).function_call(
+        FunctionCall::name("ft_transfer")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": "carol.testnet",
+                "amount": U128(1),
+                "surprise": "unread by this contract",
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "attaches exactly one yocto")]
+fn a_token_call_cannot_carry_a_deposit_of_its_own() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("usdc.testnet")).function_call(
+        FunctionCall::name("ft_transfer")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": "carol.testnet",
+                "amount": U128(1),
+            }))
+            .attach_deposit(NearToken::from_near(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "may carry no other action")]
+fn a_token_call_cannot_smuggle_a_transfer_alongside_it() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    let call = ft_transfer("usdc.testnet", "carol.testnet", 1).transfer(NearToken::from_near(1));
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "never deploying code")]
+fn a_grantee_cannot_deploy_code_through_a_state_init() {
+    use defuse_wallet::StateInitV1;
+
+    let mut c = deploy();
+    install_and_grant(&mut c, NearToken::from_near(1), &["carol.testnet"]);
+    ctx(BUYER, 1, now_ns());
+    let deployment = NearPromise::new(acc("carol.testnet")).deterministic_state_init(
+        StateInitV1::code(acc("global.testnet")),
+        NearToken::from_millinear(1),
+    );
+    c.w_execute_extension(Request::new().external([deployment]));
+}
+
+#[test]
+fn topping_up_a_grant_does_not_un_spend_the_meter() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdc.testnet",
+        "carol.testnet",
+        60,
+    )]));
+    grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 200)],
+    );
+    let grant = c.hos_spend_grant(acc(BUYER)).unwrap();
+    assert_eq!(
+        grant.tokens.get(&acc("usdc.testnet")).unwrap().spent.0,
+        60,
+        "raising a ceiling must not hand the agent back what it already spent"
+    );
+}
+
+#[test]
+fn revoking_a_grant_resets_the_meter() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(
+        "usdc.testnet",
+        "carol.testnet",
+        60,
+    )]));
+    ctx(OWNER, 1, now_ns());
+    c.hos_revoke_spend(acc(BUYER));
+    grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 100)],
+    );
+    let grant = c.hos_spend_grant(acc(BUYER)).unwrap();
+    assert_eq!(
+        grant.tokens.get(&acc("usdc.testnet")).unwrap().spent.0,
+        0,
+        "revoking is the documented way to clear the meter"
+    );
+}
+
+#[test]
+fn a_grantee_can_move_an_item_the_grant_fenced() {
+    let mut c = deploy();
+    install_and_grant_items(
+        &mut c,
+        &["carol.testnet"],
+        &[("art.testnet", &["1041", "1055"])],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        "art.testnet",
+        "carol.testnet",
+        "1041",
+    )]));
+}
+
+#[test]
+fn an_item_fence_is_identity_not_a_count() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    for _ in 0..3 {
+        ctx(BUYER, 1, now_ns());
+        c.w_execute_extension(Request::new().external([nft_transfer(
+            "art.testnet",
+            "carol.testnet",
+            "1041",
+        )]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "item is not in the spend grant")]
+fn a_grantee_cannot_move_an_item_outside_the_fence() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        "art.testnet",
+        "carol.testnet",
+        "9000",
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "collection is not in the spend grant")]
+fn a_grantee_cannot_reach_a_collection_the_grant_never_named() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        "other.testnet",
+        "carol.testnet",
+        "1041",
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "cannot move this account's own names")]
+fn a_grant_cannot_fence_the_registry_at_all() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    grant_items(
+        &mut c,
+        &["carol.testnet"],
+        &[(REGISTRY, &["bob.tla.testnet"])],
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot move this account's own names")]
+fn a_grant_cannot_budget_the_registry_as_a_token_either() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[(REGISTRY, 1_000)],
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot move this account's own names")]
+fn the_registry_is_refused_at_spend_time_on_the_token_path_too() {
+    let mut c = deploy();
+    install_and_grant_tokens(
+        &mut c,
+        NearToken::ZERO,
+        &["carol.testnet"],
+        &[("usdc.testnet", 1_000)],
+    );
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([ft_transfer(REGISTRY, "carol.testnet", 1)]));
+}
+
+#[test]
+#[should_panic(expected = "cannot move this account's own names")]
+fn a_grantee_cannot_move_a_name_even_if_the_registry_slipped_into_a_grant() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        REGISTRY,
+        "carol.testnet",
+        "bob.tla.testnet",
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "cannot spend an approval")]
+fn a_granted_item_transfer_cannot_spend_an_approval() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("art.testnet")).function_call(
+        FunctionCall::name("nft_transfer")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": "carol.testnet",
+                "token_id": "1041",
+                "approval_id": 7u64,
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "receiver is not in the spend grant")]
+fn an_item_transfer_cannot_pay_an_account_outside_the_grant() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        "art.testnet",
+        "attacker.testnet",
+        "1041",
+    )]));
+}
+
+#[test]
+#[should_panic(expected = "ft_transfer and nft_transfer only")]
+fn a_grantee_cannot_hand_out_an_approval() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("art.testnet")).function_call(
+        FunctionCall::name("nft_approve")
+            .args_json(near_sdk::serde_json::json!({
+                "token_id": "1041",
+                "account_id": "attacker.testnet",
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "ft_transfer and nft_transfer only")]
+fn a_grantee_cannot_call_nft_transfer_call() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(BUYER, 1, now_ns());
+    let call = NearPromise::new(acc("art.testnet")).function_call(
+        FunctionCall::name("nft_transfer_call")
+            .args_json(near_sdk::serde_json::json!({
+                "receiver_id": "carol.testnet",
+                "token_id": "1041",
+                "msg": "",
+            }))
+            .attach_deposit(NearToken::from_yoctonear(1)),
+    );
+    c.w_execute_extension(Request::new().external([call]));
+}
+
+#[test]
+#[should_panic(expected = "an item grant needs at least one token id")]
+fn an_empty_item_list_grants_nothing_and_says_so() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(request([add_co_owner(BUYER)]));
+    grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &[])]);
+}
+
+#[test]
+fn the_owner_keeps_the_item_path_a_grantee_is_fenced_on() {
+    let mut c = deploy();
+    install_and_grant_items(&mut c, &["carol.testnet"], &[("art.testnet", &["1041"])]);
+    ctx(OWNER, 1, now_ns());
+    c.w_execute_extension(Request::new().external([nft_transfer(
+        REGISTRY,
+        "carol.testnet",
+        "bob.tla.testnet",
+    )]));
+}
+
+#[test]
+fn agent_status_reports_the_reserve_floor() {
+    let c = deploy();
+    let status = c.hos_agent_status(acc(BUYER));
+    assert_eq!(status.reserve_yocto.0, c.reserve());
+    assert!(status.reserve_yocto.0 > 0);
 }
 
 #[test]
@@ -849,6 +1389,8 @@ fn resolve_auth_refuses_an_extension_that_only_holds_a_spend_grant() {
         acc(BUYER),
         vec![acc(PAYOUT)],
         U128(1),
+        vec![],
+        vec![],
         U64(now_ns() + 1_000_000_000),
     );
     let _ = c.w_resolve_auth(vec![], auth_blob_for("login", BUYER));
@@ -1063,7 +1605,7 @@ fn legacy_state(c: TenantWallet) -> LegacyTenantWallet {
         state: OperatingState::Active,
         frozen: FreezeState::Unfrozen,
         authority_freeze_until_ns: 0,
-        spend_grants: c.spend_grants,
+        spend_grants: legacy_grants(c.spend_grants),
         revert_to: None,
         revert_until_ns: 0,
         rotation_seq: c.rotation_seq,
@@ -1533,7 +2075,7 @@ mod sharded_item {
             state: OperatingState::Active,
             frozen: FreezeState::Unfrozen,
             authority_freeze_until_ns: 0,
-            spend_grants: c.spend_grants,
+            spend_grants: legacy_grants(c.spend_grants),
             revert_to: c.revert_to,
             revert_until_ns: c.revert_until_ns,
             rotation_seq: carried,

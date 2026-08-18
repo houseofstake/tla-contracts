@@ -474,6 +474,8 @@ async fn a_co_owner_can_be_granted_and_can_act() -> Result<()> {
             "extension": carol.id(),
             "receivers": [t.fleet.bob.id()],
             "budget_yocto": "1000000000000000000000",
+            "tokens": [],
+            "items": [],
             "expires_at": lease_until_ns().to_string(),
         }))
         .deposit(NearToken::from_yoctonear(1))
@@ -495,6 +497,99 @@ async fn a_co_owner_can_be_granted_and_can_act() -> Result<()> {
     assert!(acted.is_success(), "the co-owner could not act: {acted:#?}");
 
     println!("CO-OWNER     : granted by AccountId, acted through w_execute_extension");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_granted_agent_moves_tokens_up_to_its_budget_and_no_further() -> Result<()> {
+    let t = tenant().await?;
+    let ft = deploy_ft(&t.fleet).await?;
+    let agent = t
+        .fleet
+        .relay
+        .create_subaccount("agent")
+        .initial_balance(NearToken::from_near(3))
+        .transact()
+        .await?
+        .into_result()?;
+
+    ft.call("mint")
+        .args_json(json!({ "account_id": t.id, "amount": U128(1_000) }))
+        .transact()
+        .await?
+        .into_result()?;
+    ft_register(&ft, t.fleet.bob.id()).await?;
+
+    t.fleet
+        .bob
+        .call(&t.id, "w_execute_extension")
+        .args_json(json!({ "request": {
+            "internal": [{ "op": "add_extension", "payload": { "account_id": agent.id() } }]
+        }}))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(40))
+        .transact()
+        .await?
+        .into_result()?;
+
+    t.fleet
+        .bob
+        .call(&t.id, "hos_grant_spend")
+        .args_json(json!({
+            "extension": agent.id(),
+            "receivers": [t.fleet.bob.id()],
+            "budget_yocto": "0",
+            "tokens": [{ "token": ft.id(), "budget": U128(500) }],
+            "items": [],
+            "expires_at": lease_until_ns().to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(40))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let pay = |amount: u128| {
+        json!({ "request": Request::new().external([invoke(
+            ft.id(),
+            "ft_transfer",
+            json!({ "receiver_id": t.fleet.bob.id(), "amount": U128(amount) }),
+            SdkGas::from_tgas(15),
+            ONE_YOCTO,
+        )]) })
+    };
+
+    let within = agent
+        .call(&t.id, "w_execute_extension")
+        .args_json(pay(400))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(80))
+        .transact()
+        .await?;
+    assert!(
+        within.is_success(),
+        "an agent must be able to pay in tokens: {within:#?}"
+    );
+    assert_eq!(ft_balance(&ft, t.fleet.bob.id()).await?, 400);
+
+    let over = agent
+        .call(&t.id, "w_execute_extension")
+        .args_json(pay(200))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(WsGas::from_tgas(80))
+        .transact()
+        .await?;
+    assert!(
+        over.is_failure(),
+        "the token budget must bound the amount inside the arguments: {over:#?}"
+    );
+    assert_eq!(
+        ft_balance(&ft, t.fleet.bob.id()).await?,
+        400,
+        "a refused spend must move nothing"
+    );
+
+    println!("AGENT TOKENS : 400 of a 500 budget spent, the next 200 refused");
     Ok(())
 }
 

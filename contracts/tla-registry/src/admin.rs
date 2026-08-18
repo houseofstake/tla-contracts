@@ -13,6 +13,7 @@ const MIN_RETRACTION_NOTICE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 #[near]
 impl TlaRegistry {
     #[handle_result]
+    #[payable]
     pub fn register_tla(
         &mut self,
         tla_id: AccountId,
@@ -20,6 +21,7 @@ impl TlaRegistry {
         premium_category: PremiumCategory,
         licensee: Option<AccountId>,
     ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if self.tlas.contains_key(&tla_id) {
             return Err(ContractError::TlaAlreadyRegistered);
@@ -93,7 +95,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn add_admin(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if !self.admins.insert(account_id.clone()) {
             return Ok(());
@@ -107,7 +111,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn remove_admin(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if self.admins.len() <= 1 {
             return Err(ContractError::CannotRemoveLastAdmin);
@@ -124,7 +130,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn add_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if !self.payment_authorities.insert(account_id.clone()) {
             return Ok(());
@@ -138,7 +146,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn remove_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if !self.payment_authorities.remove(&account_id) {
             return Ok(());
@@ -190,7 +200,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn add_recovery_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if !self.recovery_authorities.insert(account_id.clone()) {
             return Ok(());
@@ -204,10 +216,12 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn remove_recovery_authority(
         &mut self,
         account_id: AccountId,
     ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if !self.recovery_authorities.remove(&account_id) {
             return Ok(());
@@ -221,7 +235,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn update_fee_config(&mut self, config: FeeConfig) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         if config.rent_tier_5_usd_micro.0 == 0
             && config.rent_tier_8_usd_micro.0 == 0
@@ -288,7 +304,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn withdraw(&mut self, amount: U128) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         let recipient = self.treasury.clone();
         let amount_yocto = amount.0;

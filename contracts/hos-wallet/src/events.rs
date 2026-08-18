@@ -19,6 +19,21 @@ pub enum Event {
     #[event_version("1.0.0")]
     SpendRevoked { extension: AccountId },
     #[event_version("1.0.0")]
+    SpendCharged {
+        extension: AccountId,
+        token: Option<AccountId>,
+        receiver: AccountId,
+        amount: U128,
+        spent: U128,
+    },
+    #[event_version("1.0.0")]
+    ItemSpent {
+        extension: AccountId,
+        collection: AccountId,
+        token_id: String,
+        receiver: AccountId,
+    },
+    #[event_version("1.0.0")]
     SweptNear {
         payout_account: AccountId,
         amount: U128,

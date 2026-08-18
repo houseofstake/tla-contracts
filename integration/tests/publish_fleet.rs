@@ -106,7 +106,7 @@ async fn publish_and_migrate_the_fleet() -> Result<()> {
 
         council
             .call(&deployer_id, "gd_deploy")
-            .args_json(json!({ "code": code }))
+            .args_json(json!({ "code": common::code_arg(&code) }))
             .deposit(cost)
             .max_gas()
             .transact()

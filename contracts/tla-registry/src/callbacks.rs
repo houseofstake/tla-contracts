@@ -110,8 +110,9 @@ impl TlaRegistry {
             settlement.attached_yocto.0,
             settlement.rent_yocto.0,
         );
-        let Some(expires_at) = self.sub_accounts.get(&key).map(|s| s.expires_at) else {
-            return;
+        let expires_at = match self.sub_accounts.get(&key) {
+            Some(s) => s.expires_at,
+            None => ContractError::SubAccountNotFound.panic(),
         };
         self.emit_activity(Event::SubAccountReRented {
             full_name: key,
@@ -164,7 +165,9 @@ impl TlaRegistry {
         attached: U128,
         reason: &str,
     ) {
-        self.sub_account_remove(key);
+        if self.sub_account_remove(key).is_none() {
+            return;
+        }
         self.business_count_decrement_if_business(tla_id);
         self.add_pending_refund(payer, attached.0);
         Event::RefundPending {

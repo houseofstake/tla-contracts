@@ -33,7 +33,9 @@ pub fn quote_with_slippage(amount_yocto: u128, slippage_bps: u16) -> u128 {
     let whole = quotient
         .checked_mul(bps)
         .unwrap_or_else(|| env::panic_str(PRICE_OVERFLOW));
-    let partial_numerator = remainder * bps;
+    let partial_numerator = remainder
+        .checked_mul(bps)
+        .unwrap_or_else(|| env::panic_str(PRICE_OVERFLOW));
     let partial = partial_numerator / BPS_DENOMINATOR
         + u128::from(!partial_numerator.is_multiple_of(BPS_DENOMINATOR));
     let buffer = whole
@@ -45,12 +47,17 @@ pub fn quote_with_slippage(amount_yocto: u128, slippage_bps: u16) -> u128 {
 }
 
 pub fn rate_lower_bound(current: u128, move_bps: u16) -> u128 {
-    let numerator = current * (BPS_DENOMINATOR - u128::from(move_bps));
-    numerator.div_ceil(BPS_DENOMINATOR)
+    current
+        .checked_mul(BPS_DENOMINATOR - u128::from(move_bps))
+        .unwrap_or_else(|| env::panic_str(PRICE_OVERFLOW))
+        .div_ceil(BPS_DENOMINATOR)
 }
 
 pub fn rate_upper_bound(current: u128, move_bps: u16) -> u128 {
-    current * (BPS_DENOMINATOR + u128::from(move_bps)) / BPS_DENOMINATOR
+    current
+        .checked_mul(BPS_DENOMINATOR + u128::from(move_bps))
+        .unwrap_or_else(|| env::panic_str(PRICE_OVERFLOW))
+        / BPS_DENOMINATOR
 }
 
 pub fn rate_is_usable(rate: u128, floor: u128, ceiling: u128) -> bool {

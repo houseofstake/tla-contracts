@@ -28,13 +28,13 @@ impl TlaRegistry {
             }
             tla.licensee.clone()
         };
+        if licensee.as_ref() != Some(&caller) {
+            return Err(ContractError::OnlyLicensee);
+        }
         let sub = self
             .sub_accounts
             .get_mut(&key)
             .ok_or(ContractError::SubAccountNotFound)?;
-        if caller != sub.owner && licensee.as_ref() != Some(&caller) {
-            return Err(ContractError::OnlyOwner);
-        }
         if sub.retraction_at.is_some() {
             return Err(ContractError::RetractionAlreadyScheduled);
         }
@@ -99,11 +99,13 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn set_business_sub_cap(
         &mut self,
         tla_id: AccountId,
         cap: Option<u32>,
     ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
         self.assert_council()?;
         {
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;

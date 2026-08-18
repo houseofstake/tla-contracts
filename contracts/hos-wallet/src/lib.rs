@@ -5,7 +5,7 @@ mod state;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use defuse_wallet::actions::NearAction;
+use defuse_wallet::actions::{FunctionCall, NearAction};
 use defuse_wallet::contract::Wallet;
 use defuse_wallet::events::{Actor, WalletEvent};
 use defuse_wallet::{
@@ -25,7 +25,7 @@ use hos_common::RotationCause;
 
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
-pub const IMPL_VERSION: u32 = 5;
+pub const IMPL_VERSION: u32 = 6;
 pub const ROTATION_EPOCH: u32 = 4;
 const _: () = assert!(
     ROTATION_EPOCH <= IMPL_VERSION,
@@ -39,6 +39,8 @@ const GAS_FOR_SWEEP_RESOLVE: Gas = Gas::from_tgas(5);
 /// so the window is minutes rather than open ended.
 const REVERT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
 const SHARDED_ITEM_SPEC: &str = "sharded-item-1.0.0";
+const FT_TRANSFER: &str = "ft_transfer";
+const NFT_TRANSFER: &str = "nft_transfer";
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 #[ext_contract(ext_ft)]
@@ -124,12 +126,75 @@ pub struct AgentStatusView {
     pub state: OperatingState,
     pub frozen: FreezeState,
     pub lease_until_ns: U64,
+    /// The balance floor a spend may not breach. Tracks live storage usage,
+    /// so it cannot be derived off chain.
+    pub reserve_yocto: U128,
     pub impl_version: u32,
+}
+
+/// `receivers` bounds where value may land, for a plain transfer and for the
+/// decoded recipient of a token call alike.
+#[near(serializers = [borsh, json])]
+#[derive(Clone)]
+pub struct SpendGrant {
+    pub receivers: BTreeSet<AccountId>,
+    pub budget_yocto: U128,
+    pub spent_yocto: U128,
+    pub tokens: BTreeMap<AccountId, TokenBudget>,
+    pub items: BTreeMap<AccountId, BTreeSet<String>>,
+    pub expires_at: U64,
 }
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone)]
-pub struct SpendGrant {
+pub struct TokenBudget {
+    pub budget: U128,
+    pub spent: U128,
+}
+
+#[near(serializers = [json])]
+pub struct TokenAllowance {
+    pub token: AccountId,
+    pub budget: U128,
+}
+
+/// A non-fungible asset has no quantity to meter, so a grant fences the exact
+/// items that may leave rather than capping how much value does.
+#[near(serializers = [json])]
+pub struct ItemAllowance {
+    pub collection: AccountId,
+    pub token_ids: Vec<String>,
+}
+
+/// Unknown fields are refused: an argument this contract cannot read could
+/// move value the budget never counted.
+#[derive(near_sdk::serde::Deserialize)]
+#[serde(crate = "near_sdk::serde", deny_unknown_fields)]
+struct FtTransferArgs {
+    receiver_id: AccountId,
+    amount: U128,
+    /// Declared to be permitted, not read.
+    #[serde(default)]
+    #[allow(dead_code)]
+    memo: Option<String>,
+}
+
+#[derive(near_sdk::serde::Deserialize)]
+#[serde(crate = "near_sdk::serde", deny_unknown_fields)]
+struct NftTransferArgs {
+    receiver_id: AccountId,
+    token_id: String,
+    #[serde(default)]
+    approval_id: Option<u64>,
+    /// Declared to be permitted, not read.
+    #[serde(default)]
+    #[allow(dead_code)]
+    memo: Option<String>,
+}
+
+#[near(serializers = [borsh])]
+#[derive(Clone)]
+pub struct LegacySpendGrant {
     pub receivers: BTreeSet<AccountId>,
     pub budget_yocto: U128,
     pub spent_yocto: U128,
@@ -147,7 +212,7 @@ pub struct LegacyTenantWallet {
     pub state: OperatingState,
     pub frozen: FreezeState,
     pub authority_freeze_until_ns: u64,
-    pub spend_grants: BTreeMap<AccountId, SpendGrant>,
+    pub spend_grants: BTreeMap<AccountId, LegacySpendGrant>,
     pub revert_to: Option<AccountId>,
     pub revert_until_ns: u64,
     pub rotation_seq: u64,
@@ -219,12 +284,7 @@ impl Wallet for TenantWallet {
     }
 
     fn w_timeout_secs(&self) -> u32 {
-        self.wallet
-            .nonces
-            .timeout()
-            .as_secs()
-            .try_into()
-            .unwrap_or_else(|_| unreachable!())
+        u32::try_from(self.wallet.nonces.timeout().as_secs()).unwrap_or(u32::MAX)
     }
 
     fn w_last_cleaned_at(&self) -> Timestamp {
@@ -319,19 +379,39 @@ impl TenantWallet {
             state: old.state,
             frozen: old.frozen,
             authority_freeze_until_ns: old.authority_freeze_until_ns,
-            spend_grants: old.spend_grants,
+            spend_grants: old
+                .spend_grants
+                .into_iter()
+                .map(|(extension, grant)| {
+                    (
+                        extension,
+                        SpendGrant {
+                            receivers: grant.receivers,
+                            budget_yocto: grant.budget_yocto,
+                            spent_yocto: grant.spent_yocto,
+                            tokens: BTreeMap::new(),
+                            items: BTreeMap::new(),
+                            expires_at: grant.expires_at,
+                        },
+                    )
+                })
+                .collect(),
             revert_to: old.revert_to,
             revert_until_ns: old.revert_until_ns,
             rotation_seq: old.rotation_seq,
         }
     }
 
+    /// Re-granting raises ceilings without clearing what was already spent.
+    /// Revoking is the way to reset the meter.
     #[payable]
     pub fn hos_grant_spend(
         &mut self,
         extension: AccountId,
         receivers: Vec<AccountId>,
         budget_yocto: U128,
+        tokens: Vec<TokenAllowance>,
+        items: Vec<ItemAllowance>,
         expires_at: U64,
     ) {
         self.assert_owner_caller();
@@ -344,12 +424,18 @@ impl TenantWallet {
         );
         require!(!receivers.is_empty(), error::EMPTY_GRANT);
         require!(expires_at.0 > env::block_timestamp(), error::GRANT_IN_PAST);
+        let held = self.spend_grants.get(&extension);
+        let spent_yocto = held.map_or(U128(0), |grant| grant.spent_yocto);
+        let budgets = token_budgets(tokens, held, &self.collection_id);
+        let fences = item_fences(items, &self.collection_id);
         self.spend_grants.insert(
             extension.clone(),
             SpendGrant {
                 receivers: receivers.into_iter().collect(),
                 budget_yocto,
-                spent_yocto: U128(0),
+                spent_yocto,
+                tokens: budgets,
+                items: fences,
                 expires_at,
             },
         );
@@ -374,6 +460,7 @@ impl TenantWallet {
             state: self.state,
             frozen: self.effective_frozen(),
             lease_until_ns: U64(self.lease_until_ns),
+            reserve_yocto: U128(self.reserve()),
             impl_version: IMPL_VERSION,
         }
     }
@@ -476,8 +563,8 @@ impl TenantWallet {
         .emit();
     }
 
-    /// Moves payout with ownership, evicts co-owners, and returns any balance
-    /// above the reserve to the outgoing payout account.
+    /// The payout account is read before it is repointed, so the balance goes
+    /// to the holder giving the name up rather than the one receiving it.
     #[payable]
     pub fn hos_transfer_ownership(
         &mut self,
@@ -839,50 +926,19 @@ impl TenantWallet {
         if id.as_ref() == self.owner.as_str() {
             return;
         }
-        let holder = self
-            .spend_grants
-            .keys()
-            .find(|held| held.as_str() == id.as_ref().as_str())
-            .cloned()
-            .unwrap_or_else(|| env::panic_str(error::NO_SPEND_GRANT));
-        let mut total: u128 = 0;
-        for promise in external {
-            total = total
-                .checked_add(promise.total_deposit().as_yoctonear())
-                .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
-        }
+        let extension = id.as_ref().to_owned();
+        let collection_id = self.collection_id.clone();
         let grant = self
             .spend_grants
-            .get_mut(&holder)
-            .unwrap_or_else(|| unreachable!());
+            .get_mut(&extension)
+            .unwrap_or_else(|| env::panic_str(error::NO_SPEND_GRANT));
         require!(
             env::block_timestamp() < grant.expires_at.0,
             error::GRANT_EXPIRED
         );
         for promise in external {
-            require!(
-                grant.receivers.contains(&promise.receiver_id),
-                error::RECEIVER_NOT_GRANTED
-            );
-            require!(
-                promise.refund_to.is_none(),
-                error::REFUND_TARGET_NOT_ALLOWED
-            );
-            require!(
-                promise
-                    .actions
-                    .iter()
-                    .all(|action| matches!(action, NearAction::Transfer(_))),
-                error::GRANT_TRANSFERS_ONLY
-            );
+            charge_promise(grant, &extension, &collection_id, promise);
         }
-        let spent = grant
-            .spent_yocto
-            .0
-            .checked_add(total)
-            .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
-        require!(spent <= grant.budget_yocto.0, error::GRANT_CAP_EXCEEDED);
-        grant.spent_yocto = U128(spent);
     }
 
     fn assert_owner(&self, actor: &Actor<'_>) {
@@ -911,6 +967,192 @@ impl TenantWallet {
             Actor::SignedRequest(_) => false,
         }
     }
+}
+
+/// Nothing a grant names may be this account or the collection it belongs to.
+/// A name is an account, so what it holds cannot be known when the grant is
+/// written, and nothing else in the grant can bound it.
+fn assert_grantable(target: &AccountId, collection_id: &AccountId) {
+    require!(target != collection_id, error::OWN_COLLECTION_NOT_GRANTABLE);
+    require!(*target != env::current_account_id(), error::SELF_TARGET);
+}
+
+fn token_budgets(
+    tokens: Vec<TokenAllowance>,
+    held: Option<&SpendGrant>,
+    collection_id: &AccountId,
+) -> BTreeMap<AccountId, TokenBudget> {
+    let mut budgets = BTreeMap::new();
+    for allowance in tokens {
+        assert_grantable(&allowance.token, collection_id);
+        let spent = held
+            .and_then(|grant| grant.tokens.get(&allowance.token))
+            .map_or(U128(0), |budget| budget.spent);
+        let budget = TokenBudget {
+            budget: allowance.budget,
+            spent,
+        };
+        require!(
+            budgets.insert(allowance.token, budget).is_none(),
+            error::TOKEN_LISTED_TWICE
+        );
+    }
+    budgets
+}
+
+fn item_fences(
+    items: Vec<ItemAllowance>,
+    collection_id: &AccountId,
+) -> BTreeMap<AccountId, BTreeSet<String>> {
+    let mut fences = BTreeMap::new();
+    for allowance in items {
+        assert_grantable(&allowance.collection, collection_id);
+        require!(!allowance.token_ids.is_empty(), error::EMPTY_ITEM_GRANT);
+        let ids: BTreeSet<String> = allowance.token_ids.into_iter().collect();
+        require!(
+            fences.insert(allowance.collection, ids).is_none(),
+            error::COLLECTION_LISTED_TWICE
+        );
+    }
+    fences
+}
+
+fn charge_promise(
+    grant: &mut SpendGrant,
+    extension: &AccountId,
+    collection_id: &AccountId,
+    promise: &NearPromise,
+) {
+    require!(
+        promise.refund_to.is_none(),
+        error::REFUND_TARGET_NOT_ALLOWED
+    );
+    let call = promise.actions.iter().find_map(|action| match action {
+        NearAction::FunctionCall(call) => Some(call),
+        _ => None,
+    });
+    let Some(call) = call else {
+        return charge_transfer(grant, extension, promise);
+    };
+    require!(
+        promise.actions.len() == 1,
+        error::GRANT_CALL_MUST_STAND_ALONE
+    );
+    charge_token_call(grant, extension, collection_id, promise, call);
+}
+
+fn charge_transfer(grant: &mut SpendGrant, extension: &AccountId, promise: &NearPromise) {
+    require!(
+        grant.receivers.contains(&promise.receiver_id),
+        error::RECEIVER_NOT_GRANTED
+    );
+    require!(
+        promise
+            .actions
+            .iter()
+            .all(|action| matches!(action, NearAction::Transfer(_))),
+        error::GRANT_ACTION_NOT_ALLOWED
+    );
+    let amount = promise.total_deposit().as_yoctonear();
+    let spent = grant
+        .spent_yocto
+        .0
+        .checked_add(amount)
+        .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
+    require!(spent <= grant.budget_yocto.0, error::GRANT_CAP_EXCEEDED);
+    grant.spent_yocto = U128(spent);
+    Event::SpendCharged {
+        extension: extension.clone(),
+        token: None,
+        receiver: promise.receiver_id.clone(),
+        amount: U128(amount),
+        spent: U128(spent),
+    }
+    .emit();
+}
+
+/// The mandated yocto is protocol overhead rather than spend, so it is
+/// required exactly and left out of the NEAR budget.
+fn charge_token_call(
+    grant: &mut SpendGrant,
+    extension: &AccountId,
+    collection_id: &AccountId,
+    promise: &NearPromise,
+    call: &FunctionCall,
+) {
+    require!(call.deposit == ONE_YOCTO, error::GRANT_CALL_DEPOSIT);
+    require!(
+        promise.receiver_id != *collection_id,
+        error::OWN_COLLECTION_NOT_GRANTABLE
+    );
+    match call.function_name.as_str() {
+        FT_TRANSFER => charge_ft_transfer(grant, extension, promise, call),
+        NFT_TRANSFER => charge_nft_transfer(grant, extension, promise, call),
+        _ => env::panic_str(error::GRANT_METHOD_NOT_ALLOWED),
+    }
+}
+
+fn charge_ft_transfer(
+    grant: &mut SpendGrant,
+    extension: &AccountId,
+    promise: &NearPromise,
+    call: &FunctionCall,
+) {
+    let args = near_sdk::serde_json::from_slice::<FtTransferArgs>(&call.args)
+        .unwrap_or_else(|_| env::panic_str(error::GRANT_ARGS_UNREADABLE));
+    require!(
+        grant.receivers.contains(&args.receiver_id),
+        error::RECEIVER_NOT_GRANTED
+    );
+    let budget = grant
+        .tokens
+        .get_mut(&promise.receiver_id)
+        .unwrap_or_else(|| env::panic_str(error::TOKEN_NOT_GRANTED));
+    let spent = budget
+        .spent
+        .0
+        .checked_add(args.amount.0)
+        .unwrap_or_else(|| env::panic_str(error::DEPOSIT_OVERFLOW));
+    require!(spent <= budget.budget.0, error::TOKEN_CAP_EXCEEDED);
+    budget.spent = U128(spent);
+    Event::SpendCharged {
+        extension: extension.clone(),
+        token: Some(promise.receiver_id.clone()),
+        receiver: args.receiver_id,
+        amount: args.amount,
+        spent: U128(spent),
+    }
+    .emit();
+}
+
+fn charge_nft_transfer(
+    grant: &SpendGrant,
+    extension: &AccountId,
+    promise: &NearPromise,
+    call: &FunctionCall,
+) {
+    let args = near_sdk::serde_json::from_slice::<NftTransferArgs>(&call.args)
+        .unwrap_or_else(|_| env::panic_str(error::GRANT_ARGS_UNREADABLE));
+    require!(
+        args.approval_id.is_none(),
+        error::GRANT_APPROVAL_NOT_ALLOWED
+    );
+    require!(
+        grant.receivers.contains(&args.receiver_id),
+        error::RECEIVER_NOT_GRANTED
+    );
+    let fence = grant
+        .items
+        .get(&promise.receiver_id)
+        .unwrap_or_else(|| env::panic_str(error::COLLECTION_NOT_GRANTED));
+    require!(fence.contains(&args.token_id), error::ITEM_NOT_GRANTED);
+    Event::ItemSpent {
+        extension: extension.clone(),
+        collection: promise.receiver_id.clone(),
+        token_id: args.token_id,
+        receiver: args.receiver_id,
+    }
+    .emit();
 }
 
 fn is_direct_subaccount(child: &AccountId, parent: &AccountId) -> bool {

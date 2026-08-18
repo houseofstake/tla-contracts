@@ -1,4 +1,5 @@
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
+use crate::admin::MAX_ALLOWLIST_SIZE;
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
 use crate::callbacks::MintSettlement;
 use crate::error::ContractError;
 use crate::events::Event;
@@ -30,7 +31,12 @@ const GAS_FOR_SET_PAYOUT_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(45);
 const GAS_FOR_PUSH_LEASE: Gas = Gas::from_tgas(20);
-const GAS_FOR_RERENT_BALANCES_CB: Gas = Gas::from_tgas(85);
+const RERENT_BALANCES_CB_TGAS: u64 = 85;
+const GAS_FOR_RERENT_BALANCES_CB: Gas = Gas::from_tgas(RERENT_BALANCES_CB_TGAS);
+const _: () = assert!(
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + RERENT_BALANCES_CB_TGAS + 20 <= 300,
+    "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every re-rent"
+);
 
 #[near]
 impl TlaRegistry {
@@ -420,7 +426,10 @@ impl TlaRegistry {
                 return Err(ContractError::RetractionPending);
             }
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if matches!(tla.lifecycle(&self.clock()), LifecycleStatus::Reclaimable) {
+            if matches!(
+                tla.lifecycle(&self.clock(), self.suspension_expiry(&tla_id)),
+                LifecycleStatus::Reclaimable
+            ) {
                 return Err(ContractError::TlaPastGracePeriod);
             }
             rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);

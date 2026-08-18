@@ -47,8 +47,9 @@ pub struct MpcRecovery {
     registry: Option<AccountId>,
 }
 
-/// The shape written before this contract could upgrade itself. Only read by
-/// `migrate`.
+/// The shape currently on chain. Only read by `migrate`, and it has to keep
+/// matching the deployed bytes: if it stops, the legacy arm fails and the
+/// upgrade silently falls through to whatever the current struct parses as.
 #[near(serializers = [borsh])]
 struct LegacyMpcRecovery {
     owner: AccountId,
@@ -59,6 +60,9 @@ struct LegacyMpcRecovery {
     threshold: u32,
     accounts: LookupMap<AccountId, Account>,
     round_floor: LookupMap<AccountId, u64>,
+    approved_code_hash: Option<[u8; 32]>,
+    approved_at: Option<u64>,
+    registry: Option<AccountId>,
 }
 
 #[near(serializers = [json])]
@@ -89,10 +93,8 @@ impl MpcRecovery {
         watchers: Vec<PublicKey>,
         threshold: u32,
     ) -> Self {
-        require!(
-            threshold > 0 && (threshold as usize) <= watchers.len(),
-            error::BAD_THRESHOLD
-        );
+        require!(threshold >= MIN_WATCHER_THRESHOLD, error::THRESHOLD_TOO_LOW);
+        require!((threshold as usize) <= watchers.len(), error::BAD_THRESHOLD);
         require!(owner != env::current_account_id(), error::OWNER_IS_SELF);
         let mut seen = BTreeSet::new();
         for watcher in &watchers {
@@ -133,7 +135,7 @@ impl MpcRecovery {
             round_floor: old.round_floor,
             approved_code_hash: None,
             approved_at: None,
-            registry: None,
+            registry: old.registry,
         }
     }
 
@@ -588,13 +590,13 @@ impl MpcRecovery {
         U64(UPGRADE_DELAY_NS)
     }
 
-    pub fn on_wallet_transferred(&mut self, wallet: AccountId) {
+    pub fn on_wallet_transferred(&mut self, wallet: AccountId) -> bool {
         require!(
             env::predecessor_account_id() == self.transfer_authority,
             error::ONLY_TRANSFER_AUTHORITY
         );
         let Some(account) = self.accounts.get(&wallet) else {
-            return;
+            return true;
         };
         if matches!(account.phase, Phase::Resolving { .. }) {
             Event::PolicyResetDeferred {
@@ -602,12 +604,13 @@ impl MpcRecovery {
                 round: U64(account.round),
             }
             .emit();
-            return;
+            return false;
         }
         let round = account.round;
         self.round_floor.insert(wallet.clone(), round);
         self.accounts.remove(&wallet);
         Event::PolicyReset { account: wallet }.emit();
+        true
     }
 
     fn is_installer(&self) -> bool {

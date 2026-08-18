@@ -127,7 +127,7 @@ async fn tracer_mint_owner_path_rotate_patch() -> Result<()> {
     let outcome = fleet
         .relay
         .call(fleet.deployer.id(), "gd_deploy")
-        .args_json(json!({ "code": wallet_wasm }))
+        .args_json(json!({ "code": code_arg(&wallet_wasm) }))
         .deposit(publish_cost)
         .max_gas()
         .transact()
@@ -188,7 +188,7 @@ async fn unapproved_code_cannot_publish() -> Result<()> {
     let outcome = fleet
         .relay
         .call(fleet.deployer.id(), "gd_deploy")
-        .args_json(json!({ "code": rogue }))
+        .args_json(json!({ "code": code_arg(&rogue) }))
         .deposit(NearToken::from_near(1))
         .max_gas()
         .transact()

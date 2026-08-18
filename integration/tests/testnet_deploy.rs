@@ -176,7 +176,7 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
             .into_result()?;
         deployer
             .call(&deployer_id, "gd_deploy")
-            .args_json(json!({ "code": wallet_wasm }))
+            .args_json(json!({ "code": common::code_arg(&wallet_wasm) }))
             .deposit(publish_cost)
             .max_gas()
             .transact()
@@ -391,9 +391,19 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
     if has_code(&worker, recovery.id(), "threshold").await {
         println!("  already deployed, skipping");
     } else {
-        // Demo config: single placeholder watcher at threshold 1. Replace watchers/threshold with
-        // the real quorum before treating recovery as launch-ready (see workbook P4).
-        let watcher = WATCHER_KEY.to_string();
+        let watchers: Vec<String> = std::env::var("RECOVERY_WATCHERS")
+            .context("set RECOVERY_WATCHERS to a comma separated list of watcher public keys")?
+            .split(',')
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect();
+        if watchers.len() < 2 {
+            bail!("recovery needs at least two distinct watchers, got {}", watchers.len());
+        }
+        let threshold: u32 = match std::env::var("RECOVERY_THRESHOLD") {
+            Ok(value) => value.parse().context("RECOVERY_THRESHOLD must be a number")?,
+            Err(_) => 2,
+        };
         recovery
             .deploy(&wasm("mpc_recovery"))
             .await?
@@ -404,8 +414,8 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
                 "owner": council.id(),
                 "signer": "v1.signer-prod.testnet",
                 "transfer_authority": extension.id(),
-                "watchers": [watcher],
-                "threshold": 1u32,
+                "watchers": watchers,
+                "threshold": threshold,
             }))
             .max_gas()
             .transact()
@@ -460,6 +470,7 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
                 "premium_category": "Standard",
                 "licensee": null,
             }))
+            .deposit(NearToken::from_yoctonear(1))
             .max_gas()
             .transact()
             .await?
@@ -488,6 +499,7 @@ async fn deploy_marketplace_to_testnet() -> Result<()> {
     council
         .call(registry.id(), "add_recovery_authority")
         .args_json(json!({ "account_id": recovery.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

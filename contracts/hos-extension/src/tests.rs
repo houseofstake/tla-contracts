@@ -349,6 +349,42 @@ fn an_admin_cannot_add_another_admin() {
 }
 
 #[test]
+fn only_the_registry_can_move_a_payout_or_sweep_a_wallet() {
+    let mut c = deploy();
+    ctx(ADMIN, 1);
+    assert!(
+        matches!(
+            c.set_payout(acc(WALLET), acc(DEST), acc(BUYER)),
+            Err(ContractError::OnlyRegistry)
+        ),
+        "an admin reaching a wallet directly would bypass every check the registry performs first"
+    );
+    ctx(ADMIN, 1);
+    assert!(matches!(
+        c.sweep_near(acc(WALLET)),
+        Err(ContractError::OnlyRegistry)
+    ));
+    ctx(COUNCIL, 1);
+    assert!(matches!(
+        c.sweep_near(acc(WALLET)),
+        Err(ContractError::OnlyRegistry)
+    ));
+}
+
+#[test]
+fn only_an_admin_can_lift_a_pause() {
+    let mut c = deploy();
+    ctx(ADMIN, 1);
+    c.pause().unwrap();
+    ctx("mallory.testnet", 1);
+    assert!(matches!(c.unpause(), Err(ContractError::OnlyAdmin)));
+    assert!(c.is_paused());
+    ctx(ADMIN, 1);
+    c.unpause().unwrap();
+    assert!(!c.is_paused());
+}
+
+#[test]
 fn an_admin_cannot_approve_an_upgrade() {
     let mut c = deploy();
     ctx_at(ADMIN, 1, 0);
@@ -366,18 +402,31 @@ mod migration {
     const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbRgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAcmVjLmhvc2RlbW8udGVzdG5ldAABFwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAA==";
 
     #[test]
-    fn the_live_state_still_decodes_as_the_current_struct() {
+    fn the_live_state_decodes_as_legacy_so_migrate_takes_that_arm() {
         let raw = near_sdk::base64::engine::general_purpose::STANDARD
             .decode(DEPLOYED_STATE_B64)
             .expect("fixture is valid base64");
-        let state = HosExtension::try_from_slice(&raw)
-            .expect("deployed state no longer decodes as HosExtension");
+        let state = crate::LegacyHosExtension::try_from_slice(&raw)
+            .expect("deployed state must decode as LegacyHosExtension or migrate cannot read it");
         assert_eq!(state.registry.as_str(), "registry.hosdemo.testnet");
         assert_eq!(state.recovery.as_str(), "rec.hosdemo.testnet");
         assert_eq!(state.council.as_str(), "council.hosdemo.testnet");
         assert_eq!(state.version, 1);
         assert!(!state.paused);
         assert_eq!(state.paused_until_ns, 0);
+    }
+
+    #[test]
+    fn the_live_state_no_longer_decodes_as_the_current_struct() {
+        let raw = near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(DEPLOYED_STATE_B64)
+            .expect("fixture is valid base64");
+        assert!(
+            HosExtension::try_from_slice(&raw).is_err(),
+            "the deployed bytes predate recovery_reset_pending, so they must fail the current \
+             shape and fall to the legacy arm. If both arms parse, migrate is ambiguous; if \
+             neither parses, the upgrade panics and the contract is unrecoverable"
+        );
     }
 }
 
@@ -396,11 +445,21 @@ fn the_legacy_arm_runs_and_keeps_the_admin_set() {
         approved_code_hash: Some([5u8; 32]),
         approved_at: Some(9),
         council: acc(COUNCIL),
+        paused_until_ns: 4_242,
     });
     let migrated = HosExtension::migrate();
     assert_eq!(migrated.registry, acc(REGISTRY));
     assert_eq!(migrated.council, acc(COUNCIL));
     assert!(migrated.paused, "a paused contract must not resume itself");
+    assert_eq!(
+        migrated.paused_until_ns, 4_242,
+        "the deployed state carries a pause expiry and a migration that invents a new one \
+         would silently extend or shorten a live authority hold"
+    );
+    assert!(
+        migrated.recovery_reset_pending.is_empty(),
+        "a fresh set, not a parse of bytes that were never there"
+    );
     assert!(
         migrated.admins.contains(&acc(ADMIN)),
         "losing the admin set would strand every wallet this contract governs"
@@ -413,6 +472,46 @@ fn state_already_current_survives_a_same_shape_redeploy() {
     let registry = current.registry.clone();
     env::state_write(&current);
     assert_eq!(HosExtension::migrate().registry, registry);
+}
+
+#[test]
+fn a_reset_the_recovery_contract_deferred_stays_pending() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    c.after_recovery_reset(acc(WALLET), Ok(false));
+    assert_eq!(
+        c.pending_recovery_resets(),
+        vec![acc(WALLET)],
+        "a deferred reset reports success on the wire, so treating any Ok as done would drop \
+         the one case where the previous owner keeps their recovery policy"
+    );
+}
+
+#[test]
+fn a_completed_reset_clears_the_pending_entry() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    c.after_recovery_reset(acc(WALLET), Ok(false));
+    c.after_recovery_reset(acc(WALLET), Ok(true));
+    assert!(c.pending_recovery_resets().is_empty());
+}
+
+#[test]
+fn a_failed_reset_stays_pending() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    c.after_recovery_reset(acc(WALLET), Err(near_sdk::PromiseError::Failed));
+    assert_eq!(c.pending_recovery_resets(), vec![acc(WALLET)]);
+}
+
+#[test]
+fn retry_refuses_a_wallet_that_is_not_pending() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    assert!(matches!(
+        c.retry_recovery_reset(acc(WALLET)),
+        Err(ContractError::NoPendingReset)
+    ));
 }
 
 fn a_key() -> near_sdk::PublicKey {

@@ -3,7 +3,7 @@ name = "hos-extension"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
-repository = "https://github.com/neo-sky/hos-tla-contracts"
+repository = "https://github.com/houseofstake/tla-contracts"
 license = "MIT OR Apache-2.0"
 description = "Marketplace authority extension for House of Stake TLA wallets: registry-gated owner rotation and fungible-token sweep."
 

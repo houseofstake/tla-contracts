@@ -10,9 +10,15 @@ use near_sdk::{near, AccountId};
 #[near]
 impl TlaRegistry {
     pub fn get_tla(&self, tla_id: AccountId) -> Option<TlaView> {
-        self.tlas
-            .get(&tla_id)
-            .map(|e| to_tla_view(&tla_id, e, &self.fee_config, &self.clock()))
+        self.tlas.get(&tla_id).map(|e| {
+            to_tla_view(
+                &tla_id,
+                e,
+                &self.fee_config,
+                &self.clock(),
+                self.suspension_expiry(&tla_id),
+            )
+        })
     }
 
     pub fn get_sub_account(&self, tla_id: AccountId, name: String) -> Option<SubAccountView> {
@@ -93,7 +99,15 @@ impl TlaRegistry {
             .iter()
             .skip(from_index as usize)
             .take(limit.min(MAX_PAGE_LIMIT) as usize)
-            .map(|(id, entry)| to_tla_view(id, entry, &self.fee_config, &self.clock()))
+            .map(|(id, entry)| {
+                to_tla_view(
+                    id,
+                    entry,
+                    &self.fee_config,
+                    &self.clock(),
+                    self.suspension_expiry(id),
+                )
+            })
             .collect()
     }
 
@@ -242,13 +256,14 @@ pub(crate) fn to_tla_view(
     entry: &TlaEntry,
     config: &FeeConfig,
     clock: &LifecycleClock,
+    suspended_until: u64,
 ) -> TlaView {
     let tla_len = tla_id.as_str().len() as u8;
     let rent = fees::base_rent(tla_len, config);
     TlaView {
         tla_id: tla_id.clone(),
         tla_type: entry.tla_type.clone(),
-        lifecycle: entry.lifecycle(clock),
+        lifecycle: entry.lifecycle(clock, suspended_until),
         licensee: entry.licensee.clone(),
         premium_category: entry.premium_category.clone(),
         activated_at: U64(entry.activated_at),
