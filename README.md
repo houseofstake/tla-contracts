@@ -314,14 +314,10 @@ contracts/         the six deployed contracts
 crates/            shared library code
 dev-contracts/     stubs used only by the integration tests
 integration/       near-workspaces tests, a separate cargo workspace
-deployment.testnet.json
 ```
 
 `integration` is a separate cargo workspace and loads built wasm rather than depending on the contract
-crates.
-
-`deployment.testnet.json` records the testnet account map, the published wallet code hash and the
-registrar's minting parameters. It describes what is on chain, which may lag the working tree.
+crates. Deployment tooling and the account map live outside this repository.
 
 ## Build and test
 
@@ -356,8 +352,8 @@ cargo test
 cd integration && cargo test
 ```
 
-The integration suite runs against a nearcore sandbox and needs every contract built first. Two tests
-in `integration/tests/testnet_deploy.rs` are ignored by default because they deploy to live testnet.
+The integration suite runs against a nearcore sandbox and needs every contract built first. It touches
+no live network.
 
 ## Status
 
