@@ -61,3 +61,4 @@ pub const AUTHORIZATION_NOT_JSON: &str = "authorization is not valid json";
 pub const AUTHORITY_NOT_OWNER: &str = "the lease authority cannot authorise as an owner";
 pub const NOT_AN_OWNER: &str = "named account is not an owner of this account";
 pub const GRANTEE_NOT_OWNER: &str = "a spend grantee cannot authorise as an owner";
+pub const FREEZE_COOLDOWN: &str = "an authority freeze cannot be re-armed during its cooldown";

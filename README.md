@@ -18,7 +18,7 @@ that set so a lease can be reclaimed and a sale settled without the owner taking
 | `registrar` | Mints leased accounts. Creates the sub-account, funds it, attaches the wallet implementation and initialises it in one batch. |
 | `tla-registry` | The lease ledger and the NEP-171 collection. Rental, renewal, pricing, reclaim, business sub-account rules, and the only contract holding money. |
 | `hos-extension` | Acts on leased accounts on behalf of the registry. Pushes lease updates, forces transfers, sweeps a reclaimed account. |
-| `mpc-recovery` | Recovery for ordinary NEAR accounts, which have no wallet contract to call. A watcher quorum authorises an MPC-signed `AddKey` after a timelock. |
+| `mpc-recovery` | Recovery for both account kinds. For an ordinary NEAR account a watcher quorum authorises an MPC-signed `AddKey` after a timelock. For a leased name the same policy gates a rotation performed by the registry. |
 | `hos-common` | Types and helpers shared by more than one contract. |
 
 `dev-contracts` holds stub fungible token, staking pool, dapp and MPC signer contracts. They exist so
@@ -81,8 +81,11 @@ owner's control the same way.
 The wallet takes `hos_transfer_ownership` from the authority alone, and what constrains it sits above.
 `hos-extension` accepts a rotation only from the registry, and every registry path that reaches one
 carries its own gate: a plain transfer or a sale requires the caller to be the current owner, a reclaim
-requires the lease to have ended, and a recovery requires the watcher quorum. There is no path by which
-an admin or the council moves a live name.
+requires the lease to have ended, and a recovery requires an attested request, the account's own
+timelock and the watcher quorum. There is no path by which an admin or the council moves a live name.
+
+A rotation caused by recovery is also refused while the owner holds their own freeze. Reclaim after
+expiry is not, since a freeze that outlived the lease would otherwise strand the name.
 
 The payout account is read before it is repointed, so the balance leaves with the party giving the name
 up rather than the one receiving it. `RotationCause` decides both halves of that: `Deposit`, used when a
@@ -93,7 +96,8 @@ Freezing runs in both directions. Any extension may call `hos_freeze`. A freeze 
 `SelfFrozen` when the caller is not the authority and `AuthorityFrozen` when it is. `hos_unfreeze`
 enforces the matching side, so the authority cannot lift an owner's freeze and an owner cannot lift the
 authority's. An authority freeze lapses on its own after seven days, so a lost or misused authority key
-cannot strand an account. An owner's own freeze does not lapse.
+cannot strand an account, and a further seven days must pass before the authority can freeze again, so
+the seven day limit cannot be renewed into a standing hold. An owner's own freeze does not lapse.
 
 Sweeping is gated on the authority and an expired lease. `assert_sweepable` checks those two and does
 not read the freeze state, so a frozen account can still be swept once its lease has ended.
@@ -165,18 +169,24 @@ once the lease has ended, since neither freeze survives expiry.
 
 ## Recovery
 
-`mpc-recovery` covers ordinary NEAR accounts, which have no wallet contract to call and therefore
-cannot be recovered by rewriting an extension set.
+`mpc-recovery` covers both account kinds. An ordinary NEAR account has no wallet contract to call and so
+cannot be recovered by rewriting an extension set; it is recovered by adding a key. A leased name is
+recovered by rotating its owner through the registry. Both run through the same per-account policy.
 
 A policy per account holds an MPC public key, an attestation key and a timelock. Both keys must be
 ed25519 and the timelock is bounded at both ends.
 
-Installation is delegated. The contract holds an `installer` alongside its owner, set by the owner
-through `set_installer` and defaulting to the owner. The installer may create a policy where none
-exists, and may finalize, claim and abort. Replacing an existing policy is owner only, because a policy
-carries the attestation key that authorises starting a recovery, and an installer able to rewrite it
-could point an armed account at a key of its own. Abort is deliberately open to both: it can only deny
-a recovery, never grant one, so the brake must not be slower than the automated path it stops.
+Installation is delegated but not unilateral. The contract holds an `installer` alongside its owner, set
+by the owner through `set_installer` and defaulting to the owner. Before the installer can create a
+policy, the account itself must call `arm_policy_install` naming the attestation key and timelock it
+consents to, and the install must match that arming exactly, which consumes it. An account can withdraw
+its consent with `disarm_policy_install` at any time before the install. A leased name holds no key of
+its own, so its owner arms it by driving the account through `w_execute_extension`.
+
+Replacing an existing policy is owner only, because a policy carries the attestation key that authorises
+starting a recovery, and an installer able to rewrite it could point an armed account at a key of its
+own. Abort is open to the installer, the owner and the account under recovery: it can only deny a
+recovery, never grant one, so the brake must not be slower than the automated path it stops.
 `PolicyInstalled` carries both keys, so a rotation is visible on chain rather than silent.
 
 A recovery request carries the new owner key, the current round, and a signature over a request message
@@ -186,6 +196,13 @@ After the timelock has elapsed, watchers submit a verdict signed by a quorum. Th
 threshold are fixed when the contract is initialised. A rejection returns the account to idle. An
 approval lets the installer or the owner call `finalize_recovery`, which asks the MPC signer for a
 signature over an `AddKey` transaction for the account.
+
+A leased name is recovered through the same policy rather than around it. `request_name_recovery` checks
+the request against the attestation key pinned for that account and starts its timelock, and only then
+does `recover_name` accept a watcher quorum and ask the registry to rotate the owner. The quorum is
+signed over the round the request recorded, so a quorum gathered for one round cannot settle another,
+and the registry call is followed by a callback that restores the request if the rotation fails rather
+than consuming it.
 
 This is not trustless. It trusts the watcher set by design.
 
@@ -318,6 +335,21 @@ cargo near build non-reproducible-wasm --locked --no-abi
 Artifacts land in `target/near/<name>/<name>.wasm`, which is where the integration tests look for them.
 `near-sdk` rejects a bare `cargo build` for a contract crate, so use `cargo check --target
 wasm32-unknown-unknown` to type-check without producing artifacts.
+
+The reproducible build is a different thing and the difference matters at deploy time:
+
+```
+cargo near build reproducible-wasm --no-abi
+```
+
+It builds the source at the current git commit inside the pinned Docker image, not the working tree.
+Uncommitted work is absent from the artifact, and it writes to the same path as the non-reproducible
+build, so a stale artifact overwrites a fresh one with no warning. Commit first, then build, then
+deploy, then tag. Deploying an artifact built from an older commit onto an account whose state a newer
+build already migrated leaves the account unreadable: the deployed struct is missing the fields the
+stored state carries, and borsh refuses the trailing bytes, so every method panics with `Cannot
+deserialize the contract state`. Recovery is to deploy the matching code; nothing about the state is
+lost.
 
 ```
 cargo test

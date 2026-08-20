@@ -4,6 +4,8 @@ use anyhow::{bail, Result};
 use common::*;
 use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::Signer as DalekSigner;
 use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::SigningKey;
+use defuse_wallet::actions::FunctionCall;
+use defuse_wallet::{NearPromise, Request};
 use near_sdk::json_types::{Base64VecU8, U64};
 use near_workspaces::types::NearToken;
 use near_workspaces::Contract;
@@ -88,6 +90,7 @@ fn name_recovery_message(
     new_owner: &str,
     expected_owner: &str,
     deadline_ns: u64,
+    round: u64,
 ) -> Vec<u8> {
     let mut m = vec![3u8];
     push_str(&mut m, contract);
@@ -96,7 +99,103 @@ fn name_recovery_message(
     push_str(&mut m, new_owner);
     push_str(&mut m, expected_owner);
     m.extend_from_slice(&deadline_ns.to_le_bytes());
+    m.extend_from_slice(&round.to_le_bytes());
     m
+}
+
+fn name_request_message(
+    contract: &str,
+    tla_id: &str,
+    name: &str,
+    new_owner: &str,
+    round: u64,
+) -> Vec<u8> {
+    let mut m = vec![4u8];
+    push_str(&mut m, contract);
+    push_str(&mut m, tla_id);
+    push_str(&mut m, name);
+    push_str(&mut m, new_owner);
+    m.extend_from_slice(&round.to_le_bytes());
+    m
+}
+
+async fn request_name_recovery(
+    fleet: &Fleet,
+    recovery: &near_workspaces::Account,
+    tla: &near_workspaces::AccountId,
+    new_owner: &near_workspaces::AccountId,
+    attestation: &SigningKey,
+    round: u64,
+) -> Result<()> {
+    let message = name_request_message(
+        recovery.id().as_str(),
+        tla.as_str(),
+        "alice",
+        new_owner.as_str(),
+        round,
+    );
+    let requested = fleet
+        .relay
+        .call(recovery.id(), "request_name_recovery")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": "alice",
+            "new_owner": new_owner,
+            "attestation": sign(attestation, &message),
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = requested.receipt_failures().first() {
+        bail!("an attested name recovery request must land: {failure:?}");
+    }
+    Ok(())
+}
+
+async fn arm_and_install_name_policy(
+    fleet: &Fleet,
+    recovery: &near_workspaces::Account,
+    tenant: &near_workspaces::AccountId,
+    attestation: &SigningKey,
+) -> Result<()> {
+    let target: near_sdk::AccountId = recovery.id().as_str().parse().unwrap();
+    let arm = NearPromise::new(target).function_call(
+        FunctionCall::name("arm_policy_install")
+            .args(
+                serde_json::to_vec(&json!({
+                    "attestation_key": pubkey_str(attestation),
+                    "timelock_secs": TIMELOCK_SECS,
+                }))
+                .unwrap(),
+            )
+            .gas(near_sdk::Gas::from_tgas(20))
+            .attach_deposit(near_sdk::NearToken::from_yoctonear(0)),
+    );
+    let armed = fleet
+        .bob
+        .call(tenant, "w_execute_extension")
+        .args_json(json!({ "request": Request::new().external([arm]) }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = armed.receipt_failures().first() {
+        bail!("the holder must be able to arm a policy install: {failure:?}");
+    }
+    fleet
+        .council
+        .call(recovery.id(), "install_policy")
+        .args_json(json!({
+            "account": tenant,
+            "mpc_public_key": pubkey_str(attestation),
+            "attestation_key": pubkey_str(attestation),
+            "timelock_secs": TIMELOCK_SECS,
+        }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -139,6 +238,11 @@ async fn a_watcher_quorum_recovers_a_leased_name_end_to_end() -> Result<()> {
         .await?
         .into_result()?;
 
+    let attestation = watcher_key(51);
+    arm_and_install_name_policy(&fleet, &recovery, &tenant, &attestation).await?;
+    request_name_recovery(&fleet, &recovery, &tla, fleet.relay.id(), &attestation, 0).await?;
+    fleet.worker.fast_forward(1000).await?;
+
     let deadline_ns = now_secs() as u64 * 1_000_000_000 + 3_600_000_000_000;
     let message = name_recovery_message(
         recovery.id().as_str(),
@@ -147,6 +251,7 @@ async fn a_watcher_quorum_recovers_a_leased_name_end_to_end() -> Result<()> {
         fleet.relay.id().as_str(),
         fleet.bob.id().as_str(),
         deadline_ns,
+        0,
     );
     let signatures: Vec<serde_json::Value> = watchers[..2]
         .iter()
@@ -236,6 +341,10 @@ async fn a_single_watcher_cannot_recover_a_leased_name() -> Result<()> {
         .await?
         .into_result()?;
 
+    let attestation = watcher_key(61);
+    arm_and_install_name_policy(&fleet, &recovery, &tenant, &attestation).await?;
+    request_name_recovery(&fleet, &recovery, &tla, fleet.relay.id(), &attestation, 0).await?;
+
     let deadline_ns = now_secs() as u64 * 1_000_000_000 + 3_600_000_000_000;
     let message = name_recovery_message(
         recovery.id().as_str(),
@@ -244,6 +353,7 @@ async fn a_single_watcher_cannot_recover_a_leased_name() -> Result<()> {
         fleet.relay.id().as_str(),
         fleet.bob.id().as_str(),
         deadline_ns,
+        0,
     );
     let attempt = fleet
         .relay
@@ -289,6 +399,18 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
     // AccountId, so recovery happens at the owner's own account. What remains
     // is native recovery for ordinary accounts.
     let victim = fleet.bob.id().clone();
+
+    fleet
+        .bob
+        .call(recovery.id(), "arm_policy_install")
+        .args_json(json!({
+            "attestation_key": pubkey_str(&attestation),
+            "timelock_secs": TIMELOCK_SECS,
+        }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
 
     fleet
         .council

@@ -43,6 +43,21 @@ pub enum Event {
     #[event_version("1.0.0")]
     RegistryChanged { registry: AccountId },
     #[event_version("1.0.0")]
+    PolicyInstallArmed {
+        account: AccountId,
+        attestation_key: PublicKey,
+        timelock_secs: u32,
+    },
+    #[event_version("1.0.0")]
+    PolicyInstallDisarmed { account: AccountId },
+    #[event_version("1.0.0")]
+    NameRecoveryRequested {
+        tla_id: AccountId,
+        name: String,
+        new_owner: AccountId,
+        round: U64,
+    },
+    #[event_version("1.0.0")]
     NameRecoveryApproved {
         tla_id: AccountId,
         name: String,

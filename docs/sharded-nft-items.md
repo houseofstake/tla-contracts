@@ -1,14 +1,13 @@
 ---
 NEP: 0000
 Title: Sharded Non-Fungible Token Items
-Author: House of Stake
+Authors: House of Stake
 Status: Draft
 DiscussionsTo: https://github.com/near/NEPs/discussions
-Type: Standards Track
-Category: Contract
+Type: Contract Standard
 Version: 1.0.0
 Created: 2026-08-16
-Updated: 2026-08-18
+LastUpdated: 2026-08-19
 Requires: 171
 ---
 
@@ -21,6 +20,11 @@ it names.
 An item implements one view, `nft_item_info`, describing itself. A consumer pairs that answer
 with the collection's `nft_token` and refuses unless the two agree. Everything else is NEP-171
 as written.
+
+The scope is items that must carry a human-chosen name. NEP-616 already answers membership for
+sharded items whose account ids may be derived, and collections that can accept a derived id
+should use it instead of this standard. A name is not the hash of anything, so a named item
+cannot have a derived id, and this standard is what remains for that case.
 
 ## Motivation
 
@@ -41,23 +45,39 @@ This standard closes that gap and makes the resulting trust explicit.
 ### What TON does
 
 TEP-62 splits an NFT into a collection contract and one contract per item. The item exposes
-`get_nft_data() -> (init?, index, collection_address, owner_address, individual_content)`.
+`get_nft_data()`, which returns
+`(int init?, int index, slice collection_address, slice owner_address, cell individual_content)`.
 
-TEP-62 does not itself specify how to verify the relationship. TON's documentation names the
-check and is explicit that the claim alone is worthless:
+The `collection_address` in that answer is a claim the item makes about itself, and TEP-62 does
+not specify how a consumer should test it. The standard does supply the other half of the
+comparison: a collection must implement `get_nft_address_by_index(int index)`, returning the
+address of the item at that index. A consumer that asks the collection for the address at index
+`i` and compares it against the account it actually queried has established membership without
+relying on the item's own claim.
 
-> Not every NFT that stores a collection address actually belongs to that collection. Verify
-> that the collection returns the item's address for the item's index.
-
-What makes that check work on TON is that a contract address is derived from a hash of its code
+That comparison is available because a TON contract address is derived from a hash of its code
 and initial data, so the collection can compute the address an item at index `i` must have.
 
-### Why that does not port, and what replaces it
+### The two NEAR analogues, and which one this standard is for
 
-NEAR has no address derivation from code and data. It has something else that serves the same
-purpose: a hierarchical account namespace with a protocol-enforced creation rule.
-`alice.example.near` can only be created by `example.near`. Nobody else can produce that name,
-at any price, by any transaction.
+NEAR has both halves of TON's mechanism, in two forms, and an account id is one or the other.
+
+**Derivation.** NEP-616 defines deterministic account ids derived from a `StateInit`, which pairs
+a reference to a global contract with the key and value pairs written to storage on first
+initialisation. The id is `"0s" .. hex(keccak256(state_init)[12..32])`. That is TON's mechanism:
+a collection can compute the id an item must have, and a contract can authenticate a caller by
+recomputing it from the initialisation state it expects. Where it applies it answers the
+membership question outright, and a collection using it needs nothing from this standard.
+
+**Naming.** A sub-account id is not derived from anything. It is produced by its parent under a
+protocol rule: `alice.example.near` can only be created by `example.near`, and nobody else can
+produce that name, at any price, by any transaction.
+
+The two are mutually exclusive for a given account, because a derived id is a hash and a name a
+person chose is not the hash of anything. A collection whose items are names therefore cannot
+derive their addresses, and that is the case this standard covers: membership rests on the
+namespace rule instead. Collections whose items need no name should use NEP-616 rather than this
+standard.
 
 So the item's index is its own account id, read from `env::current_account_id()` rather than
 stored, and the parent is a substring of that id. A consumer holding the account id already
@@ -70,9 +90,10 @@ comparison that catches a contract lying about which token it is.
 
 ### Alternative considered: binding by code hash
 
-Binding an item to its collection by asserting its deployed code hash is the apparent analogue
-of TON's `hash(code, data)`. Whether it is correct depends on a choice this standard does not
-make for the implementer:
+Where the item must be named, NEP-616's derivation is unavailable, and the nearest remaining
+structural binding is to assert the item's deployed code hash. Whether that is correct depends on
+which form of NEP-591 global contract the implementer deploys, a choice this standard does not
+make for them:
 
 - **Global contract by account id.** Code is replaced fleet-wide by the publisher. A code hash
   check is then meaningless between publishes and breaks every consumer during one. Membership
@@ -169,7 +190,7 @@ conformance is worth more than encoding an incidental invariant.
 3. An item MUST refuse to name itself as its own collection at initialisation.
 4. `owner_id` MUST come from the state that actually governs the account, not a cached copy.
 5. `spec` MUST be `sharded-item-1.0.0` for implementations conforming to this revision, following
-   the `<name>-<semver>` form NEP-171 uses for `nft-1.0.0`. A consumer MUST reject an answer whose
+   the `<name>-<semver>` form NEP-177 uses for `nft-1.0.0`. A consumer MUST reject an answer whose
    `spec` it does not recognise, and MUST ignore fields it does not recognise.
 6. `status` MUST be `Active` if and only if the item would accept a request from an authorised
    caller at the current block. Every other value MUST name the first condition that would
@@ -300,9 +321,10 @@ parent's own contract, and the chain is public:
 
 Steps 2 and 3 are properties of the parent, not of any item, so a consumer MAY check them
 once and cache the result, after which membership of any name is a suffix comparison: free,
-offline, and available to a client that has never seen the account before. This is strictly
-cheaper than TEP-62 can express, because a TON address does not distinguish who may produce
-siblings.
+offline, and available to a client that has never seen the account before. TEP-62 cannot express
+this, because a TON address does not distinguish who may produce siblings. NEP-616 reaches an
+offline check by the other route, recomputing the derived id, and pays for it with an id that
+nobody can choose.
 
 **This cache has a horizon and implementations MUST state it.** The two steps do not decay the
 same way, and conflating them is what makes the cache unsafe.

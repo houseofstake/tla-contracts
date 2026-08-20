@@ -69,6 +69,8 @@ fn account_id() -> AccountId {
 }
 
 fn install(c: &mut MpcRecovery, attestation_key: PublicKey) {
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(attestation_key.clone(), 60);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), attestation_key, 60);
 }
@@ -123,6 +125,7 @@ fn name_sigs(
         new_owner,
         expected_owner,
         deadline_ns,
+        0,
     );
     sks.iter()
         .zip(pks)
@@ -145,6 +148,48 @@ fn deploy_with_registry(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecove
     c
 }
 
+const NAME_TIMELOCK_NS: u64 = 60 * 1_000_000_000;
+
+fn leased_id() -> AccountId {
+    AccountId::from_str(&format!("alice.{TLA}")).unwrap()
+}
+
+fn install_name_policy(c: &mut MpcRecovery, attestation_key: PublicKey) {
+    ctx(leased_id().as_str(), 0, 0);
+    c.arm_policy_install(attestation_key.clone(), 60);
+    ctx(OWNER, 0, 0);
+    c.install_policy(leased_id(), mpc_public_key(), attestation_key, 60);
+}
+
+fn request_name(c: &mut MpcRecovery, sk: &SigningKey, new_owner: &AccountId, round: u64) {
+    let msg = proof::name_request_message(
+        &AccountId::from_str(CONTRACT).unwrap(),
+        &AccountId::from_str(TLA).unwrap(),
+        "alice",
+        new_owner,
+        round,
+    );
+    ctx(OWNER, 0, 0);
+    c.request_name_recovery(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner.clone(),
+        Base64VecU8::from(sk.sign(&msg).to_bytes().to_vec()),
+    );
+}
+
+fn armed_name_recovery(
+    watcher_keys: &[PublicKey],
+    threshold: u32,
+    new_owner: &AccountId,
+) -> (MpcRecovery, SigningKey) {
+    let (attestor, attestor_pk) = keypair();
+    let mut c = deploy_with_registry(watcher_keys, threshold);
+    install_name_policy(&mut c, attestor_pk);
+    request_name(&mut c, &attestor, new_owner, 0);
+    (c, attestor)
+}
+
 fn name_ctx(ts: u64) {
     testing_env!(VMContextBuilder::new()
         .current_account_id(AccountId::from_str(CONTRACT).unwrap())
@@ -158,19 +203,174 @@ fn name_ctx(ts: u64) {
 fn a_name_recovery_needs_a_watcher_quorum() {
     let (w1, wk1) = keypair();
     let (w2, wk2) = keypair();
-    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
     let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
     let expected = AccountId::from_str(VICTIM).unwrap();
-    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, 1_000);
-    name_ctx(500);
+    let deadline = NAME_TIMELOCK_NS * 2;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
     let _ = c.recover_name(
         AccountId::from_str(TLA).unwrap(),
         "alice".to_string(),
         new_owner,
         expected,
-        U64(1_000),
+        U64(deadline),
         sigs,
     );
+}
+
+#[test]
+#[should_panic(expected = "timelock has not elapsed")]
+fn a_name_recovery_refuses_to_settle_inside_the_timelock() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 2;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS - 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "no attested name recovery is pending")]
+fn a_quorum_alone_cannot_move_a_name_without_an_attested_request() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
+    let (_, attestor_pk) = keypair();
+    install_name_policy(&mut c, attestor_pk);
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 2;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+}
+
+#[test]
+#[should_panic(expected = "watcher quorum not met")]
+fn a_quorum_signed_for_an_earlier_round_cannot_settle_a_later_one() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, attestor) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let stale = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    ctx(OWNER, 0, 0);
+    let _ = c.abort_recovery(leased_id());
+    request_name(&mut c, &attestor, &new_owner, 1);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        stale,
+    );
+}
+
+#[test]
+fn a_failed_registry_settle_restores_the_attested_request() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner.clone(),
+        expected,
+        U64(deadline),
+        sigs,
+    );
+    ctx(CONTRACT, 0, 0);
+    assert!(!c.on_name_recovered(leased_id(), 0, Err(PromiseError::Failed)));
+    let entry = c.accounts.get(&leased_id()).unwrap();
+    assert!(matches!(
+        &entry.phase,
+        Phase::NameRequested { new_owner: pending, round: 0, .. } if *pending == new_owner
+    ));
+}
+
+#[test]
+fn a_successful_registry_settle_clears_the_request() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+    ctx(CONTRACT, 0, 0);
+    assert!(c.on_name_recovered(leased_id(), 0, Ok(())));
+    let entry = c.accounts.get(&leased_id()).unwrap();
+    assert!(matches!(entry.phase, Phase::Idle));
+}
+
+#[test]
+#[should_panic(expected = "no abortable recovery")]
+fn a_name_recovery_in_flight_cannot_be_aborted() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+    ctx(OWNER, 0, 0);
+    let _ = c.abort_recovery(leased_id());
+}
+
+#[test]
+#[should_panic(expected = "invalid attestation signature")]
+fn a_name_request_refuses_an_attestation_from_the_wrong_key() {
+    let (wk1, pk1) = keypair();
+    let (_, pk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let mut c = deploy_with_registry(&[pk1, pk2], 2);
+    let (_, attestor_pk) = keypair();
+    install_name_policy(&mut c, attestor_pk);
+    request_name(&mut c, &wk1, &new_owner, 0);
 }
 
 #[test]
@@ -178,17 +378,18 @@ fn a_name_recovery_needs_a_watcher_quorum() {
 fn one_watcher_cannot_recover_a_name_alone() {
     let (w1, wk1) = keypair();
     let (_w2, wk2) = keypair();
-    let mut c = deploy_with_registry(&[wk1.clone(), wk2], 2);
     let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2], 2, &new_owner);
     let expected = AccountId::from_str(VICTIM).unwrap();
-    let sigs = name_sigs(&[&w1], &[wk1], &new_owner, &expected, 1_000);
-    name_ctx(500);
+    let deadline = NAME_TIMELOCK_NS * 2;
+    let sigs = name_sigs(&[&w1], &[wk1], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
     let _ = c.recover_name(
         AccountId::from_str(TLA).unwrap(),
         "alice".to_string(),
         new_owner,
         expected,
-        U64(1_000),
+        U64(deadline),
         sigs,
     );
 }
@@ -218,17 +419,18 @@ fn a_stale_quorum_cannot_be_replayed_later() {
 fn a_quorum_for_one_holder_does_not_move_a_name_held_by_another() {
     let (w1, wk1) = keypair();
     let (w2, wk2) = keypair();
-    let mut c = deploy_with_registry(&[wk1.clone(), wk2.clone()], 2);
     let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
     let signed_for = AccountId::from_str(VICTIM).unwrap();
-    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &signed_for, 1_000);
-    name_ctx(500);
+    let deadline = NAME_TIMELOCK_NS * 2;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &signed_for, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
     let _ = c.recover_name(
         AccountId::from_str(TLA).unwrap(),
         "alice".to_string(),
         new_owner,
         AccountId::from_str("someone-else.testnet").unwrap(),
-        U64(1_000),
+        U64(deadline),
         sigs,
     );
 }
@@ -597,6 +799,18 @@ fn abort_from_approved_returns_to_idle() {
         c.accounts.get(&account_id()).unwrap().phase,
         Phase::Idle
     ));
+}
+
+#[test]
+fn the_account_under_recovery_can_abort_its_own_case() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
+    install(&mut c, mother_pk);
+    approve_recovery(&mut c, &mother, &w1, wk1);
+    ctx(VICTIM, 0, 6);
+    let _ = c.abort_recovery(account_id());
+    assert!(c.pending_target(account_id()).is_none());
 }
 
 #[test]
@@ -1056,12 +1270,78 @@ fn set_installer_rejects_a_non_owner() {
 }
 
 #[test]
+#[should_panic(expected = "has not armed a policy install")]
+fn the_installer_cannot_install_a_policy_the_account_never_armed() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 60);
+}
+
+#[test]
+#[should_panic(expected = "attestation key does not match")]
+fn the_installer_cannot_swap_the_attestation_key_the_account_armed() {
+    let (_, wk1) = keypair();
+    let (_, armed_pk) = keypair();
+    let (_, other_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(armed_pk, 60);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), other_pk, 60);
+}
+
+#[test]
+#[should_panic(expected = "timelock does not match")]
+fn the_installer_cannot_shorten_the_timelock_the_account_armed() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(mother_pk.clone(), 259_200);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 60);
+}
+
+#[test]
+#[should_panic(expected = "has not armed a policy install")]
+fn an_arming_is_consumed_by_the_install_it_authorised() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+    ctx(OWNER, 0, 0);
+    c.install_policy(
+        AccountId::from_str("other.testnet").unwrap(),
+        mpc_public_key(),
+        mother_pk,
+        60,
+    );
+}
+
+#[test]
+fn an_account_can_withdraw_its_arming_before_the_install() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(mother_pk, 60);
+    assert!(c.armed_policy_install(account_id()).is_some());
+    ctx(VICTIM, 0, 0);
+    c.disarm_policy_install();
+    assert!(c.armed_policy_install(account_id()).is_none());
+}
+
+#[test]
 fn a_delegated_installer_can_install_a_policy() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(mother_pk.clone(), 259_200);
     ctx(INSTALLER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
     assert_eq!(c.timelock_of(account_id()), Some(259_200));
@@ -1074,6 +1354,8 @@ fn the_owner_can_still_install_after_delegating() {
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(mother_pk.clone(), 259_200);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
     assert_eq!(c.timelock_of(account_id()), Some(259_200));
@@ -1385,4 +1667,141 @@ fn init_rejects_an_owner_that_is_the_recovery_contract_itself() {
         vec![wk1, spare_watcher()],
         2,
     );
+}
+
+mod stored_shape {
+    use super::*;
+    use crate::state::{Account, Phase, Policy};
+    use near_sdk::borsh;
+
+    fn discriminant(phase: Phase) -> u8 {
+        let account = Account {
+            policy: Policy {
+                mpc_public_key: mpc_public_key(),
+                attestation_key: mpc_public_key(),
+                timelock_secs: 60,
+            },
+            round: 0,
+            phase,
+        };
+        let account_bytes = borsh::to_vec(&account).expect("Account must serialize");
+        let phase_bytes = borsh::to_vec(&account.phase).expect("Phase must serialize");
+        assert!(
+            account_bytes.ends_with(&phase_bytes),
+            "Phase must remain the trailing field of Account"
+        );
+        phase_bytes[0]
+    }
+
+    #[test]
+    fn phase_variants_are_append_only() {
+        let key = mpc_public_key();
+        let name: AccountId = AccountId::from_str("bob.testnet").unwrap();
+        assert_eq!(discriminant(Phase::Idle), 0);
+        assert_eq!(
+            discriminant(Phase::Requested {
+                new_owner: key.clone(),
+                round: 0,
+                requested_at: 0,
+            }),
+            1
+        );
+        assert_eq!(
+            discriminant(Phase::Approved {
+                new_owner: key.clone(),
+                round: 0,
+            }),
+            2,
+            "every stored Account carries a Phase discriminant, so reordering or inserting a \
+             variant silently reinterprets the recovery state of every account on chain"
+        );
+        assert_eq!(
+            discriminant(Phase::Resolving {
+                new_owner: key,
+                round: 0,
+            }),
+            3
+        );
+        assert_eq!(
+            discriminant(Phase::NameRequested {
+                new_owner: name.clone(),
+                round: 0,
+                requested_at: 0,
+            }),
+            4
+        );
+        assert_eq!(
+            discriminant(Phase::NameResolving {
+                new_owner: name,
+                round: 0,
+                requested_at: 0,
+            }),
+            5
+        );
+    }
+}
+
+mod live_state {
+    use super::*;
+    use near_sdk::borsh::BorshDeserialize;
+
+    const LIVE_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0\
+FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAMAAAAhAAAAAIS/j9urBasuVw52LoAo\
+xzfkejeW2buaWME8f8jHrqeAIQAAAADr/z7Ju307NQA7YYP3VYhQKUN4CbJDMaT7xFKNCHdA2CEAAAAAui7tbbQ7ad8XqLuo\
+FtbbZmmzhXxFgzdKBQP+6BhqW/cCAAAAAQAAAGEBAAAAcgAAARgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQBAAAAbQ==";
+
+    fn raw() -> Vec<u8> {
+        use near_sdk::base64::Engine;
+        near_sdk::base64::engine::general_purpose::STANDARD
+            .decode(LIVE_STATE_B64)
+            .expect("fixture is valid base64")
+    }
+
+    #[test]
+    fn the_deployed_state_decodes_under_the_current_struct() {
+        let parsed = MpcRecovery::try_from_slice(&raw());
+        assert!(
+            parsed.is_ok(),
+            "the deployed state no longer reads under this struct, so an upgrade would \
+             leave the account unreadable: {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn the_deployed_state_is_not_the_legacy_shape() {
+        assert!(
+            LegacyMpcRecovery::try_from_slice(&raw()).is_err(),
+            "the fixture must decode as exactly one shape, or migrate cannot tell which \
+             one the account is holding"
+        );
+    }
+}
+
+mod migration_invariants {
+    use super::*;
+    use near_sdk::borsh::BorshDeserialize;
+
+    #[test]
+    fn the_legacy_and_current_shapes_are_distinguishable() {
+        let bytes = near_sdk::borsh::to_vec(&LegacyMpcRecovery {
+            owner: AccountId::from_str(OWNER).unwrap(),
+            installer: AccountId::from_str(OWNER).unwrap(),
+            signer: AccountId::from_str(OWNER).unwrap(),
+            transfer_authority: AccountId::from_str(TRANSFER_AUTHORITY).unwrap(),
+            watchers: vec![mpc_public_key(), spare_watcher()],
+            threshold: 2,
+            accounts: near_sdk::store::LookupMap::new(b"a"),
+            round_floor: near_sdk::store::LookupMap::new(b"r"),
+            approved_code_hash: None,
+            approved_at: None,
+            registry: None,
+        })
+        .unwrap();
+        assert!(
+            MpcRecovery::try_from_slice(&bytes).is_err(),
+            "legacy bytes must not parse as the current shape, or migrate cannot tell \
+             which one it is holding and an upgrade can silently skip the migration"
+        );
+    }
 }

@@ -31,6 +31,7 @@ const _: () = assert!(
     ROTATION_EPOCH <= IMPL_VERSION,
     "the epoch names the impl version whose migration last reset rotation_seq, so it can never run ahead of the code reporting it"
 );
+const AUTHORITY_FREEZE_COOLDOWN_NS: u64 = MAX_AUTHORITY_HOLD_NS;
 const RENTER_BUFFER: NearToken = NearToken::from_millinear(5);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
@@ -350,8 +351,18 @@ impl TenantWallet {
     #[init(ignore_state)]
     pub fn hos_migrate(collection_id: AccountId) -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
-        let old = LegacyTenantWallet::try_from_slice(&raw)
-            .unwrap_or_else(|_| env::panic_str(error::NO_STATE));
+        let old = match LegacyTenantWallet::try_from_slice(&raw) {
+            Ok(old) => old,
+            Err(_) => {
+                let current =
+                    Self::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str(error::NO_STATE));
+                require!(
+                    env::predecessor_account_id() == current.authority,
+                    error::ONLY_AUTHORITY
+                );
+                return current;
+            }
+        };
         require!(
             env::predecessor_account_id() == old.authority,
             error::ONLY_AUTHORITY
@@ -573,6 +584,12 @@ impl TenantWallet {
         asked_by: Option<AccountId>,
     ) {
         self.assert_authority();
+        if matches!(cause, RotationCause::Recovery) {
+            require!(
+                self.effective_frozen() != FreezeState::SelfFrozen,
+                error::SELF_FROZEN
+            );
+        }
         let previous_owner = self.owner.clone();
         if matches!(cause, RotationCause::Revert) {
             let pinned = self
@@ -645,11 +662,16 @@ impl TenantWallet {
         );
         let self_initiated = caller != self.authority;
         self.frozen = if self_initiated {
-            self.authority_freeze_until_ns = 0;
             FreezeState::SelfFrozen
         } else {
-            self.authority_freeze_until_ns =
-                env::block_timestamp().saturating_add(MAX_AUTHORITY_HOLD_NS);
+            let now = env::block_timestamp();
+            require!(
+                now >= self
+                    .authority_freeze_until_ns
+                    .saturating_add(AUTHORITY_FREEZE_COOLDOWN_NS),
+                error::FREEZE_COOLDOWN
+            );
+            self.authority_freeze_until_ns = now.saturating_add(MAX_AUTHORITY_HOLD_NS);
             FreezeState::AuthorityFrozen
         };
         Event::Frozen { self_initiated }.emit();
@@ -673,7 +695,6 @@ impl TenantWallet {
             FreezeState::AuthorityFrozen => require!(by_authority, error::AUTHORITY_FROZEN),
         }
         self.frozen = FreezeState::Unfrozen;
-        self.authority_freeze_until_ns = 0;
         Event::Unfrozen {}.emit();
     }
 

@@ -1246,6 +1246,48 @@ fn a_frozen_wallet_blocks_renter_actions() {
 }
 
 #[test]
+#[should_panic(expected = "self-frozen")]
+fn a_self_freeze_refuses_a_recovery_rotation() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery, None);
+}
+
+#[test]
+fn an_authority_freeze_does_not_block_a_recovery_rotation() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Recovery, None);
+    assert_eq!(c.nft_item_info().owner_id, acc(BUYER));
+}
+
+#[test]
+fn a_self_freeze_does_not_block_reclaim_after_expiry() {
+    let mut c = deploy();
+    ctx(OWNER, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns() + YEAR_NS + 1);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+    assert_eq!(c.hos_lease().frozen, FreezeState::SelfFrozen);
+}
+
+#[test]
+#[should_panic(expected = "cooldown")]
+fn the_authority_cannot_re_arm_a_freeze_immediately_after_one_lapses() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    let lapsed = now_ns() + MAX_AUTHORITY_HOLD_NS + 1;
+    ctx(AUTHORITY, 1, lapsed);
+    assert_eq!(c.hos_lease().frozen, FreezeState::Unfrozen);
+    c.hos_freeze();
+}
+
+#[test]
 #[should_panic(expected = "sweep requires an expired lease")]
 fn sweeps_require_an_expired_lease() {
     let mut c = deploy();
@@ -1516,7 +1558,7 @@ fn the_authority_can_refreeze_after_a_lapse() {
     let mut c = deploy();
     ctx(AUTHORITY, 1, now_ns());
     c.hos_freeze();
-    ctx(AUTHORITY, 1, now_ns() + MAX_AUTHORITY_HOLD_NS);
+    ctx(AUTHORITY, 1, now_ns() + (MAX_AUTHORITY_HOLD_NS * 2) + 1);
     c.hos_freeze();
     assert_eq!(c.hos_lease().frozen, FreezeState::AuthorityFrozen);
 }
@@ -2094,5 +2136,43 @@ mod sharded_item {
             "the epoch moves only with a reset. Moving it here would tell every holder \
              their recorded sequence is incomparable when it is still the same counter"
         );
+    }
+}
+
+mod migration_invariants {
+    use super::*;
+    use near_sdk::borsh::BorshDeserialize;
+
+    #[test]
+    fn a_legacy_wallet_with_no_grants_is_indistinguishable_from_a_current_one() {
+        let c = deploy();
+        let legacy = legacy_state(c);
+        assert!(
+            legacy.spend_grants.is_empty(),
+            "this test is about the empty-map case"
+        );
+        let raw = near_sdk::borsh::to_vec(&legacy).unwrap();
+        let as_current = TenantWallet::try_from_slice(&raw);
+        assert!(
+            as_current.is_ok(),
+            "documented defect: an empty BTreeMap serialises identically under \
+             LegacySpendGrant and SpendGrant, so the two state shapes are the same bytes. \
+             Any migrate that decides by parse order can pick the wrong one. If this ever \
+             starts failing, the shapes became distinguishable and the sniffing is safe."
+        );
+    }
+
+    #[test]
+    fn migrate_run_twice_does_not_brick_the_account() {
+        let c = deploy();
+        let legacy = legacy_state(c);
+        ctx(AUTHORITY, 0, now_ns());
+        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+        let first = TenantWallet::hos_migrate(acc(REGISTRY));
+        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&first).unwrap());
+        ctx(AUTHORITY, 0, now_ns());
+        let second = TenantWallet::hos_migrate(acc(REGISTRY));
+        assert_eq!(second.owner, acc(OWNER), "a second migrate must be a no-op");
+        assert_eq!(second.authority, acc(AUTHORITY));
     }
 }

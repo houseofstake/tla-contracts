@@ -15,11 +15,12 @@ use near_sdk::{
 };
 
 use crate::events::Event;
-use crate::state::{Account, Phase, Policy};
+use crate::state::{Account, ArmedPolicy, Phase, Policy};
 
 const SIGN_GAS: Gas = Gas::from_tgas(60);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 const GAS_FOR_RECOVER_NAME: Gas = Gas::from_tgas(120);
+const GAS_FOR_NAME_SETTLE: Gas = Gas::from_tgas(5);
 const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const MIN_TIMELOCK_SECS: u32 = 60;
@@ -45,6 +46,7 @@ pub struct MpcRecovery {
     approved_code_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
     registry: Option<AccountId>,
+    armed: LookupMap<AccountId, ArmedPolicy>,
 }
 
 /// The shape currently on chain. Only read by `migrate`, and it has to keep
@@ -75,6 +77,12 @@ pub struct WatcherSignature {
 pub enum Verdict {
     Approve,
     Cancel,
+}
+
+#[near(serializers = [json])]
+pub struct ArmedPolicyView {
+    pub attestation_key: PublicKey,
+    pub timelock_secs: u32,
 }
 
 #[near(serializers = [json])]
@@ -110,6 +118,7 @@ impl MpcRecovery {
             threshold,
             accounts: LookupMap::new(b"a"),
             round_floor: LookupMap::new(b"r"),
+            armed: LookupMap::new(b"m"),
             approved_code_hash: None,
             approved_at: None,
             registry: None,
@@ -120,9 +129,11 @@ impl MpcRecovery {
     #[init(ignore_state)]
     pub fn migrate() -> Self {
         Event::Upgraded {}.emit();
+        if let Some(current) = hos_common::try_state_read::<Self>() {
+            return current;
+        }
         let Some(old) = hos_common::try_state_read::<LegacyMpcRecovery>() else {
-            return hos_common::try_state_read::<Self>()
-                .unwrap_or_else(|| env::panic_str(error::NO_STATE));
+            env::panic_str(error::NO_STATE)
         };
         Self {
             owner: old.owner,
@@ -133,6 +144,7 @@ impl MpcRecovery {
             threshold: old.threshold,
             accounts: old.accounts,
             round_floor: old.round_floor,
+            armed: LookupMap::new(b"m"),
             approved_code_hash: None,
             approved_at: None,
             registry: old.registry,
@@ -227,6 +239,48 @@ impl MpcRecovery {
         Event::RegistryChanged { registry }.emit();
     }
 
+    pub fn request_name_recovery(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        new_owner: AccountId,
+        attestation: Base64VecU8,
+    ) {
+        let contract = env::current_account_id();
+        let account = leased_account_id(&tla_id, &name);
+        let entry = self
+            .accounts
+            .get_mut(&account)
+            .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
+        require!(matches!(entry.phase, Phase::Idle), error::NOT_IDLE);
+        let message =
+            proof::name_request_message(&contract, &tla_id, &name, &new_owner, entry.round);
+        require!(
+            proof::verify(
+                &message,
+                &into_sig(attestation.into()),
+                &entry.policy.attestation_key
+            ),
+            error::BAD_ATTESTATION
+        );
+        let round = entry.round;
+        entry.phase = Phase::NameRequested {
+            new_owner: new_owner.clone(),
+            round,
+            requested_at: env::block_timestamp(),
+        };
+        entry.round = round
+            .checked_add(1)
+            .unwrap_or_else(|| env::panic_str(error::ROUND_EXHAUSTED));
+        Event::NameRecoveryRequested {
+            tla_id,
+            name,
+            new_owner,
+            round: U64(round),
+        }
+        .emit();
+    }
+
     #[payable]
     pub fn recover_name(
         &mut self,
@@ -246,6 +300,26 @@ impl MpcRecovery {
             env::block_timestamp() < deadline_ns.0,
             error::QUORUM_EXPIRED
         );
+        let account = leased_account_id(&tla_id, &name);
+        let entry = self
+            .accounts
+            .get_mut(&account)
+            .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
+        let timelock_ns = u64::from(entry.policy.timelock_secs)
+            .checked_mul(1_000_000_000)
+            .unwrap_or_else(|| env::panic_str(error::TIMELOCK_TOO_LONG));
+        let (pending_owner, round, requested_at) = entry
+            .phase
+            .name_pending()
+            .unwrap_or_else(|| env::panic_str(error::NAME_NOT_REQUESTED));
+        require!(*pending_owner == new_owner, error::DESTINATION_CHANGED);
+        require!(
+            env::block_timestamp()
+                >= requested_at
+                    .checked_add(timelock_ns)
+                    .unwrap_or_else(|| env::panic_str(error::TIMELOCK_TOO_LONG)),
+            error::TIMELOCK_ACTIVE
+        );
         let message = proof::name_recovery_message(
             &env::current_account_id(),
             &tla_id,
@@ -253,6 +327,7 @@ impl MpcRecovery {
             &new_owner,
             &expected_owner,
             deadline_ns.0,
+            round,
         );
         let sigs: Vec<(PublicKey, [u8; 64])> = signatures
             .into_iter()
@@ -267,25 +342,90 @@ impl MpcRecovery {
             proof::verify_quorum(&message, &sigs, &self.watchers, self.threshold),
             error::NO_QUORUM
         );
+        self.accounts
+            .get_mut(&account)
+            .unwrap_or_else(|| env::panic_str(error::NO_POLICY))
+            .phase = Phase::NameResolving {
+            new_owner: new_owner.clone(),
+            round,
+            requested_at,
+        };
         Event::NameRecoveryApproved {
             tla_id: tla_id.clone(),
             name: name.clone(),
             new_owner: new_owner.clone(),
         }
         .emit();
-        Promise::new(registry).function_call(
-            "recover_sub_account".to_string(),
-            near_sdk::serde_json::json!({
-                "tla_id": tla_id,
-                "name": name,
-                "new_owner": new_owner,
-                "expected_owner": expected_owner,
-            })
-            .to_string()
-            .into_bytes(),
-            NearToken::from_yoctonear(1),
-            GAS_FOR_RECOVER_NAME,
-        )
+        Promise::new(registry)
+            .function_call(
+                "recover_sub_account".to_string(),
+                near_sdk::serde_json::json!({
+                    "tla_id": tla_id,
+                    "name": name,
+                    "new_owner": new_owner,
+                    "expected_owner": expected_owner,
+                })
+                .to_string()
+                .into_bytes(),
+                NearToken::from_yoctonear(1),
+                GAS_FOR_RECOVER_NAME,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_NAME_SETTLE)
+                    .on_name_recovered(account, round),
+            )
+    }
+
+    #[private]
+    pub fn on_name_recovered(
+        &mut self,
+        account: AccountId,
+        round: u64,
+        #[callback_result] outcome: Result<(), PromiseError>,
+    ) -> bool {
+        let settled = outcome.is_ok();
+        self.settle_name_resolving(&account, round, settled);
+        settled
+    }
+
+    pub fn arm_policy_install(&mut self, attestation_key: PublicKey, timelock_secs: u32) {
+        let account = env::predecessor_account_id();
+        require!(
+            hos_common::is_ed25519(&attestation_key),
+            error::ATTESTATION_NOT_ED25519
+        );
+        require!(
+            timelock_secs >= MIN_TIMELOCK_SECS,
+            error::TIMELOCK_TOO_SHORT
+        );
+        require!(timelock_secs <= MAX_TIMELOCK_SECS, error::TIMELOCK_TOO_LONG);
+        self.armed.insert(
+            account.clone(),
+            ArmedPolicy {
+                attestation_key: attestation_key.clone(),
+                timelock_secs,
+            },
+        );
+        Event::PolicyInstallArmed {
+            account,
+            attestation_key,
+            timelock_secs,
+        }
+        .emit();
+    }
+
+    pub fn disarm_policy_install(&mut self) {
+        let account = env::predecessor_account_id();
+        require!(self.armed.remove(&account).is_some(), error::NOT_ARMED);
+        Event::PolicyInstallDisarmed { account }.emit();
+    }
+
+    pub fn armed_policy_install(&self, account: AccountId) -> Option<ArmedPolicyView> {
+        self.armed.get(&account).map(|armed| ArmedPolicyView {
+            attestation_key: armed.attestation_key.clone(),
+            timelock_secs: armed.timelock_secs,
+        })
     }
 
     pub fn install_policy(
@@ -318,7 +458,21 @@ impl MpcRecovery {
                 );
                 existing.round
             }
-            None => self.round_floor.get(&account).copied().unwrap_or(0),
+            None => {
+                let armed = self
+                    .armed
+                    .remove(&account)
+                    .unwrap_or_else(|| env::panic_str(error::NOT_ARMED));
+                require!(
+                    armed.attestation_key == attestation_key,
+                    error::ARMED_KEY_MISMATCH
+                );
+                require!(
+                    armed.timelock_secs == timelock_secs,
+                    error::ARMED_TIMELOCK_MISMATCH
+                );
+                self.round_floor.get(&account).copied().unwrap_or(0)
+            }
         };
         self.accounts.insert(
             account.clone(),
@@ -472,14 +626,21 @@ impl MpcRecovery {
     }
 
     pub fn abort_recovery(&mut self, account: AccountId) -> PromiseOrValue<()> {
-        require!(self.is_installer(), error::ONLY_INSTALLER);
+        require!(
+            self.is_installer() || env::predecessor_account_id() == account,
+            error::ONLY_INSTALLER_OR_HOLDER
+        );
         let entry = self
             .accounts
             .get_mut(&account)
             .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
         let round = match &entry.phase {
-            Phase::Requested { round, .. } | Phase::Approved { round, .. } => *round,
-            Phase::Idle | Phase::Resolving { .. } => env::panic_str(error::NOT_ACTIVE),
+            Phase::Requested { round, .. }
+            | Phase::Approved { round, .. }
+            | Phase::NameRequested { round, .. } => *round,
+            Phase::Idle | Phase::Resolving { .. } | Phase::NameResolving { .. } => {
+                env::panic_str(error::NOT_ACTIVE)
+            }
         };
         entry.phase = Phase::Idle;
         Event::Aborted {
@@ -660,6 +821,25 @@ impl MpcRecovery {
             )
     }
 
+    fn settle_name_resolving(&mut self, account: &AccountId, round: u64, done: bool) -> bool {
+        let Some(entry) = self.accounts.get_mut(account) else {
+            return false;
+        };
+        let Some((new_owner, requested_at)) = entry.phase.name_resolving(round) else {
+            return false;
+        };
+        entry.phase = if done {
+            Phase::Idle
+        } else {
+            Phase::NameRequested {
+                new_owner,
+                round,
+                requested_at,
+            }
+        };
+        true
+    }
+
     fn settle_resolving(&mut self, account: &AccountId, round: u64, done: bool) -> bool {
         let Some(entry) = self.accounts.get_mut(account) else {
             return false;
@@ -687,6 +867,12 @@ struct AddKeyRequest {
 
 fn native_path(account: &AccountId) -> String {
     format!("hos-recovery/{account}")
+}
+
+fn leased_account_id(tla_id: &AccountId, name: &str) -> AccountId {
+    format!("{name}.{tla_id}")
+        .parse()
+        .unwrap_or_else(|_| env::panic_str(error::INVALID_LEASED_ACCOUNT))
 }
 
 fn into_sig(bytes: Vec<u8>) -> [u8; 64] {
