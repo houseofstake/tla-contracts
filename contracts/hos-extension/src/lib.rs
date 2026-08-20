@@ -13,6 +13,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
+const STATE_VERSION: u16 = 1;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
@@ -82,6 +83,7 @@ enum StorageKey {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct HosExtension {
+    pub(crate) state_version: u16,
     pub(crate) admins: IterableSet<AccountId>,
     pub(crate) registry: AccountId,
     pub(crate) recovery: AccountId,
@@ -93,20 +95,7 @@ pub struct HosExtension {
     pub(crate) council: AccountId,
     pub(crate) paused_until_ns: u64,
     pub(crate) recovery_reset_pending: IterableSet<AccountId>,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyHosExtension {
-    admins: IterableSet<AccountId>,
-    registry: AccountId,
-    recovery: AccountId,
-    paused: bool,
-    version: u8,
-    treasury: AccountId,
-    approved_code_hash: Option<[u8; 32]>,
-    approved_at: Option<u64>,
-    council: AccountId,
-    paused_until_ns: u64,
+    pub(crate) upgrade_proven: bool,
 }
 
 #[near]
@@ -126,6 +115,7 @@ impl HosExtension {
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);
         Self {
+            state_version: STATE_VERSION,
             admins,
             registry,
             recovery,
@@ -137,33 +127,27 @@ impl HosExtension {
             council,
             paused_until_ns: 0,
             recovery_reset_pending: IterableSet::new(StorageKey::RecoveryResetPending),
+            upgrade_proven: false,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        let Some(mut current) = hos_common::try_state_read::<Self>() else {
+            env::panic_str(error::NO_STATE)
+        };
+        near_sdk::require!(
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        current.version = CONTRACT_VERSION;
+        current.upgrade_proven = true;
         Event::Upgraded {
             by: env::predecessor_account_id(),
         }
         .emit();
-        let Some(old) = hos_common::try_state_read::<LegacyHosExtension>() else {
-            return hos_common::try_state_read::<Self>()
-                .unwrap_or_else(|| env::panic_str("no state to migrate"));
-        };
-        Self {
-            admins: old.admins,
-            registry: old.registry,
-            recovery: old.recovery,
-            paused: old.paused,
-            version: CONTRACT_VERSION,
-            treasury: old.treasury,
-            approved_code_hash: old.approved_code_hash,
-            approved_at: old.approved_at,
-            council: old.council,
-            paused_until_ns: old.paused_until_ns,
-            recovery_reset_pending: IterableSet::new(StorageKey::RecoveryResetPending),
-        }
+        current
     }
 
     pub fn get_council(&self) -> AccountId {
@@ -306,6 +290,9 @@ impl HosExtension {
     pub fn seal(&mut self, public_key: PublicKey) -> Result<Promise, ContractError> {
         self.assert_one_yocto()?;
         self.assert_council()?;
+        if !self.upgrade_proven {
+            return Err(ContractError::UpgradeNotProven);
+        }
         Event::Sealed {
             public_key: (&public_key).into(),
             by: env::predecessor_account_id(),

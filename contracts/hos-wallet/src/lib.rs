@@ -13,7 +13,7 @@ use defuse_wallet::{
 };
 use defuse_wallet_no_sign::NoPublicKey;
 use near_sdk::borsh::BorshDeserialize;
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::{
     env, ext_contract, near, require, AccountId, FunctionError, Gas, NearToken, PanicOnDefault,
     Promise,
@@ -26,6 +26,10 @@ use hos_common::RotationCause;
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
 pub const IMPL_VERSION: u32 = 6;
+pub const STATE_VERSION: u16 = 1;
+const IMPL_PIN_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
+const GAS_FOR_PIN_RESERVE: Gas = Gas::from_tgas(30);
+const MIN_PIN_GAS: Gas = Gas::from_tgas(100);
 pub const ROTATION_EPOCH: u32 = 4;
 const _: () = assert!(
     ROTATION_EPOCH <= IMPL_VERSION,
@@ -111,6 +115,14 @@ pub enum ItemStatus {
 }
 
 #[near(serializers = [json])]
+pub struct ImplPinView {
+    pub pinned: Option<Base58CryptoHash>,
+    pub approved: Option<Base58CryptoHash>,
+    pub approved_at_ns: U64,
+    pub pin_delay_ns: U64,
+}
+
+#[near(serializers = [json])]
 pub struct LeaseView {
     pub authority: AccountId,
     pub payout_account: AccountId,
@@ -193,32 +205,6 @@ struct NftTransferArgs {
     memo: Option<String>,
 }
 
-#[near(serializers = [borsh])]
-#[derive(Clone)]
-pub struct LegacySpendGrant {
-    pub receivers: BTreeSet<AccountId>,
-    pub budget_yocto: U128,
-    pub spent_yocto: U128,
-    pub expires_at: U64,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyTenantWallet {
-    pub wallet: State<NoPublicKey>,
-    pub authority: AccountId,
-    pub owner: AccountId,
-    pub collection_id: AccountId,
-    pub payout_account: AccountId,
-    pub lease_until_ns: u64,
-    pub state: OperatingState,
-    pub frozen: FreezeState,
-    pub authority_freeze_until_ns: u64,
-    pub spend_grants: BTreeMap<AccountId, LegacySpendGrant>,
-    pub revert_to: Option<AccountId>,
-    pub revert_until_ns: u64,
-    pub rotation_seq: u64,
-}
-
 #[near(
     contract_state(key = STATE_KEY),
     contract_metadata(
@@ -229,6 +215,7 @@ pub struct LegacyTenantWallet {
 )]
 #[derive(PanicOnDefault)]
 pub struct TenantWallet {
+    state_version: u16,
     wallet: State<NoPublicKey>,
     authority: AccountId,
     owner: AccountId,
@@ -242,6 +229,9 @@ pub struct TenantWallet {
     revert_to: Option<AccountId>,
     revert_until_ns: u64,
     rotation_seq: u64,
+    pinned_impl: Option<near_sdk::CryptoHash>,
+    approved_impl: Option<near_sdk::CryptoHash>,
+    approved_impl_at: u64,
 }
 
 #[near]
@@ -332,6 +322,7 @@ impl TenantWallet {
             .extensions([owner_account.clone(), authority.clone()]);
         wallet.signature_enabled = false;
         Self {
+            state_version: STATE_VERSION,
             wallet,
             authority,
             owner: owner_account,
@@ -345,72 +336,39 @@ impl TenantWallet {
             revert_to: None,
             revert_until_ns: 0,
             rotation_seq: 0,
+            pinned_impl: None,
+            approved_impl: None,
+            approved_impl_at: 0,
         }
     }
 
     #[init(ignore_state)]
     pub fn hos_migrate(collection_id: AccountId) -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
-        let old = match LegacyTenantWallet::try_from_slice(&raw) {
-            Ok(old) => old,
-            Err(_) => {
-                let current =
-                    Self::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str(error::NO_STATE));
-                require!(
-                    env::predecessor_account_id() == current.authority,
-                    error::ONLY_AUTHORITY
-                );
-                return current;
-            }
-        };
+        let current =
+            Self::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str(error::NO_STATE));
         require!(
-            env::predecessor_account_id() == old.authority,
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        require!(
+            env::predecessor_account_id() == current.authority,
             error::ONLY_AUTHORITY
         );
-        require!(old.owner != old.authority, error::UNAUTHORIZED);
+        require!(current.owner != current.authority, error::UNAUTHORIZED);
         require!(
-            old.wallet.extensions.contains(&old.owner),
+            current.wallet.extensions.contains(&current.owner),
             error::ONLY_OWNER
         );
         require!(
-            old.wallet.extensions.contains(&old.authority),
+            current.wallet.extensions.contains(&current.authority),
             error::AUTHORITY_PROTECTED
         );
         require!(
-            collection_id != env::current_account_id(),
-            error::COLLECTION_IS_SELF
+            collection_id == current.collection_id,
+            error::COLLECTION_MOVED
         );
-        Self {
-            wallet: old.wallet,
-            authority: old.authority,
-            owner: old.owner,
-            collection_id,
-            payout_account: old.payout_account,
-            lease_until_ns: old.lease_until_ns,
-            state: old.state,
-            frozen: old.frozen,
-            authority_freeze_until_ns: old.authority_freeze_until_ns,
-            spend_grants: old
-                .spend_grants
-                .into_iter()
-                .map(|(extension, grant)| {
-                    (
-                        extension,
-                        SpendGrant {
-                            receivers: grant.receivers,
-                            budget_yocto: grant.budget_yocto,
-                            spent_yocto: grant.spent_yocto,
-                            tokens: BTreeMap::new(),
-                            items: BTreeMap::new(),
-                            expires_at: grant.expires_at,
-                        },
-                    )
-                })
-                .collect(),
-            revert_to: old.revert_to,
-            revert_until_ns: old.revert_until_ns,
-            rotation_seq: old.rotation_seq,
-        }
+        current
     }
 
     /// Re-granting raises ceilings without clearing what was already spent.
@@ -545,6 +503,15 @@ impl TenantWallet {
         self.payout_account.clone()
     }
 
+    pub fn hos_impl_pin(&self) -> ImplPinView {
+        ImplPinView {
+            pinned: self.pinned_impl.map(Base58CryptoHash::from),
+            approved: self.approved_impl.map(Base58CryptoHash::from),
+            approved_at_ns: U64(self.approved_impl_at),
+            pin_delay_ns: U64(IMPL_PIN_DELAY_NS),
+        }
+    }
+
     #[payable]
     pub fn hos_set_payout_account(&mut self, payout_account: AccountId, expected_owner: AccountId) {
         self.assert_authority();
@@ -555,6 +522,70 @@ impl TenantWallet {
         );
         self.payout_account = payout_account.clone();
         Event::PayoutAccountSet { payout_account }.emit();
+    }
+
+    #[payable]
+    pub fn hos_approve_impl(&mut self, code_hash: Base58CryptoHash) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
+        self.assert_authority();
+        let raw: near_sdk::CryptoHash = code_hash.into();
+        self.approved_impl = Some(raw);
+        self.approved_impl_at = env::block_timestamp();
+        Event::ImplApproved {
+            code_hash: (&code_hash).into(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn hos_cancel_impl(&mut self) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.owner || caller == self.authority,
+            error::ONLY_OWNER
+        );
+        require!(self.approved_impl.is_some(), error::NO_APPROVED_IMPL);
+        self.approved_impl = None;
+        self.approved_impl_at = 0;
+        Event::ImplCancelled {}.emit();
+    }
+
+    #[payable]
+    pub fn hos_pin_impl(&mut self) -> Promise {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
+        self.assert_authority();
+        require!(
+            self.effective_frozen() == FreezeState::Unfrozen,
+            error::SELF_FROZEN
+        );
+        let raw = self
+            .approved_impl
+            .unwrap_or_else(|| env::panic_str(error::NO_APPROVED_IMPL));
+        require!(
+            env::block_timestamp() >= self.approved_impl_at.saturating_add(IMPL_PIN_DELAY_NS),
+            error::IMPL_PIN_TOO_YOUNG
+        );
+        require!(env::prepaid_gas() >= MIN_PIN_GAS, error::PIN_GAS_TOO_LOW);
+        self.approved_impl = None;
+        self.approved_impl_at = 0;
+        self.pinned_impl = Some(raw);
+        Event::ImplPinned {
+            code_hash: String::from(&Base58CryptoHash::from(raw)),
+        }
+        .emit();
+        Promise::new(env::current_account_id())
+            .use_global_contract(raw)
+            .function_call(
+                "hos_migrate".to_owned(),
+                near_sdk::serde_json::json!({ "collection_id": self.collection_id })
+                    .to_string()
+                    .into_bytes(),
+                NearToken::from_near(0),
+                env::prepaid_gas()
+                    .saturating_sub(env::used_gas())
+                    .saturating_sub(GAS_FOR_PIN_RESERVE),
+            )
     }
 
     #[payable]

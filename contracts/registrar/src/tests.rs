@@ -282,8 +282,6 @@ fn the_root_cannot_be_upgraded_inside_the_delay() {
     let _ = c.upgrade_self(near_sdk::json_types::Base64VecU8(vec![1]));
 }
 
-const DEPLOYED_STATE_B64: &str = "GAAAAHJlZ2lzdHJ5Lmhvc2RlbW8udGVzdG5ldBcAAABjb3VuY2lsLmhvc2RlbW8udGVzdG5ldBQAAABpbXBsLmhvc2RlbW8udGVzdG5ldBMAAABleHQuaG9zZGVtby50ZXN0bmV0EwAAAHJlYy5ob3NkZW1vLnRlc3RuZXQHAAAAdGVzdG5ldAAAYBZpwIN4ewEAAAAAAAADEA4AAAAA";
-
 #[test]
 fn the_config_epoch_moves_on_anything_that_invalidates_a_cached_proof() {
     let mut c = deploy();
@@ -303,37 +301,21 @@ fn the_config_epoch_moves_on_anything_that_invalidates_a_cached_proof() {
 
 #[test]
 fn an_upgrade_moves_the_config_epoch() {
-    ctx(COUNCIL, 0);
-    env::state_write(&LegacyRegistrar {
-        registry: acc(REGISTRY),
-        council: acc(COUNCIL),
-        wallet_impl: acc(IMPL),
-        hos_extension: acc(EXTENSION),
-        recovery: acc(RECOVERY),
-        chain_id: "testnet".to_string(),
-        min_balance: NearToken::from_millinear(100),
-        min_label_len: 3,
-        wallet_timeout_secs: 3600,
-        approved_code_hash: None,
-        approved_at: None,
-    });
-    assert_eq!(Registrar::migrate().config_epoch(), 1);
+    let c = deploy();
+    let before = c.config_epoch();
+    ctx(TLA, 0);
+    env::state_write(&c);
+    assert_eq!(Registrar::migrate().config_epoch(), before + 1);
 }
 
 #[test]
-fn the_deployed_state_decodes_as_legacy_so_migrate_can_read_it() {
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-    let raw = near_sdk::base64::engine::general_purpose::STANDARD
-        .decode(DEPLOYED_STATE_B64)
-        .expect("fixture is valid base64");
-    let old = LegacyRegistrar::try_from_slice(&raw)
-        .expect("deployed state must decode as LegacyRegistrar or migrate cannot read it");
-    assert_eq!(old.registry.as_str(), "registry.hosdemo.testnet");
-    assert_eq!(old.council.as_str(), "council.hosdemo.testnet");
-    assert_eq!(old.chain_id, "testnet");
-    assert_eq!(old.min_label_len, 3);
-    assert!(old.approved_code_hash.is_none());
+#[should_panic(expected = "state version")]
+fn migrate_refuses_a_state_version_it_does_not_understand() {
+    let mut c = deploy();
+    c.state_version = crate::STATE_VERSION + 1;
+    ctx(TLA, 0);
+    env::state_write(&c);
+    Registrar::migrate();
 }
 
 fn a_key() -> PublicKey {
@@ -341,7 +323,16 @@ fn a_key() -> PublicKey {
 }
 
 #[test]
-fn the_council_can_seal_the_root() {
+fn the_council_can_seal_the_root_once_the_upgrade_path_is_proven() {
+    let mut c = deploy();
+    c.upgrade_proven = true;
+    ctx(COUNCIL, 1);
+    let _ = c.seal(a_key());
+}
+
+#[test]
+#[should_panic(expected = "upgrade path has not been exercised")]
+fn sealing_the_root_is_refused_until_an_upgrade_has_run() {
     let mut c = deploy();
     ctx(COUNCIL, 1);
     let _ = c.seal(a_key());

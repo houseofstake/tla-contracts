@@ -39,3 +39,5 @@ pub const ONLY_INSTALLER_OR_HOLDER: &str = "only installer or owner or the accou
 pub const NOT_ARMED: &str = "the account has not armed a policy install";
 pub const ARMED_KEY_MISMATCH: &str = "attestation key does not match the armed install";
 pub const ARMED_TIMELOCK_MISMATCH: &str = "timelock does not match the armed install";
+pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
+pub const UPGRADE_NOT_PROVEN: &str = "the upgrade path has not been exercised on this account yet";

@@ -31,10 +31,12 @@ const UPGRADE_DELAY_NS: u64 = 72 * 60 * 60 * 1_000_000_000;
 /// Once the watcher set is set through governance it cannot drop to one, so no
 /// single watcher can carry a recovery on its own.
 const MIN_WATCHER_THRESHOLD: u32 = 2;
+const STATE_VERSION: u16 = 1;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct MpcRecovery {
+    state_version: u16,
     owner: AccountId,
     installer: AccountId,
     signer: AccountId,
@@ -47,24 +49,7 @@ pub struct MpcRecovery {
     approved_at: Option<u64>,
     registry: Option<AccountId>,
     armed: LookupMap<AccountId, ArmedPolicy>,
-}
-
-/// The shape currently on chain. Only read by `migrate`, and it has to keep
-/// matching the deployed bytes: if it stops, the legacy arm fails and the
-/// upgrade silently falls through to whatever the current struct parses as.
-#[near(serializers = [borsh])]
-struct LegacyMpcRecovery {
-    owner: AccountId,
-    installer: AccountId,
-    signer: AccountId,
-    transfer_authority: AccountId,
-    watchers: Vec<PublicKey>,
-    threshold: u32,
-    accounts: LookupMap<AccountId, Account>,
-    round_floor: LookupMap<AccountId, u64>,
-    approved_code_hash: Option<[u8; 32]>,
-    approved_at: Option<u64>,
-    registry: Option<AccountId>,
+    upgrade_proven: bool,
 }
 
 #[near(serializers = [json])]
@@ -110,6 +95,7 @@ impl MpcRecovery {
             require!(seen.insert(watcher.clone()), error::DUPLICATE_WATCHER);
         }
         Self {
+            state_version: STATE_VERSION,
             installer: owner.clone(),
             owner,
             signer,
@@ -122,39 +108,30 @@ impl MpcRecovery {
             approved_code_hash: None,
             approved_at: None,
             registry: None,
+            upgrade_proven: false,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        Event::Upgraded {}.emit();
-        if let Some(current) = hos_common::try_state_read::<Self>() {
-            return current;
-        }
-        let Some(old) = hos_common::try_state_read::<LegacyMpcRecovery>() else {
+        let Some(mut current) = hos_common::try_state_read::<Self>() else {
             env::panic_str(error::NO_STATE)
         };
-        Self {
-            owner: old.owner,
-            installer: old.installer,
-            signer: old.signer,
-            transfer_authority: old.transfer_authority,
-            watchers: old.watchers,
-            threshold: old.threshold,
-            accounts: old.accounts,
-            round_floor: old.round_floor,
-            armed: LookupMap::new(b"m"),
-            approved_code_hash: None,
-            approved_at: None,
-            registry: old.registry,
-        }
+        require!(
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        current.upgrade_proven = true;
+        Event::Upgraded {}.emit();
+        current
     }
 
     #[payable]
     pub fn seal(&mut self, public_key: PublicKey) -> Promise {
         self.assert_one_yocto();
         self.assert_owner();
+        require!(self.upgrade_proven, error::UPGRADE_NOT_PROVEN);
         Event::Sealed {
             public_key: String::from(&public_key),
             by: env::predecessor_account_id(),

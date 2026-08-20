@@ -141,27 +141,24 @@ fn concurrent_deploy_rejected() {
     let _ = c.gd_deploy(code());
 }
 
-const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0ART/FN3rvfqH9Axe9UfExYK0Vp58RqnJhaYw6b2EEkG4AAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+#[test]
+fn the_version_is_the_first_field_so_it_is_readable_before_anything_else() {
+    let c = deploy();
+    let bytes = near_sdk::borsh::to_vec(&c).unwrap();
+    assert_eq!(
+        u16::from_le_bytes([bytes[0], bytes[1]]),
+        crate::STATE_VERSION
+    );
+}
 
 #[test]
-fn the_legacy_struct_still_matches_the_deployed_state() {
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-    let raw = near_sdk::base64::engine::general_purpose::STANDARD
-        .decode(DEPLOYED_STATE_B64)
-        .expect("fixture is valid base64");
-    let old = LegacyImplDeployer::try_from_slice(&raw)
-        .expect("deployed state no longer decodes as LegacyImplDeployer");
-    assert_eq!(old.council.as_str(), "council.hosdemo.testnet");
-    assert!(old.current_hash.is_some());
-    assert_eq!(old.deploy_locked_until, 0);
-    assert!(old.approved_upgrade_hash.is_none());
-    assert!(
-        ImplDeployer::try_from_slice(&raw).is_ok(),
-        "legacy and current are the same shape today, so both arms parse and migrate is a \
-         no-op remap. The moment a field is added this must flip to only legacy parsing, or \
-         the upgrade panics on a keyless account"
-    );
+#[should_panic(expected = "state version")]
+fn migrate_refuses_a_state_version_it_does_not_understand() {
+    let mut c = deploy();
+    c.state_version = crate::STATE_VERSION + 1;
+    ctx(IMPL, 0);
+    env::state_write(&c);
+    ImplDeployer::migrate();
 }
 
 #[test]
@@ -301,9 +298,10 @@ fn removing_a_key_needs_a_full_access_signature() {
 }
 
 #[test]
-fn the_legacy_arm_runs_and_drops_a_stuck_deploy_flag() {
-    ctx(COUNCIL, 0);
-    env::state_write(&LegacyImplDeployer {
+fn migrate_drops_a_stuck_deploy_flag_and_a_pending_approval() {
+    ctx(IMPL, 0);
+    env::state_write(&ImplDeployer {
+        state_version: crate::STATE_VERSION,
         council: acc(COUNCIL),
         current_hash: Some([3u8; 32]),
         approved_hash: Some([4u8; 32]),
@@ -312,6 +310,7 @@ fn the_legacy_arm_runs_and_drops_a_stuck_deploy_flag() {
         deploy_locked_until: 99,
         approved_upgrade_hash: None,
         approved_upgrade_at: None,
+        upgrade_proven: false,
     });
     let migrated = ImplDeployer::migrate();
     assert_eq!(migrated.council, acc(COUNCIL));

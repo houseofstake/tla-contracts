@@ -58,6 +58,7 @@ pub enum ContractError {
     RetractionPending,
     NotBusinessTla,
     RequiresOneYocto,
+    UpgradeNotProven,
     EmptyCode,
     NoApprovedHash,
     HashMismatch,
@@ -91,3 +92,5 @@ impl FunctionError for ContractError {
         hos_common::panic_json(self)
     }
 }
+pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
+pub const NO_STATE: &str = "no contract state to migrate";

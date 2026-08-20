@@ -1556,60 +1556,34 @@ fn a_non_owner_cannot_rotate_the_watcher_set() {
     c.set_watchers(vec![wk2, wk3], 2);
 }
 
-mod migration {
-    use crate::LegacyMpcRecovery;
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-
-    const DEPLOYED_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAMAAAAhAAAAAIS/j9urBasuVw52LoAoxzfkejeW2buaWME8f8jHrqeAIQAAAADr/z7Ju307NQA7YYP3VYhQKUN4CbJDMaT7xFKNCHdA2CEAAAAAui7tbbQ7ad8XqLuoFtbbZmmzhXxFgzdKBQP+6BhqW/cCAAAAAQAAAGEBAAAAcgAAARgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQ=";
-
-    #[test]
-    fn the_legacy_struct_still_matches_the_deployed_state() {
-        let raw = near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64");
-        let old = LegacyMpcRecovery::try_from_slice(&raw)
-            .expect("deployed state must decode as LegacyMpcRecovery or migrate cannot read it");
-        assert_eq!(old.owner.as_str(), "council.hosdemo.testnet");
-        assert_eq!(old.installer.as_str(), "hostla.testnet");
-        assert_eq!(old.signer.as_str(), "v1.signer-prod.testnet");
-        assert_eq!(old.transfer_authority.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.watchers.len(), 3);
-        assert_eq!(old.threshold, 2);
-        assert_eq!(
-            old.registry.as_ref().map(|id| id.as_str()),
-            Some("registry.hosdemo.testnet"),
-            "the live contract is wired to the registry, and a migration that dropped it would \
-             disable name recovery without failing"
-        );
-    }
+#[test]
+#[should_panic(expected = "no contract state to migrate")]
+fn migrate_refuses_a_shape_it_does_not_recognise() {
+    ctx_paying(OWNER, 0, 0);
+    env::state_write(&(AccountId::from_str(OWNER).unwrap(), 7u64));
+    MpcRecovery::migrate();
 }
 
 #[test]
-fn the_legacy_arm_runs_and_keeps_the_watcher_set() {
+#[should_panic(expected = "state version")]
+fn migrate_refuses_a_state_version_it_does_not_understand() {
     let (_, wk1) = keypair();
-    let (_, wk2) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    c.state_version = crate::STATE_VERSION + 1;
     ctx_paying(OWNER, 0, 0);
-    env::state_write(&crate::LegacyMpcRecovery {
-        owner: AccountId::from_str(OWNER).unwrap(),
-        installer: AccountId::from_str(OWNER).unwrap(),
-        signer: AccountId::from_str(OWNER).unwrap(),
-        transfer_authority: AccountId::from_str(OWNER).unwrap(),
-        watchers: vec![wk1.clone(), wk2.clone()],
-        threshold: 2,
-        accounts: LookupMap::new(b"a"),
-        round_floor: LookupMap::new(b"r"),
-        approved_code_hash: None,
-        approved_at: None,
-        registry: Some(AccountId::from_str(REGISTRY).unwrap()),
-    });
-    let migrated = MpcRecovery::migrate();
-    assert_eq!(migrated.owner, AccountId::from_str(OWNER).unwrap());
-    assert_eq!(
-        migrated.threshold, 2,
-        "dropping the threshold would let one watcher carry a recovery alone"
-    );
-    assert_eq!(migrated.watchers, vec![wk1, wk2]);
+    env::state_write(&c);
+    MpcRecovery::migrate();
+}
+
+#[test]
+fn migrate_is_idempotent() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1, spare_watcher()], 2);
+    let owner = c.owner.clone();
+    env::state_write(&c);
+    let once = MpcRecovery::migrate();
+    env::state_write(&once);
+    assert_eq!(MpcRecovery::migrate().owner, owner);
 }
 
 #[test]
@@ -1630,7 +1604,17 @@ fn seal_ctx(predecessor: &str, deposit: u128) {
 }
 
 #[test]
-fn the_owner_can_seal_the_recovery_contract() {
+fn the_owner_can_seal_the_recovery_contract_once_the_upgrade_path_is_proven() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    c.upgrade_proven = true;
+    seal_ctx(OWNER, 1);
+    let _ = c.seal(mpc_public_key());
+}
+
+#[test]
+#[should_panic(expected = "upgrade path has not been exercised")]
+fn sealing_recovery_is_refused_until_an_upgrade_has_run() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     seal_ctx(OWNER, 1);
@@ -1741,67 +1725,25 @@ mod stored_shape {
     }
 }
 
-mod live_state {
+mod state_version {
     use super::*;
-    use near_sdk::borsh::BorshDeserialize;
 
-    const LIVE_STATE_B64: &str = "FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0DgAAAGhvc3RsYS50ZXN0bmV0\
-FgAAAHYxLnNpZ25lci1wcm9kLnRlc3RuZXQTAAAAZXh0Lmhvc2RlbW8udGVzdG5ldAMAAAAhAAAAAIS/j9urBasuVw52LoAo\
-xzfkejeW2buaWME8f8jHrqeAIQAAAADr/z7Ju307NQA7YYP3VYhQKUN4CbJDMaT7xFKNCHdA2CEAAAAAui7tbbQ7ad8XqLuo\
-FtbbZmmzhXxFgzdKBQP+6BhqW/cCAAAAAQAAAGEBAAAAcgAAARgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQBAAAAbQ==";
-
-    fn raw() -> Vec<u8> {
-        use near_sdk::base64::Engine;
-        near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(LIVE_STATE_B64)
-            .expect("fixture is valid base64")
+    #[test]
+    fn new_stamps_the_version_into_state() {
+        let (_, wk1) = keypair();
+        let c = deploy(&[wk1, spare_watcher()], 2);
+        assert_eq!(c.state_version, crate::STATE_VERSION);
     }
 
     #[test]
-    fn the_deployed_state_decodes_under_the_current_struct() {
-        let parsed = MpcRecovery::try_from_slice(&raw());
-        assert!(
-            parsed.is_ok(),
-            "the deployed state no longer reads under this struct, so an upgrade would \
-             leave the account unreadable: {:?}",
-            parsed.err()
-        );
-    }
-
-    #[test]
-    fn the_deployed_state_is_not_the_legacy_shape() {
-        assert!(
-            LegacyMpcRecovery::try_from_slice(&raw()).is_err(),
-            "the fixture must decode as exactly one shape, or migrate cannot tell which \
-             one the account is holding"
-        );
-    }
-}
-
-mod migration_invariants {
-    use super::*;
-    use near_sdk::borsh::BorshDeserialize;
-
-    #[test]
-    fn the_legacy_and_current_shapes_are_distinguishable() {
-        let bytes = near_sdk::borsh::to_vec(&LegacyMpcRecovery {
-            owner: AccountId::from_str(OWNER).unwrap(),
-            installer: AccountId::from_str(OWNER).unwrap(),
-            signer: AccountId::from_str(OWNER).unwrap(),
-            transfer_authority: AccountId::from_str(TRANSFER_AUTHORITY).unwrap(),
-            watchers: vec![mpc_public_key(), spare_watcher()],
-            threshold: 2,
-            accounts: near_sdk::store::LookupMap::new(b"a"),
-            round_floor: near_sdk::store::LookupMap::new(b"r"),
-            approved_code_hash: None,
-            approved_at: None,
-            registry: None,
-        })
-        .unwrap();
-        assert!(
-            MpcRecovery::try_from_slice(&bytes).is_err(),
-            "legacy bytes must not parse as the current shape, or migrate cannot tell \
-             which one it is holding and an upgrade can silently skip the migration"
+    fn the_version_is_the_first_field_so_it_is_readable_before_anything_else() {
+        let (_, wk1) = keypair();
+        let c = deploy(&[wk1, spare_watcher()], 2);
+        let bytes = near_sdk::borsh::to_vec(&c).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            crate::STATE_VERSION,
+            "a reader must be able to learn the version without parsing the rest"
         );
     }
 }

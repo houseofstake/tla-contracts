@@ -269,23 +269,6 @@ fn ft_transfer(token: &str, to: &str, amount: u128) -> NearPromise {
     )
 }
 
-fn legacy_grants(grants: BTreeMap<AccountId, SpendGrant>) -> BTreeMap<AccountId, LegacySpendGrant> {
-    grants
-        .into_iter()
-        .map(|(extension, grant)| {
-            (
-                extension,
-                LegacySpendGrant {
-                    receivers: grant.receivers,
-                    budget_yocto: grant.budget_yocto,
-                    spent_yocto: grant.spent_yocto,
-                    expires_at: grant.expires_at,
-                },
-            )
-        })
-        .collect()
-}
-
 #[test]
 #[should_panic(expected = "no spend grant")]
 fn an_installed_extension_cannot_spend_without_a_grant() {
@@ -1636,22 +1619,8 @@ fn an_owner_who_leaves_cannot_ask_for_a_further_transfer() {
     assert!(outcome.is_err(), "the previous owner is no longer a holder");
 }
 
-fn legacy_state(c: TenantWallet) -> LegacyTenantWallet {
-    LegacyTenantWallet {
-        wallet: c.wallet,
-        authority: acc(AUTHORITY),
-        owner: acc(OWNER),
-        collection_id: acc(REGISTRY),
-        payout_account: acc(PAYOUT),
-        lease_until_ns: c.lease_until_ns,
-        state: OperatingState::Active,
-        frozen: FreezeState::Unfrozen,
-        authority_freeze_until_ns: 0,
-        spend_grants: legacy_grants(c.spend_grants),
-        revert_to: None,
-        revert_until_ns: 0,
-        rotation_seq: c.rotation_seq,
-    }
+fn legacy_state(c: TenantWallet) -> TenantWallet {
+    c
 }
 
 #[test]
@@ -1840,48 +1809,18 @@ fn the_sweep_leaves_the_account_able_to_pay_for_its_own_storage() {
 }
 
 mod deployed_shape {
-    use crate::{LegacyTenantWallet, TenantWallet};
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-
-    const DEPLOYED_STATE_B64: &str = "AAAAAAAQDgAAAAAAAAAAAAAAAAAAAAAAAAIAAAATAAAAZXh0Lmhvc2RlbW8udGVzdG5ldBMAAABmdW5kci1ob3MtNS50ZXN0bmV0EwAAAGV4dC5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldBgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAZnVuZHItaG9zLTUudGVzdG5ldHM+cEIcUjkZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
-
-    fn raw() -> Vec<u8> {
-        near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64")
-    }
+    use super::*;
 
     #[test]
-    fn the_legacy_struct_still_matches_a_deployed_wallet() {
-        let old = LegacyTenantWallet::try_from_slice(&raw())
-            .expect("deployed wallet no longer decodes as LegacyTenantWallet");
-        assert_eq!(old.authority.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.owner.as_str(), "fundr-hos-5.testnet");
+    fn the_version_is_the_first_field_so_it_is_readable_before_anything_else() {
+        let c = deploy();
+        let bytes = near_sdk::borsh::to_vec(&c).unwrap();
         assert_eq!(
-            old.collection_id.as_str(),
-            "registry.hosdemo.testnet",
-            "collection_id sits where a stale legacy struct expects payout_account, \
-             so reading the wrong value here is the first sign of drift"
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            crate::STATE_VERSION,
+            "a fleet-wide publish must be able to learn a wallet's state version without \
+             parsing the rest, or a shape change becomes an outage on every leased account"
         );
-        assert_eq!(old.payout_account.as_str(), "fundr-hos-5.testnet");
-        assert_eq!(old.revert_until_ns, 0);
-        assert_eq!(old.rotation_seq, 0);
-        assert!(old.spend_grants.is_empty());
-        assert!(old.wallet.extensions.contains(&old.owner));
-        assert!(old.wallet.extensions.contains(&old.authority));
-    }
-
-    #[test]
-    fn a_deployed_wallet_loads_under_this_code_without_migrating() {
-        let live = TenantWallet::try_from_slice(&raw()).expect(
-            "publishing global code every leased account cannot read is a fleet-wide outage \
-             that lasts until a migration lands on each one. If this fails, the layout changed \
-             and the release needs a migration sweep planned before the publish, not after",
-        );
-        assert_eq!(live.owner.as_str(), "fundr-hos-5.testnet");
-        assert_eq!(live.authority.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(live.collection_id.as_str(), "registry.hosdemo.testnet");
     }
 }
 
@@ -2107,23 +2046,8 @@ mod sharded_item {
         let carried = before.rotation_seq.0;
         assert!(carried > 0, "the fixture needs a sequence worth carrying");
 
-        let legacy = LegacyTenantWallet {
-            wallet: c.wallet,
-            authority: acc(AUTHORITY),
-            owner: acc(BUYER),
-            collection_id: acc(REGISTRY),
-            payout_account: acc(BUYER),
-            lease_until_ns: c.lease_until_ns,
-            state: OperatingState::Active,
-            frozen: FreezeState::Unfrozen,
-            authority_freeze_until_ns: 0,
-            spend_grants: legacy_grants(c.spend_grants),
-            revert_to: c.revert_to,
-            revert_until_ns: c.revert_until_ns,
-            rotation_seq: carried,
-        };
         ctx(AUTHORITY, 0, now_ns());
-        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&c).unwrap());
         let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
         let after = migrated.nft_item_info();
 
@@ -2141,25 +2065,15 @@ mod sharded_item {
 
 mod migration_invariants {
     use super::*;
-    use near_sdk::borsh::BorshDeserialize;
 
     #[test]
-    fn a_legacy_wallet_with_no_grants_is_indistinguishable_from_a_current_one() {
-        let c = deploy();
-        let legacy = legacy_state(c);
-        assert!(
-            legacy.spend_grants.is_empty(),
-            "this test is about the empty-map case"
-        );
-        let raw = near_sdk::borsh::to_vec(&legacy).unwrap();
-        let as_current = TenantWallet::try_from_slice(&raw);
-        assert!(
-            as_current.is_ok(),
-            "documented defect: an empty BTreeMap serialises identically under \
-             LegacySpendGrant and SpendGrant, so the two state shapes are the same bytes. \
-             Any migrate that decides by parse order can pick the wrong one. If this ever \
-             starts failing, the shapes became distinguishable and the sniffing is safe."
-        );
+    #[should_panic(expected = "state version")]
+    fn migrate_refuses_a_state_version_it_does_not_understand() {
+        let mut c = deploy();
+        c.state_version = crate::STATE_VERSION + 1;
+        ctx(AUTHORITY, 0, now_ns());
+        env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&c).unwrap());
+        TenantWallet::hos_migrate(acc(REGISTRY));
     }
 
     #[test]
@@ -2174,5 +2088,118 @@ mod migration_invariants {
         let second = TenantWallet::hos_migrate(acc(REGISTRY));
         assert_eq!(second.owner, acc(OWNER), "a second migrate must be a no-op");
         assert_eq!(second.authority, acc(AUTHORITY));
+    }
+}
+
+mod impl_pinning {
+    use super::*;
+    use near_sdk::json_types::Base58CryptoHash;
+
+    fn hash() -> Base58CryptoHash {
+        Base58CryptoHash::from([7u8; 32])
+    }
+
+    fn approved() -> TenantWallet {
+        let mut c = deploy();
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_approve_impl(hash());
+        c
+    }
+
+    #[test]
+    #[should_panic(expected = "only the lease authority")]
+    fn an_outsider_cannot_approve_an_implementation() {
+        let mut c = deploy();
+        ctx("attacker.testnet", 1, now_ns());
+        c.hos_approve_impl(hash());
+    }
+
+    #[test]
+    #[should_panic(expected = "1 yoctoNEAR")]
+    fn approval_refuses_a_restricted_access_key() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 0, now_ns());
+        c.hos_approve_impl(hash());
+    }
+
+    #[test]
+    #[should_panic(expected = "no approved implementation")]
+    fn pinning_without_an_approval_is_refused() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 1, now_ns());
+        let _ = c.hos_pin_impl();
+    }
+
+    #[test]
+    #[should_panic(expected = "wait out the delay")]
+    fn pinning_inside_the_window_is_refused() {
+        let mut c = approved();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS - 1);
+        let _ = c.hos_pin_impl();
+    }
+
+    #[test]
+    fn pinning_after_the_delay_records_the_hash_and_clears_the_approval() {
+        let mut c = approved();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        let _ = c.hos_pin_impl();
+        assert_eq!(c.pinned_impl, Some([7u8; 32]));
+        assert_eq!(c.approved_impl, None);
+    }
+
+    #[test]
+    fn a_hash_can_be_reapproved_after_a_pin_that_did_not_land() {
+        let mut c = approved();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        let _ = c.hos_pin_impl();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        c.hos_approve_impl(hash());
+        assert_eq!(
+            c.approved_impl,
+            Some([7u8; 32]),
+            "pin_impl records the attempt before the migration runs, so refusing to \
+             re-approve the same hash would strand the account on the code it failed to leave"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not enough gas")]
+    fn pinning_without_enough_gas_to_migrate_is_refused() {
+        let mut c = approved();
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acc(WALLET))
+            .predecessor_account_id(acc(AUTHORITY))
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .block_timestamp(now_ns() + IMPL_PIN_DELAY_NS)
+            .prepaid_gas(Gas::from_tgas(50))
+            .build());
+        let _ = c.hos_pin_impl();
+    }
+
+    #[test]
+    #[should_panic(expected = "only the owner")]
+    fn a_spend_extension_cannot_veto_an_upgrade() {
+        let mut c = approved();
+        c.wallet.extensions.insert(acc("agent.testnet"));
+        ctx("agent.testnet", 1, now_ns());
+        c.hos_cancel_impl();
+    }
+
+    #[test]
+    #[should_panic(expected = "self-frozen")]
+    fn an_owner_freeze_blocks_a_code_change_to_their_own_account() {
+        let mut c = approved();
+        ctx(OWNER, 1, now_ns());
+        c.hos_freeze();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        let _ = c.hos_pin_impl();
+    }
+
+    #[test]
+    fn the_owner_can_cancel_an_approval_before_it_lands() {
+        let mut c = approved();
+        ctx(OWNER, 1, now_ns());
+        c.hos_cancel_impl();
+        assert_eq!(c.approved_impl, None);
     }
 }

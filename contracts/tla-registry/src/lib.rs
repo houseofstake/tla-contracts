@@ -31,6 +31,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
+const STATE_VERSION: u16 = 1;
 const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
@@ -75,6 +76,7 @@ pub(crate) enum StorageKey {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct TlaRegistry {
+    pub(crate) state_version: u16,
     pub(crate) tlas: IterableMap<AccountId, TlaEntry>,
     pub(crate) sub_accounts: IterableMap<String, SubAccountEntry>,
     pub(crate) sub_accounts_by_owner: LookupMap<AccountId, IterableSet<String>>,
@@ -114,69 +116,7 @@ pub struct TlaRegistry {
     pub(crate) approved_at: Option<u64>,
     pub(crate) upgrade_delay_ns: u64,
     pub(crate) venues: IterableSet<AccountId>,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyFeeConfig {
-    pub tla_allocation_fee_usd_micro: U128,
-    pub rent_tier_5_usd_micro: U128,
-    pub rent_tier_8_usd_micro: U128,
-    pub rent_tier_10_usd_micro: U128,
-    pub rent_tier_12plus_usd_micro: U128,
-    pub sub_fee_per_account_usd_micro: U128,
-    pub account_creation_deposit_yocto: U128,
-    pub business_max_subs: u32,
-    pub retraction_notice_ns: U64,
-    pub resale_commission_bps: u16,
-    pub max_rate_move_bps: u16,
-    pub quote_slippage_bps: u16,
-    pub min_near_usd_rate_micro: U128,
-    pub max_near_usd_rate_micro: U128,
-    pub rate_update_cooldown_ns: U64,
-    pub max_rate_age_ns: U64,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyTlaRegistry {
-    tlas: IterableMap<AccountId, TlaEntry>,
-    sub_accounts: IterableMap<String, SubAccountEntry>,
-    sub_accounts_by_owner: LookupMap<AccountId, IterableSet<String>>,
-    sub_accounts_by_tla: LookupMap<AccountId, IterableSet<String>>,
-    recent_activity: Vector<ActivityRecord>,
-    activity_cursor: u32,
-    admins: IterableSet<AccountId>,
-    fee_config: LegacyFeeConfig,
-    total_revenue: u128,
-    sub_account_count: u64,
-    paused: bool,
-    version: u8,
-    pending_refunds: LookupMap<AccountId, u128>,
-    total_pending_refunds: u128,
-    ft_allowlist: IterableSet<AccountId>,
-    business_sub_count: LookupMap<AccountId, u32>,
-    business_sub_cap_override: LookupMap<AccountId, u32>,
-    parked_names: LookupMap<String, ParkedEntry>,
-    reclaim_pending: LookupMap<String, bool>,
-    payment_authorities: IterableSet<AccountId>,
-    recovery_authorities: IterableSet<AccountId>,
-    hos_extension: AccountId,
-    grace_period_ns: u64,
-    price_oracle: AccountId,
-    near_usd_rate_micro: u128,
-    rate_updated_at: u64,
-    rate_sequence: u64,
-    treasury: AccountId,
-    council: AccountId,
-    marketplace_paused: bool,
-    paused_until_ns: u64,
-    unpaused_at: u64,
-    sweepable_tokens: IterableSet<AccountId>,
-    suspended_until: LookupMap<AccountId, u64>,
-    nft_contract_metadata: NftContractMetadata,
-    approved_code_hash: Option<[u8; 32]>,
-    approved_at: Option<u64>,
-    upgrade_delay_ns: u64,
-    venues: IterableSet<AccountId>,
+    pub(crate) upgrade_proven: bool,
 }
 
 #[near]
@@ -206,6 +146,7 @@ impl TlaRegistry {
         admins.insert(admin.clone());
 
         Self {
+            state_version: STATE_VERSION,
             tlas: IterableMap::new(StorageKey::Tlas),
             sub_accounts: IterableMap::new(StorageKey::SubAccountsIndexed),
             sub_accounts_by_owner: LookupMap::new(StorageKey::SubAccountsByOwner),
@@ -245,77 +186,26 @@ impl TlaRegistry {
             approved_at: None,
             upgrade_delay_ns: admin::UPGRADE_DELAY_NS,
             venues: IterableSet::new(StorageKey::Venues),
+            upgrade_proven: false,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
+        let Some(mut current) = hos_common::try_state_read::<Self>() else {
+            env::panic_str(error::NO_STATE)
+        };
+        near_sdk::require!(
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        current.upgrade_proven = true;
         Event::Upgraded {
             by: env::predecessor_account_id(),
         }
         .emit();
-        let Some(old) = hos_common::try_state_read::<LegacyTlaRegistry>() else {
-            return hos_common::try_state_read::<Self>()
-                .unwrap_or_else(|| env::panic_str("no state to migrate"));
-        };
-        Self {
-            tlas: old.tlas,
-            sub_accounts: old.sub_accounts,
-            sub_accounts_by_owner: old.sub_accounts_by_owner,
-            sub_accounts_by_tla: old.sub_accounts_by_tla,
-            recent_activity: old.recent_activity,
-            activity_cursor: old.activity_cursor,
-            admins: old.admins,
-            fee_config: FeeConfig {
-                tla_allocation_fee_usd_micro: old.fee_config.tla_allocation_fee_usd_micro,
-                rent_tier_5_usd_micro: old.fee_config.rent_tier_5_usd_micro,
-                rent_tier_8_usd_micro: old.fee_config.rent_tier_8_usd_micro,
-                rent_tier_10_usd_micro: old.fee_config.rent_tier_10_usd_micro,
-                rent_tier_12plus_usd_micro: old.fee_config.rent_tier_12plus_usd_micro,
-                sub_fee_per_account_usd_micro: old.fee_config.sub_fee_per_account_usd_micro,
-                account_creation_deposit_yocto: old.fee_config.account_creation_deposit_yocto,
-                business_max_subs: old.fee_config.business_max_subs,
-                retraction_notice_ns: old.fee_config.retraction_notice_ns,
-                max_rate_move_bps: old.fee_config.max_rate_move_bps,
-                quote_slippage_bps: old.fee_config.quote_slippage_bps,
-                min_near_usd_rate_micro: old.fee_config.min_near_usd_rate_micro,
-                max_near_usd_rate_micro: old.fee_config.max_near_usd_rate_micro,
-                rate_update_cooldown_ns: old.fee_config.rate_update_cooldown_ns,
-                max_rate_age_ns: old.fee_config.max_rate_age_ns,
-            },
-            total_revenue: old.total_revenue,
-            sub_account_count: old.sub_account_count,
-            paused: old.paused,
-            version: CONTRACT_VERSION,
-            pending_refunds: old.pending_refunds,
-            total_pending_refunds: old.total_pending_refunds,
-            ft_allowlist: old.ft_allowlist,
-            business_sub_count: old.business_sub_count,
-            business_sub_cap_override: old.business_sub_cap_override,
-            parked_names: old.parked_names,
-            reclaim_pending: old.reclaim_pending,
-            payment_authorities: old.payment_authorities,
-            recovery_authorities: old.recovery_authorities,
-            hos_extension: old.hos_extension,
-            grace_period_ns: old.grace_period_ns,
-            price_oracle: old.price_oracle,
-            near_usd_rate_micro: old.near_usd_rate_micro,
-            rate_updated_at: old.rate_updated_at,
-            rate_sequence: old.rate_sequence,
-            treasury: old.treasury,
-            council: old.council,
-            marketplace_paused: old.marketplace_paused,
-            paused_until_ns: old.paused_until_ns,
-            unpaused_at: old.unpaused_at,
-            sweepable_tokens: old.sweepable_tokens,
-            suspended_until: old.suspended_until,
-            nft_contract_metadata: old.nft_contract_metadata,
-            approved_code_hash: old.approved_code_hash,
-            approved_at: old.approved_at,
-            upgrade_delay_ns: old.upgrade_delay_ns,
-            venues: old.venues,
-        }
+        current
     }
 
     #[handle_result]

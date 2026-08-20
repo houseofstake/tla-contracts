@@ -14,6 +14,7 @@ const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
 /// reaches every one of them at once. The delay gives owners a window to see
 /// an approval and act on it before the code changes underneath them.
 const DEFAULT_APPROVAL_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
+const STATE_VERSION: u16 = 1;
 const DEPLOY_LOCK_TTL_NS: u64 = 10 * 60 * 1_000_000_000;
 
 #[near(serializers = [json])]
@@ -26,6 +27,7 @@ pub struct DeployerView {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct ImplDeployer {
+    state_version: u16,
     council: AccountId,
     current_hash: Option<[u8; 32]>,
     approved_hash: Option<[u8; 32]>,
@@ -34,18 +36,7 @@ pub struct ImplDeployer {
     deploy_locked_until: u64,
     approved_upgrade_hash: Option<[u8; 32]>,
     approved_upgrade_at: Option<u64>,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyImplDeployer {
-    council: AccountId,
-    current_hash: Option<[u8; 32]>,
-    approved_hash: Option<[u8; 32]>,
-    approved_at: Option<u64>,
-    approval_delay_ns: u64,
-    deploy_locked_until: u64,
-    approved_upgrade_hash: Option<[u8; 32]>,
-    approved_upgrade_at: Option<u64>,
+    upgrade_proven: bool,
 }
 
 #[near]
@@ -53,21 +44,19 @@ impl ImplDeployer {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        Event::SelfUpgraded {}.emit();
-        let Some(old) = hos_common::try_state_read::<LegacyImplDeployer>() else {
-            return hos_common::try_state_read::<Self>()
-                .unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        let Some(mut current) = hos_common::try_state_read::<Self>() else {
+            env::panic_str(error::NO_STATE)
         };
-        Self {
-            council: old.council,
-            current_hash: old.current_hash,
-            approved_hash: None,
-            approved_at: None,
-            approval_delay_ns: old.approval_delay_ns,
-            deploy_locked_until: 0,
-            approved_upgrade_hash: None,
-            approved_upgrade_at: None,
-        }
+        require!(
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        current.approved_hash = None;
+        current.approved_at = None;
+        current.deploy_locked_until = 0;
+        current.upgrade_proven = true;
+        Event::SelfUpgraded {}.emit();
+        current
     }
 
     #[init]
@@ -78,6 +67,7 @@ impl ImplDeployer {
     pub fn new(council: AccountId, approval_delay_ns: Option<near_sdk::json_types::U64>) -> Self {
         require!(council != env::current_account_id(), error::COUNCIL_IS_SELF);
         Self {
+            state_version: STATE_VERSION,
             council,
             current_hash: None,
             approved_hash: None,
@@ -88,6 +78,7 @@ impl ImplDeployer {
             deploy_locked_until: 0,
             approved_upgrade_hash: None,
             approved_upgrade_at: None,
+            upgrade_proven: false,
         }
     }
 
@@ -233,6 +224,7 @@ impl ImplDeployer {
         assert_one_yocto();
         let caller = env::predecessor_account_id();
         require!(caller == self.council, error::ONLY_COUNCIL);
+        require!(self.upgrade_proven, error::UPGRADE_NOT_PROVEN);
         Event::KeyDeleted {
             public_key: String::from(&public_key),
             by: caller,

@@ -15,6 +15,12 @@ pub enum Event {
     #[event_version("1.0.0")]
     PayoutAccountSet { payout_account: AccountId },
     #[event_version("1.0.0")]
+    ImplPinned { code_hash: String },
+    #[event_version("1.0.0")]
+    ImplApproved { code_hash: String },
+    #[event_version("1.0.0")]
+    ImplCancelled {},
+    #[event_version("1.0.0")]
     SpendGranted { extension: AccountId },
     #[event_version("1.0.0")]
     SpendRevoked { extension: AccountId },

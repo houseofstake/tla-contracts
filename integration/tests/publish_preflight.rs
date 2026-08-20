@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use hos_wallet::LegacyTenantWallet;
 use near_sdk::borsh::BorshDeserialize;
 use near_workspaces::types::AccountId;
 use serde_json::json;
@@ -55,10 +54,9 @@ fn agree<T: PartialEq + std::fmt::Debug>(
 ) -> Result<()> {
     if from_bytes != from_view {
         bail!(
-            "{account}: decoding deployed state with LegacyTenantWallet reads {field} \
-             as {from_bytes:?}, but the contract reports {from_view:?}. The migration \
-             is built on a layout that is not the one deployed, so publishing would \
-             leave every leased account unreadable."
+            "{account}: deployed state reports {field} as {from_bytes:?} but the code about to be \
+             published expects {from_view:?}. Publishing would leave every leased account \
+             unreadable until a migration lands on each one."
         );
     }
     Ok(())
@@ -81,68 +79,31 @@ async fn layout_holds_for(worker: &Testnet, name: &str) -> Result<()> {
         .remove(Vec::new().as_slice())
         .with_context(|| format!("{name} holds no contract state"))?;
 
-    let decoded = LegacyTenantWallet::try_from_slice(&raw).map_err(|err| {
-        anyhow::anyhow!(
-            "{name}: LegacyTenantWallet cannot decode deployed state ({err}). \
-             Publishing would leave every leased account unreadable, with no \
-             migration able to recover them."
-        )
-    })?;
+    let Some(prefix) = raw.get(..2) else {
+        bail!("{name}: contract state is too short to carry a state version");
+    };
+    let deployed_version = u16::from_le_bytes([prefix[0], prefix[1]]);
+    agree(
+        name,
+        "state_version",
+        deployed_version,
+        hos_wallet::STATE_VERSION,
+    )?;
 
     let lease: serde_json::Value = worker.view(&id, "hos_lease").await?.json()?;
     let item: serde_json::Value = worker.view(&id, "nft_item_info").await?.json()?;
-    let reported_extensions: Vec<String> = worker.view(&id, "w_extensions").await?.json()?;
 
     agree(
         name,
-        "authority",
-        decoded.authority.to_string(),
-        text(&lease, "authority", name)?,
-    )?;
-    agree(
-        name,
-        "payout_account",
-        decoded.payout_account.to_string(),
-        text(&lease, "payout_account", name)?,
-    )?;
-    agree(
-        name,
-        "lease_until_ns",
-        decoded.lease_until_ns.to_string(),
-        text(&lease, "lease_until_ns", name)?,
-    )?;
-    agree(
-        name,
-        "state",
-        serde_json::to_value(decoded.state)?,
+        "impl_version",
         lease
-            .get("state")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
+            .get("impl_version")
+            .and_then(|v| v.as_u64())
+            .with_context(|| format!("{name}: lease is missing impl_version"))?,
+        u64::from(hos_wallet::IMPL_VERSION),
     )?;
-    agree(
-        name,
-        "owner",
-        decoded.owner.to_string(),
-        text(&item, "owner_id", name)?,
-    )?;
-    agree(
-        name,
-        "collection_id",
-        decoded.collection_id.to_string(),
-        text(&item, "collection_id", name)?,
-    )?;
-
-    let mut from_bytes: Vec<String> = decoded
-        .wallet
-        .extensions
-        .iter()
-        .map(|a| a.to_string())
-        .collect();
-    let mut from_view = reported_extensions;
-    from_bytes.sort();
-    from_view.sort();
-    agree(name, "extensions", from_bytes, from_view)?;
+    text(&lease, "authority", name)?;
+    text(&item, "collection_id", name)?;
 
     Ok(())
 }

@@ -472,6 +472,9 @@ impl TlaRegistry {
     ) -> Result<near_sdk::Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_council()?;
+        if !self.upgrade_proven {
+            return Err(ContractError::UpgradeNotProven);
+        }
         Event::Sealed {
             public_key: (&public_key).into(),
             by: env::predecessor_account_id(),

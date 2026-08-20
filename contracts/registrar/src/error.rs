@@ -17,3 +17,5 @@ pub const PAYOUT_IS_SELF: &str = "payout account must not be the minted account"
 pub const OWNER_ACCOUNT_IS_SELF: &str = "owner account must not be the minted account";
 pub const COUNCIL_IS_SELF: &str = "council must not be this account, which ends with no keys";
 pub const REGISTRY_IS_SELF: &str = "registry must not be this account, which ends with no keys";
+pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
+pub const UPGRADE_NOT_PROVEN: &str = "the upgrade path has not been exercised on this account yet";

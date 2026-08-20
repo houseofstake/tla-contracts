@@ -15,6 +15,7 @@ const WA_INIT_GAS: Gas = Gas::from_tgas(15);
 const ON_MINTED_GAS: Gas = Gas::from_tgas(20);
 const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 const MAX_LABEL_LEN: u8 = 60;
+const STATE_VERSION: u16 = 1;
 const ACCOUNT_STORAGE_FLOOR: NearToken = NearToken::from_millinear(7);
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
@@ -47,6 +48,7 @@ pub struct RegistrarView {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Registrar {
+    state_version: u16,
     registry: AccountId,
     council: AccountId,
     wallet_impl: AccountId,
@@ -59,21 +61,7 @@ pub struct Registrar {
     approved_code_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
     config_epoch: u32,
-}
-
-#[near(serializers = [borsh])]
-pub struct LegacyRegistrar {
-    registry: AccountId,
-    council: AccountId,
-    wallet_impl: AccountId,
-    hos_extension: AccountId,
-    recovery: AccountId,
-    chain_id: String,
-    min_balance: NearToken,
-    min_label_len: u8,
-    wallet_timeout_secs: u32,
-    approved_code_hash: Option<[u8; 32]>,
-    approved_at: Option<u64>,
+    upgrade_proven: bool,
 }
 
 #[near]
@@ -101,6 +89,7 @@ impl Registrar {
             error::REGISTRY_IS_SELF
         );
         Self {
+            state_version: STATE_VERSION,
             registry: config.registry,
             council: config.council,
             wallet_impl: config.wallet_impl,
@@ -113,33 +102,24 @@ impl Registrar {
             approved_code_hash: None,
             approved_at: None,
             config_epoch: 0,
+            upgrade_proven: false,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        Event::SelfUpgraded {}.emit();
-        let Some(old) = hos_common::try_state_read::<LegacyRegistrar>() else {
-            let mut current = hos_common::try_state_read::<Self>()
-                .unwrap_or_else(|| env::panic_str(error::NO_STATE));
-            current.config_epoch = current.config_epoch.saturating_add(1);
-            return current;
+        let Some(mut current) = hos_common::try_state_read::<Self>() else {
+            env::panic_str(error::NO_STATE)
         };
-        Self {
-            registry: old.registry,
-            council: old.council,
-            wallet_impl: old.wallet_impl,
-            hos_extension: old.hos_extension,
-            recovery: old.recovery,
-            chain_id: old.chain_id,
-            min_balance: old.min_balance,
-            min_label_len: old.min_label_len,
-            wallet_timeout_secs: old.wallet_timeout_secs,
-            approved_code_hash: None,
-            approved_at: None,
-            config_epoch: 1,
-        }
+        require!(
+            current.state_version == STATE_VERSION,
+            error::STATE_VERSION_UNKNOWN
+        );
+        current.config_epoch = current.config_epoch.saturating_add(1);
+        current.upgrade_proven = true;
+        Event::SelfUpgraded {}.emit();
+        current
     }
 
     #[payable]
@@ -315,6 +295,7 @@ impl Registrar {
             env::predecessor_account_id() == self.council,
             error::ONLY_COUNCIL
         );
+        require!(self.upgrade_proven, error::UPGRADE_NOT_PROVEN);
         Event::Sealed {
             public_key: (&public_key).into(),
             by: env::predecessor_account_id(),

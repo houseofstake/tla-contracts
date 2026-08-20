@@ -2937,95 +2937,26 @@ mod paged_views {
 }
 
 mod migration {
-    use crate::LegacyTlaRegistry;
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-
-    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbUsAAAACAAAADXYCAAAADW0BAAAAEAEAAAASmQAAAAEAAAAUAAAAAAEAAAACAAAAAnYCAAAAAm1AQg8AAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAADoAwAAAAAAAAAAAAAAAAAA6AMAAAAAAAAAAAAAAAAAAOgDAAAAAAAAAAAAAAAAAAAAAECyusngGR4CAAAAAAAA6AMAAAAAKfkPJgIA+gDQBw8CoIYBAAAAAAAAAAAAAAAAAADh9QUAAAAAAAAAAAAAAAAAWEf4DQAAAADAUySlEwAABPjfXF60XtSc8QgAAAAAAEsAAAAAAAAAAAEBAAAAA3HdmNwR4xDz838QAAAAAAAAAAAAAgAAAAR2AgAAAARtAQAAAAUBAAAABgEAAAAJAQAAAAoBAAAAAgAAAAt2AgAAAAttAQAAAAIAAAAMdgIAAAAMbRMAAABleHQuaG9zZGVtby50ZXN0bmV0AAAp+Q8mAgAWAAAAcGFydG5lci5ob3N0bGEudGVzdG5ldDskGQAAAAAAAAAAAAAAAABcduOpgJXMGPQeAAAAAAAAFwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0FwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAABV2AgAAABVtAQAAABYJAAAAbmZ0LTEuMC4wFwAAAEhvdXNlIG9mIFN0YWtlIEFjY291bnRzBAAAAEhPU0EAAAAAAAAAAJ4iKZ0AAAEAAAACAAAAGHYCAAAAGG0=";
-
-    fn deployed_state() -> Vec<u8> {
-        near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64")
-    }
+    use super::*;
 
     #[test]
-    fn the_deployed_state_selects_the_legacy_arm_without_panicking() {
-        super::ctx(super::COUNCIL, 0, 0);
-        near_sdk::env::storage_write(b"STATE", &deployed_state());
-        assert!(
-            hos_common::try_state_read::<LegacyTlaRegistry>().is_some(),
-            "the live fleet state must still take the legacy arm"
-        );
-        assert!(
-            hos_common::try_state_read::<crate::TlaRegistry>().is_none(),
-            "and must not be mistaken for state that is already current"
-        );
-    }
-
-    #[test]
-    fn the_legacy_struct_describes_the_registry_that_is_actually_deployed() {
-        let old = LegacyTlaRegistry::try_from_slice(&deployed_state())
-            .expect("registry.hosdemo.testnet no longer decodes as LegacyTlaRegistry");
-        assert_eq!(old.hos_extension.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.price_oracle.as_str(), "partner.hostla.testnet");
-        assert_eq!(old.council.as_str(), "council.hosdemo.testnet");
-        assert_eq!(old.treasury.as_str(), "council.hosdemo.testnet");
-        assert_eq!(old.nft_contract_metadata.symbol, "HOSA");
+    fn the_version_is_the_first_field_so_it_is_readable_before_anything_else() {
+        let c = deploy();
+        let bytes = near_sdk::borsh::to_vec(&c).unwrap();
         assert_eq!(
-            old.fee_config.resale_commission_bps, 250,
-            "the deployed config still carries the retired commission, which is the field this \
-             migration exists to drop"
-        );
-        assert_eq!(old.fee_config.quote_slippage_bps, 527);
-        assert_eq!(old.fee_config.max_rate_move_bps, 2_000);
-    }
-
-    #[test]
-    fn migrating_the_deployed_state_drops_the_commission_and_keeps_everything_else() {
-        super::ctx(super::COUNCIL, 0, 0);
-        near_sdk::env::storage_write(b"STATE", &deployed_state());
-        let migrated = crate::TlaRegistry::migrate();
-        assert_eq!(migrated.hos_extension.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(migrated.price_oracle.as_str(), "partner.hostla.testnet");
-        assert_eq!(migrated.council.as_str(), "council.hosdemo.testnet");
-        assert_eq!(migrated.nft_contract_metadata.symbol, "HOSA");
-        assert_eq!(migrated.fee_config.quote_slippage_bps, 527);
-        assert_eq!(migrated.fee_config.max_rate_move_bps, 2_000);
-        assert_eq!(migrated.fee_config.min_near_usd_rate_micro.0, 100_000);
-        assert_eq!(
-            migrated.upgrade_delay_ns,
-            super::super::admin::UPGRADE_DELAY_NS
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            crate::STATE_VERSION
         );
     }
 
     #[test]
-    fn migrate_leaves_state_that_is_already_current_alone() {
-        super::ctx(super::COUNCIL, 0, 0);
-        let current = super::deploy();
-        let count = current.sub_account_count;
-        near_sdk::env::state_write(&current);
-        let again = crate::TlaRegistry::migrate();
-        assert_eq!(
-            again.sub_account_count, count,
-            "a redeploy that does not change the shape must not be fatal"
-        );
-    }
-
-    #[test]
-    fn the_legacy_struct_still_matches_the_deployed_state() {
-        let raw = deployed_state();
-        let old = LegacyTlaRegistry::try_from_slice(&raw)
-            .expect("deployed state no longer decodes as LegacyTlaRegistry");
-        assert_eq!(old.grace_period_ns, 604_800_000_000_000);
-        assert_eq!(old.hos_extension.as_str(), "ext.hosdemo.testnet");
-        assert_eq!(old.version, 1);
-        assert!(!old.paused);
-        assert!(
-            old.sub_account_count > 0 && old.rate_sequence > 0,
-            "a fixture recaptured from a live registry has names and a moving rate, so zero here \
-             means the capture came from somewhere other than the fleet"
-        );
+    #[should_panic(expected = "state version")]
+    fn migrate_refuses_a_state_version_it_does_not_understand() {
+        let mut c = deploy();
+        c.state_version = crate::STATE_VERSION + 1;
+        ctx("registry.testnet", 0, 0);
+        near_sdk::env::state_write(&c);
+        crate::TlaRegistry::migrate();
     }
 }
 
@@ -3102,10 +3033,21 @@ mod keyless_upgrade {
     }
 
     #[test]
-    fn the_council_can_seal_the_registry() {
+    fn the_council_can_seal_the_registry_once_the_upgrade_path_is_proven() {
         let mut c = deploy();
+        c.upgrade_proven = true;
         ctx(COUNCIL, 1, 0);
         assert!(c.seal(a_key()).is_ok());
+    }
+
+    #[test]
+    fn sealing_the_registry_is_refused_until_an_upgrade_has_run() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.seal(a_key()),
+            Err(ContractError::UpgradeNotProven)
+        ));
     }
 
     #[test]

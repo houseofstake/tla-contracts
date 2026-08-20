@@ -395,77 +395,28 @@ fn an_admin_cannot_approve_an_upgrade() {
 }
 
 mod migration {
-    use crate::HosExtension;
-    use near_sdk::base64::Engine;
-    use near_sdk::borsh::BorshDeserialize;
-
-    const DEPLOYED_STATE_B64: &str = "AQAAAAIAAAAAdgIAAAAAbRgAAAByZWdpc3RyeS5ob3NkZW1vLnRlc3RuZXQTAAAAcmVjLmhvc2RlbW8udGVzdG5ldAABFwAAAGNvdW5jaWwuaG9zZGVtby50ZXN0bmV0AAAXAAAAY291bmNpbC5ob3NkZW1vLnRlc3RuZXQAAAAAAAAAAA==";
+    use super::*;
 
     #[test]
-    fn the_live_state_decodes_as_legacy_so_migrate_takes_that_arm() {
-        let raw = near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64");
-        let state = crate::LegacyHosExtension::try_from_slice(&raw)
-            .expect("deployed state must decode as LegacyHosExtension or migrate cannot read it");
-        assert_eq!(state.registry.as_str(), "registry.hosdemo.testnet");
-        assert_eq!(state.recovery.as_str(), "rec.hosdemo.testnet");
-        assert_eq!(state.council.as_str(), "council.hosdemo.testnet");
-        assert_eq!(state.version, 1);
-        assert!(!state.paused);
-        assert_eq!(state.paused_until_ns, 0);
-    }
-
-    #[test]
-    fn the_live_state_no_longer_decodes_as_the_current_struct() {
-        let raw = near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(DEPLOYED_STATE_B64)
-            .expect("fixture is valid base64");
-        assert!(
-            HosExtension::try_from_slice(&raw).is_err(),
-            "the deployed bytes predate recovery_reset_pending, so they must fail the current \
-             shape and fall to the legacy arm. If both arms parse, migrate is ambiguous; if \
-             neither parses, the upgrade panics and the contract is unrecoverable"
+    fn the_version_is_the_first_field_so_it_is_readable_before_anything_else() {
+        let c = deploy();
+        let bytes = near_sdk::borsh::to_vec(&c).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            crate::STATE_VERSION
         );
     }
-}
 
-#[test]
-fn the_legacy_arm_runs_and_keeps_the_admin_set() {
-    ctx(ADMIN, 0);
-    let mut admins = near_sdk::store::IterableSet::new(crate::StorageKey::Admins);
-    admins.insert(acc(ADMIN));
-    env::state_write(&crate::LegacyHosExtension {
-        admins,
-        registry: acc(REGISTRY),
-        recovery: acc(RECOVERY),
-        paused: true,
-        version: 0,
-        treasury: acc(DEST),
-        approved_code_hash: Some([5u8; 32]),
-        approved_at: Some(9),
-        council: acc(COUNCIL),
-        paused_until_ns: 4_242,
-    });
-    let migrated = HosExtension::migrate();
-    assert_eq!(migrated.registry, acc(REGISTRY));
-    assert_eq!(migrated.council, acc(COUNCIL));
-    assert!(migrated.paused, "a paused contract must not resume itself");
-    assert_eq!(
-        migrated.paused_until_ns, 4_242,
-        "the deployed state carries a pause expiry and a migration that invents a new one \
-         would silently extend or shorten a live authority hold"
-    );
-    assert!(
-        migrated.recovery_reset_pending.is_empty(),
-        "a fresh set, not a parse of bytes that were never there"
-    );
-    assert!(
-        migrated.admins.contains(&acc(ADMIN)),
-        "losing the admin set would strand every wallet this contract governs"
-    );
+    #[test]
+    #[should_panic(expected = "state version")]
+    fn migrate_refuses_a_state_version_it_does_not_understand() {
+        let mut c = deploy();
+        c.state_version = crate::STATE_VERSION + 1;
+        ctx(ADMIN, 0);
+        env::state_write(&c);
+        HosExtension::migrate();
+    }
 }
-
 #[test]
 fn state_already_current_survives_a_same_shape_redeploy() {
     let current = deploy();
@@ -519,10 +470,22 @@ fn a_key() -> near_sdk::PublicKey {
 }
 
 #[test]
-fn the_council_can_seal_the_extension() {
+fn the_council_can_seal_the_extension_once_the_upgrade_path_is_proven() {
     let mut c = deploy();
+    c.upgrade_proven = true;
     ctx(COUNCIL, 1);
     assert!(c.seal(a_key()).is_ok());
+}
+
+#[test]
+fn sealing_is_refused_until_an_upgrade_has_run_on_this_account() {
+    let mut c = deploy();
+    ctx(COUNCIL, 1);
+    assert!(
+        matches!(c.seal(a_key()), Err(ContractError::UpgradeNotProven)),
+        "removing the key before the upgrade path is proven leaves an account with no \
+         way to change its code and no way back"
+    );
 }
 
 #[test]

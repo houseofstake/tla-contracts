@@ -13,3 +13,5 @@ pub const UPGRADE_HASH_MISMATCH: &str = "code does not match the approved upgrad
 pub const UPGRADE_TOO_YOUNG: &str =
     "an approved upgrade must wait out the delay before it installs";
 pub const NO_STATE: &str = "no state to migrate";
+pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
+pub const UPGRADE_NOT_PROVEN: &str = "the upgrade path has not been exercised on this account yet";
