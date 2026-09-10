@@ -126,6 +126,16 @@ async fn every_privileged_entry_point_is_reachable_and_key_gated() -> Result<()>
             method: "skim",
             args: json!({ "amount": U128(1) }),
         },
+        Entry {
+            contract: registry.id().clone(),
+            method: "suspend_tla",
+            args: json!({ "tla_id": fleet.registrar.id() }),
+        },
+        Entry {
+            contract: registry.id().clone(),
+            method: "unsuspend_tla",
+            args: json!({ "tla_id": fleet.registrar.id() }),
+        },
     ];
 
     for entry in &entries {
@@ -137,18 +147,11 @@ async fn every_privileged_entry_point_is_reachable_and_key_gated() -> Result<()>
 #[tokio::test]
 async fn the_registrar_config_setters_are_reachable_and_key_gated() -> Result<()> {
     let fleet = deploy_fleet().await?;
-    let entries = vec![
-        Entry {
-            contract: fleet.registrar.id().clone(),
-            method: "set_min_label_len",
-            args: json!({ "min_label_len": 3 }),
-        },
-        Entry {
-            contract: fleet.registrar.id().clone(),
-            method: "set_min_balance",
-            args: json!({ "min_balance": NearToken::from_millinear(100) }),
-        },
-    ];
+    let entries = vec![Entry {
+        contract: fleet.registrar.id().clone(),
+        method: "set_min_balance",
+        args: json!({ "min_balance": NearToken::from_millinear(100) }),
+    }];
     for entry in &entries {
         assert_reachable(&fleet.council, entry).await?;
     }

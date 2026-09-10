@@ -1,5 +1,6 @@
 mod error;
 mod events;
+mod legacy;
 
 use near_sdk::json_types::{Base58CryptoHash, U64};
 use near_sdk::serde_json::json;
@@ -11,11 +12,23 @@ use near_sdk::{
 use crate::events::Event;
 use hos_common::MintOutcome;
 
-const WA_INIT_GAS: Gas = Gas::from_tgas(15);
-const ON_MINTED_GAS: Gas = Gas::from_tgas(20);
-const CALLBACK_GAS: Gas = Gas::from_tgas(10);
-const MAX_LABEL_LEN: u8 = 60;
-const STATE_VERSION: u16 = 1;
+const WA_INIT_TGAS: u64 = 15;
+const ON_MINTED_TGAS: u64 = 20;
+const CALLBACK_TGAS: u64 = 10;
+const MINT_FRAME_TGAS: u64 = 20;
+const ON_MINTED_FRAME_TGAS: u64 = 5;
+const WA_INIT_GAS: Gas = Gas::from_tgas(WA_INIT_TGAS);
+const ON_MINTED_GAS: Gas = Gas::from_tgas(ON_MINTED_TGAS);
+const CALLBACK_GAS: Gas = Gas::from_tgas(CALLBACK_TGAS);
+const _: () = assert!(
+    WA_INIT_TGAS + ON_MINTED_TGAS + MINT_FRAME_TGAS <= hos_common::MINT_CALL_TGAS,
+    "the registry funds the whole mint from one static budget, so the batch, its callback and this frame must fit inside it"
+);
+const _: () = assert!(
+    CALLBACK_TGAS + ON_MINTED_FRAME_TGAS <= ON_MINTED_TGAS,
+    "on_minted must always afford its refund hop, or a failed batch reports no outcome and strands the name"
+);
+const STATE_VERSION: u16 = 2;
 const ACCOUNT_STORAGE_FLOOR: NearToken = NearToken::from_millinear(7);
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
@@ -29,7 +42,6 @@ pub struct RegistrarConfig {
     pub recovery: AccountId,
     pub chain_id: String,
     pub min_balance: NearToken,
-    pub min_label_len: u8,
     pub wallet_timeout_secs: u32,
 }
 
@@ -56,12 +68,13 @@ pub struct Registrar {
     recovery: AccountId,
     chain_id: String,
     min_balance: NearToken,
-    min_label_len: u8,
     wallet_timeout_secs: u32,
     approved_code_hash: Option<[u8; 32]>,
     approved_at: Option<u64>,
     config_epoch: u32,
     upgrade_proven: bool,
+    pending_council: Option<AccountId>,
+    pending_council_at: Option<u64>,
 }
 
 #[near]
@@ -71,10 +84,6 @@ impl Registrar {
         require!(
             config.chain_id == "mainnet" || config.chain_id == "testnet",
             error::BAD_CHAIN_ID
-        );
-        require!(
-            (1..=MAX_LABEL_LEN).contains(&config.min_label_len),
-            error::BAD_MIN_LABEL_LEN
         );
         require!(
             config.min_balance >= ACCOUNT_STORAGE_FLOOR,
@@ -97,25 +106,28 @@ impl Registrar {
             recovery: config.recovery,
             chain_id: config.chain_id,
             min_balance: config.min_balance,
-            min_label_len: config.min_label_len,
             wallet_timeout_secs: config.wallet_timeout_secs,
             approved_code_hash: None,
             approved_at: None,
             config_epoch: 0,
             upgrade_proven: false,
+            pending_council: None,
+            pending_council_at: None,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let Some(mut current) = hos_common::try_state_read::<Self>() else {
-            env::panic_str(error::NO_STATE)
+        let mut current = match hos_common::state_version() {
+            Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(1) => hos_common::try_state_read::<legacy::RegistrarV1>()
+                .map(Self::from)
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(_) => env::panic_str(error::STATE_VERSION_UNKNOWN),
+            None => env::panic_str(error::NO_STATE),
         };
-        require!(
-            current.state_version == STATE_VERSION,
-            error::STATE_VERSION_UNKNOWN
-        );
         current.config_epoch = current.config_epoch.saturating_add(1);
         current.upgrade_proven = true;
         Event::SelfUpgraded {}.emit();
@@ -135,10 +147,6 @@ impl Registrar {
             error::ONLY_REGISTRY
         );
         require!(!name.is_empty() && !name.contains('.'), error::INVALID_NAME);
-        require!(
-            name.len() >= self.min_label_len as usize,
-            error::NAME_TOO_SHORT
-        );
         require!(
             lease_until_ns > env::block_timestamp(),
             error::LEASE_IN_PAST
@@ -219,22 +227,6 @@ impl Registrar {
     }
 
     #[payable]
-    pub fn set_min_label_len(&mut self, min_label_len: u8) {
-        assert_one_yocto();
-        require!(
-            env::predecessor_account_id() == self.council,
-            error::ONLY_COUNCIL
-        );
-        require!(
-            (1..=MAX_LABEL_LEN).contains(&min_label_len),
-            error::BAD_MIN_LABEL_LEN
-        );
-        self.config_epoch = self.config_epoch.saturating_add(1);
-        self.min_label_len = min_label_len;
-        Event::MinLabelLenSet { min_label_len }.emit();
-    }
-
-    #[payable]
     pub fn set_min_balance(&mut self, min_balance: NearToken) {
         assert_one_yocto();
         require!(
@@ -261,6 +253,79 @@ impl Registrar {
             by: env::predecessor_account_id(),
         }
         .emit();
+    }
+
+    #[payable]
+    pub fn approve_council_rotation(&mut self, new_council: AccountId) {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.council,
+            error::ONLY_COUNCIL
+        );
+        require!(new_council != self.council, error::COUNCIL_UNCHANGED);
+        require!(
+            new_council != env::current_account_id(),
+            error::COUNCIL_IS_SELF
+        );
+        self.pending_council = Some(new_council.clone());
+        self.pending_council_at = Some(env::block_timestamp());
+        Event::CouncilRotationApproved {
+            new_council,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn cancel_council_rotation(&mut self) {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.council,
+            error::ONLY_COUNCIL
+        );
+        require!(
+            self.pending_council.take().is_some(),
+            error::NO_COUNCIL_ROTATION_PENDING
+        );
+        self.pending_council_at = None;
+        Event::CouncilRotationCancelled {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn commit_council_rotation(&mut self) {
+        assert_one_yocto();
+        let pending = self
+            .pending_council
+            .clone()
+            .unwrap_or_else(|| env::panic_str(error::NO_COUNCIL_ROTATION_PENDING));
+        require!(
+            env::predecessor_account_id() == pending,
+            error::ONLY_PENDING_COUNCIL
+        );
+        let approved_at = self
+            .pending_council_at
+            .unwrap_or_else(|| env::panic_str(error::NO_COUNCIL_ROTATION_PENDING));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(UPGRADE_DELAY_NS),
+            error::COUNCIL_ROTATION_TOO_YOUNG
+        );
+        self.council = pending.clone();
+        self.pending_council = None;
+        self.pending_council_at = None;
+        Event::CouncilRotated {
+            new_council: pending,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    pub fn pending_council(&self) -> Option<(AccountId, U64)> {
+        self.pending_council
+            .clone()
+            .zip(self.pending_council_at.map(U64))
     }
 
     #[payable]
@@ -296,12 +361,25 @@ impl Registrar {
             error::ONLY_COUNCIL
         );
         require!(self.upgrade_proven, error::UPGRADE_NOT_PROVEN);
-        Event::Sealed {
-            public_key: (&public_key).into(),
-            by: env::predecessor_account_id(),
+        let by = env::predecessor_account_id();
+        let key: String = (&public_key).into();
+        Promise::new(env::current_account_id())
+            .delete_key(public_key)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .after_seal(key, by),
+            )
+    }
+
+    #[private]
+    pub fn after_seal(&mut self, public_key: String, by: AccountId) -> bool {
+        if !near_sdk::is_promise_success() {
+            Event::SealFailed { public_key, by }.emit();
+            return false;
         }
-        .emit();
-        Promise::new(env::current_account_id()).delete_key(public_key)
+        Event::Sealed { public_key, by }.emit();
+        true
     }
 
     pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
@@ -322,10 +400,6 @@ impl Registrar {
 
     pub fn min_balance(&self) -> NearToken {
         self.min_balance
-    }
-
-    pub fn min_label_len(&self) -> u8 {
-        self.min_label_len
     }
 
     pub fn config(&self) -> RegistrarView {

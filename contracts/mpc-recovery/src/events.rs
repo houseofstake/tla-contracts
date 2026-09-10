@@ -25,7 +25,11 @@ pub enum Event {
     #[event_version("1.0.0")]
     Finalized { account: AccountId, round: U64 },
     #[event_version("1.0.0")]
-    Aborted { account: AccountId, round: U64 },
+    Aborted {
+        account: AccountId,
+        round: U64,
+        by_holder: bool,
+    },
     #[event_version("1.0.0")]
     InstallerChanged { installer: AccountId },
     #[event_version("1.0.0")]
@@ -38,6 +42,8 @@ pub enum Event {
     Upgraded {},
     #[event_version("1.0.0")]
     Sealed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
+    SealFailed { public_key: String, by: AccountId },
     #[event_version("1.0.0")]
     WatchersChanged { threshold: u32, count: u32 },
     #[event_version("1.0.0")]

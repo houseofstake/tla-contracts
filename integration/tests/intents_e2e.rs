@@ -69,6 +69,9 @@ fn base64_of(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+const FAR_FUTURE_ISO: &str = "2100-01-01T00:00:00.000Z";
+const FAR_FUTURE_NANOS: i64 = 4_102_444_800_000_000_000;
+
 /// Mirrors the protocol's own `create_random_salted_nonce`: magic prefix, version,
 /// the salt the verifier is currently issuing, the deadline in nanoseconds, and
 /// fifteen random bytes.
@@ -310,8 +313,8 @@ async fn a_name_settles_against_tokens_and_leaves_with_the_buyer() -> Result<()>
     seller.register(&verifier).await?;
     purchaser.register(&verifier).await?;
 
-    let deadline_nanos = (chain_timestamp_ns(&fleet.worker).await? + 600_000_000_000) as i64;
-    let deadline = "2100-01-01T00:00:00.000Z";
+    let deadline_nanos = FAR_FUTURE_NANOS;
+    let deadline = FAR_FUTURE_ISO;
 
     let seller_payload = seller.sign(
         &verifier,
@@ -464,7 +467,7 @@ async fn open_market(fee_pips: u32) -> Result<Market> {
     seller.register(&verifier).await?;
     buyer.register(&verifier).await?;
 
-    let deadline_nanos = (chain_timestamp_ns(&fleet.worker).await? + 600_000_000_000) as i64;
+    let deadline_nanos = FAR_FUTURE_NANOS;
 
     Ok(Market {
         fleet,
@@ -507,7 +510,7 @@ impl Market {
     }
 
     fn far_future(&self) -> &'static str {
-        "2100-01-01T00:00:00.000Z"
+        FAR_FUTURE_ISO
     }
 
     async fn sell_side(&self, cash_in: i128) -> serde_json::Value {

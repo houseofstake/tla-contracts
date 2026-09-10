@@ -8,6 +8,12 @@ pub const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 pub const ONE_YEAR_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 pub const NFT_SPEC: &str = "nft-1.0.0";
 pub const MAX_PAGE_LIMIT: u64 = 500;
+pub const MAX_ACCOUNT_ID_LEN: u8 = 64;
+pub const MIN_LABEL_LEN: u8 = 2;
+
+pub(crate) fn page_offset(from_index: u128) -> usize {
+    usize::try_from(from_index).unwrap_or(usize::MAX)
+}
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -62,6 +68,12 @@ pub struct NftContractMetadata {
 pub enum TlaType {
     Business,
     Open,
+}
+
+pub struct TlaRegistration {
+    pub tla_type: TlaType,
+    pub premium_category: PremiumCategory,
+    pub licensee: Option<AccountId>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, PartialEq)]
@@ -141,6 +153,14 @@ pub struct ParkedEntry {
     pub parked_at: u64,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub enum PaidOrderState {
+    InFlight,
+    Settled,
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 #[serde(crate = "near_sdk::serde")]
@@ -193,6 +213,9 @@ pub struct DeploymentReadiness {
     pub venue_set: bool,
     pub metadata_set: bool,
     pub wiring_sane: bool,
+    pub production_terms: bool,
+    pub lease_term_ns: U64,
+    pub grace_period_ns: U64,
     pub ready: bool,
 }
 
@@ -245,8 +268,6 @@ pub struct RateMetaView {
 pub struct BusinessRenewalCostView {
     pub tla_id: AccountId,
     pub tla_rent_yocto: U128,
-    pub per_sub_yocto: U128,
-    pub sub_count: u32,
 }
 
 pub struct LifecycleClock {
@@ -299,10 +320,6 @@ impl SubAccountEntry {
     pub fn lifecycle(&self, clock: &LifecycleClock) -> LifecycleStatus {
         time_lifecycle(self.expires_at, clock)
     }
-
-    pub fn sweepable(&self) -> bool {
-        env::block_timestamp() >= self.expires_at
-    }
 }
 
 pub fn validate_name(name: &str) -> Result<(), ContractError> {
@@ -331,6 +348,21 @@ pub fn validate_name(name: &str) -> Result<(), ContractError> {
                 reason: NameInvalidReason::EdgeSeparator,
             });
         }
+    }
+    Ok(())
+}
+
+pub fn validate_mintable_name(tla_id: &AccountId, name: &str) -> Result<(), ContractError> {
+    validate_name(name)?;
+    if name.len() < MIN_LABEL_LEN as usize {
+        return Err(ContractError::InvalidName {
+            reason: NameInvalidReason::LabelTooShort,
+        });
+    }
+    if total_name_length(tla_id, name) > MAX_ACCOUNT_ID_LEN {
+        return Err(ContractError::InvalidName {
+            reason: NameInvalidReason::AccountIdTooLong,
+        });
     }
     Ok(())
 }

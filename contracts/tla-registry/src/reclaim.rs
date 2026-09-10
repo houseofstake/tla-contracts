@@ -1,5 +1,7 @@
 use crate::admin::MAX_ALLOWLIST_SIZE;
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
+use crate::asset_gate::{
+    ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS, GATE_CALLER_FRAME_TGAS,
+};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -7,15 +9,24 @@ use crate::lifecycle::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use hos_common::RotationCause;
-use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
+use near_sdk::{env, near, AccountId, Gas, NearToken, Promise, PromiseError, PromiseOrValue};
 
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
-const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
-const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
-const BALANCES_CB_TOTAL_TGAS: u64 = 80;
+const FORCE_TRANSFER_TGAS: u64 = 45;
+const FINALIZE_CB_TGAS: u64 = 10;
+const PARK_FRAME_TGAS: u64 = 25;
+const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(FORCE_TRANSFER_TGAS);
+const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(FINALIZE_CB_TGAS);
+const PARK_CHAIN_TGAS: u64 = FORCE_TRANSFER_TGAS + FINALIZE_CB_TGAS;
+const BALANCES_CB_TOTAL_TGAS: u64 = PARK_CHAIN_TGAS + PARK_FRAME_TGAS;
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(BALANCES_CB_TOTAL_TGAS);
 const _: () = assert!(
-    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + BALANCES_CB_TOTAL_TGAS + 20 <= 300,
+    BALANCES_CB_TOTAL_TGAS >= PARK_CHAIN_TGAS + PARK_FRAME_TGAS,
+    "the balances callback parks out of its own static budget, so a longer park chain silently starves the reclaim it was checking balances for"
+);
+const _: () = assert!(
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + BALANCES_CB_TOTAL_TGAS + GATE_CALLER_FRAME_TGAS
+        <= 300,
     "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every reclaim"
 );
 
@@ -67,7 +78,7 @@ impl TlaRegistry {
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
             .with_attached_deposit(SWEEP_ATTACHED_REQUIRED)
-            .sweep_ft(sub_account, ft))
+            .sweep_ft(sub_account, ft, caller))
     }
 
     #[handle_result]
@@ -83,6 +94,19 @@ impl TlaRegistry {
             return Err(ContractError::ReclaimInProgress);
         }
         let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
+        if let Some(ends_at) = self.start_notice_if_term_is_live(&key)? {
+            Event::SubAccountRetractionScheduled {
+                full_name: key,
+                retraction_at: near_sdk::json_types::U64(ends_at),
+                by: env::predecessor_account_id(),
+            }
+            .emit();
+            return Ok(crate::rental::retract_wallet_lease(
+                &self.hos_extension,
+                sub_account,
+                ends_at,
+            ));
+        }
         self.reclaim_pending.insert(key.clone(), true);
 
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
@@ -137,10 +161,11 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
         destination: AccountId,
+        #[callback_result] parked: Result<bool, PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
         self.reclaim_pending.remove(&key);
-        if !is_promise_success() {
+        if !matches!(parked, Ok(true)) {
             Event::ReclaimFinalizeBlocked {
                 full_name: key,
                 token: None,
@@ -203,25 +228,37 @@ impl TlaRegistry {
         Ok((sub_account, sub.payout_account.clone()))
     }
 
+    fn start_notice_if_term_is_live(&mut self, key: &str) -> Result<Option<u64>, ContractError> {
+        let notice = self.fee_config.retraction_notice_ns.0;
+        let now = env::block_timestamp();
+        let Some(sub) = self.sub_accounts.get_mut(key) else {
+            return Ok(None);
+        };
+        if now >= sub.expires_at {
+            return Ok(None);
+        }
+        match sub.retraction_at {
+            Some(started) if now >= started.saturating_add(notice) => Ok(None),
+            Some(_) => Err(ContractError::RetractionPending),
+            None => {
+                sub.retraction_at = Some(now);
+                Ok(Some(now.saturating_add(notice)))
+            }
+        }
+    }
+
     fn resolve_sweepable(
         &self,
         tla_id: &AccountId,
         key: &str,
     ) -> Result<(AccountId, AccountId), ContractError> {
-        let sub_account: AccountId = key
-            .parse()
-            .map_err(|_| ContractError::InvalidSubAccountId)?;
-        let sub = self
-            .sub_accounts
-            .get(key)
-            .ok_or(ContractError::SubAccountNotFound)?;
-        if sub.tla_id != *tla_id {
-            return Err(ContractError::SubAccountTlaMismatch);
+        if self.parked_names.contains_key(key) {
+            let sub_account: AccountId = key
+                .parse()
+                .map_err(|_| ContractError::InvalidSubAccountId)?;
+            return Ok((sub_account, self.treasury.clone()));
         }
-        if !sub.sweepable() {
-            return Err(ContractError::SubAccountNotReclaimable);
-        }
-        Ok((sub_account, sub.payout_account.clone()))
+        self.resolve_reclaimable(tla_id, key)
     }
 
     pub(crate) fn park_wallet(

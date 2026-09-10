@@ -55,6 +55,7 @@ fn deploy() -> TlaRegistry {
         U64(GRACE_NS),
         acc(TREASURY),
         acc(COUNCIL),
+        None,
     )
 }
 
@@ -107,6 +108,19 @@ fn settled(
         payer: acc(payer),
         rent_yocto: U128(rent_yocto),
         attached_yocto: U128(attached_yocto),
+        order_id: None,
+    }
+}
+
+fn settled_for_order(
+    name: &str,
+    owner: &str,
+    payer: &str,
+    order_id: &str,
+) -> crate::callbacks::MintSettlement {
+    crate::callbacks::MintSettlement {
+        order_id: Some(order_id.to_string()),
+        ..settled(name, owner, payer, 0, 0)
     }
 }
 
@@ -148,6 +162,7 @@ fn settle_transfer(c: &mut TlaRegistry, name: &str, from: &str, to: &str) {
 
 mod names {
     use super::*;
+    use crate::error::NameInvalidReason;
 
     #[test]
     fn valid_names_accepted() {
@@ -163,6 +178,53 @@ mod names {
         assert!(validate_name("has.dot").is_err());
         assert!(validate_name("-edge").is_err());
         assert!(validate_name("edge_").is_err());
+    }
+
+    #[test]
+    fn a_label_the_account_id_grammar_cannot_hold_is_refused_at_the_door() {
+        let tla = acc(TLA);
+        let widest = "a".repeat(64 - 1 - TLA.len());
+        assert!(validate_mintable_name(&tla, &widest).is_ok());
+
+        let one_over = "a".repeat(64 - TLA.len());
+        assert!(validate_name(&one_over).is_ok());
+        assert!(matches!(
+            validate_mintable_name(&tla, &one_over),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::AccountIdTooLong
+            })
+        ));
+    }
+
+    #[test]
+    fn a_single_character_label_is_refused_so_short_account_ids_stay_unmintable() {
+        let tla = acc(TLA);
+        assert!(validate_name("a").is_ok());
+        assert!(matches!(
+            validate_mintable_name(&tla, "a"),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::LabelTooShort
+            })
+        ));
+        assert!(validate_mintable_name(&tla, "ab").is_ok());
+    }
+
+    #[test]
+    fn an_unmintable_name_costs_the_renter_nothing() {
+        let mut c = deploy_with_open_tla();
+        let one_over = "a".repeat(64 - TLA.len());
+        let deposit = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ALICE, deposit * 4, 1);
+        assert!(matches!(
+            c.rent_sub_account(acc(TLA), one_over.clone(), None),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::AccountIdTooLong
+            })
+        ));
+        assert!(
+            c.get_sub_account(acc(TLA), one_over).is_none(),
+            "rejecting at the door must leave no row behind to settle"
+        );
     }
 }
 
@@ -516,7 +578,7 @@ mod rental {
         assert_eq!(
             c.get_pending_refund(acc(BOB)).0,
             total,
-            "the sponsor paid, so the sponsor is refunded"
+            "the sponsor paid, so the sponsor is the one made whole"
         );
         assert_eq!(
             c.get_pending_refund(acc(ALICE)).0,
@@ -572,15 +634,29 @@ mod rental {
 
         ctx(BOB, creation, 1);
         assert!(matches!(
-            c.rent_sub_account_paid(acc(TLA), "alice".to_string(), acc(ALICE), acc(ALICE)),
+            c.rent_sub_account_paid(
+                acc(TLA),
+                "alice".to_string(),
+                acc(ALICE),
+                acc(ALICE),
+                "ord-unauthorised".to_string()
+            ),
             Err(ContractError::OnlyPaymentAuthority)
         ));
 
         ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
+        c.bind_payment_authority_tla(acc(BOB), acc(TLA), U64(50))
+            .unwrap();
         ctx(BOB, creation, 1);
         let _ = c
-            .rent_sub_account_paid(acc(TLA), "alice".to_string(), acc(ALICE), acc(ALICE))
+            .rent_sub_account_paid(
+                acc(TLA),
+                "alice".to_string(),
+                acc(ALICE),
+                acc(ALICE),
+                "ord-paid-alice".to_string(),
+            )
             .unwrap();
         c.on_sub_account_created_paid(
             settled("alice", ALICE, BOB, rent, creation),
@@ -599,7 +675,7 @@ mod rental {
     }
 
     #[test]
-    fn failed_mint_refunds_payer_and_frees_name() {
+    fn a_mint_that_reports_no_outcome_refunds_in_full_and_parks_the_name() {
         let mut c = deploy_with_open_tla();
         let total = rent_total(&c, "alice");
         ctx(ALICE, total, 1);
@@ -617,9 +693,120 @@ mod rental {
             ),
             Err(PromiseError::Failed),
         );
-        assert_eq!(c.get_pending_refund(acc(ALICE)).0, total);
-        assert!(c.is_name_available(acc(TLA), "alice".to_string()));
+        assert_eq!(
+            c.get_pending_refund(acc(ALICE)).0,
+            total,
+            "the registry cannot prove the account was created, so the renter is never the one out of pocket"
+        );
+        assert!(
+            !c.is_name_available(acc(TLA), "alice".to_string()),
+            "an account may exist behind this name, so it must not go back on the mint path"
+        );
+        assert!(
+            c.is_name_re_rentable(acc(TLA), "alice".to_string()),
+            "parking keeps the name reachable instead of stranding it forever"
+        );
         assert_eq!(c.get_stats().sub_account_count, 0);
+    }
+
+    #[test]
+    fn a_reported_mint_failure_frees_the_name_instead_of_parking_it() {
+        let mut c = deploy_with_open_tla();
+        let rent_near = rent_near_open(&c, "alice");
+        let total = rent_total(&c, "alice");
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_created(
+            settled("alice", ALICE, ALICE, rent_near, total),
+            Ok(MintOutcome::CreationFailed),
+        );
+
+        assert_eq!(
+            c.get_pending_refund(acc(ALICE)).0,
+            total,
+            "the registrar reported the failure, so it returned the funding and the payer is whole"
+        );
+        assert!(
+            c.is_name_available(acc(TLA), "alice".to_string()),
+            "a reported failure proves no account exists, so the name goes straight back on sale"
+        );
+        assert!(!c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn an_admin_releases_a_park_whose_account_never_existed() {
+        let mut c = deploy_with_open_tla();
+        let rent_near = rent_near_open(&c, "alice");
+        let total = rent_total(&c, "alice");
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_created(
+            settled("alice", ALICE, ALICE, rent_near, total),
+            Err(PromiseError::Failed),
+        );
+        assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+
+        ctx(BOB, 1, 2);
+        assert!(matches!(
+            c.admin_release_park(acc(TLA), "alice".to_string()),
+            Err(ContractError::OnlyAdmin)
+        ));
+
+        ctx(ADMIN, 1, 2);
+        c.admin_release_park(acc(TLA), "alice".to_string()).unwrap();
+        assert!(c.is_name_available(acc(TLA), "alice".to_string()));
+        assert!(!c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+
+        assert!(
+            matches!(
+                c.admin_release_park(acc(TLA), "alice".to_string()),
+                Err(ContractError::SubAccountNotParked)
+            ),
+            "releasing is one-shot, so a second call cannot quietly do nothing"
+        );
+    }
+
+    #[test]
+    fn an_admin_cannot_release_the_park_under_a_live_lease() {
+        let mut c = deploy_with_open_tla();
+        let rent_near = rent_near_open(&c, "alice");
+        let total = rent_total(&c, "alice");
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_created(
+            settled("alice", ALICE, ALICE, rent_near, total),
+            Err(PromiseError::Failed),
+        );
+
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(BOB, rent, 3);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let _ = c.on_sub_account_re_rented(settled("alice", BOB, BOB, rent, rent), Ok(true));
+
+        ctx(ADMIN, 1, 4);
+        assert!(
+            matches!(
+                c.admin_release_park(acc(TLA), "alice".to_string()),
+                Err(ContractError::SubAccountNameTaken)
+            ),
+            "the hatch must never strip a park out from under a name someone now holds"
+        );
     }
 
     #[test]
@@ -638,12 +825,95 @@ mod rental {
             .0;
         ctx(ALICE, rent, 2);
         let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_renewed(
+            acc(TLA),
+            "alice".to_string(),
+            U64(before + ONE_YEAR_NS),
+            acc(ALICE),
+            U128(rent),
+        );
         let after = c
             .get_sub_account(acc(TLA), "alice".to_string())
             .unwrap()
             .expires_at
             .0;
         assert_eq!(after, before + ONE_YEAR_NS);
+    }
+
+    #[test]
+    fn a_renewal_the_wallet_refused_charges_nothing_and_extends_nothing() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let before = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        let revenue_before = c.get_stats().total_revenue_yocto.0;
+
+        ctx(ALICE, rent, 2);
+        let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        let owed_before = c.get_pending_refund(acc(ALICE)).0;
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_renewed(
+            acc(TLA),
+            "alice".to_string(),
+            U64(before + ONE_YEAR_NS),
+            acc(ALICE),
+            U128(rent),
+        );
+
+        let after = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        assert_eq!(
+            after, before,
+            "the wallet refused the lease, so the registry must not report it renewed"
+        );
+        assert_eq!(
+            c.get_stats().total_revenue_yocto.0,
+            revenue_before,
+            "rent must not be booked for a renewal the wallet never took"
+        );
+        assert_eq!(
+            c.get_pending_refund(acc(ALICE)).0 - owed_before,
+            rent,
+            "the payer is owed the rent back"
+        );
+    }
+
+    #[test]
+    fn a_wallet_that_refused_a_lease_update_says_so_out_loud() {
+        let mut c = deploy_with_open_tla();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_lease_synced(format!("alice.{TLA}"), "retract".to_string());
+        let logs = near_sdk::test_utils::get_logs();
+        assert!(
+            logs.iter().any(|l| l.contains("lease_sync_failed")),
+            "the registry and the wallet each hold a copy of the term, so a refused update has \
+             to be visible rather than leaving the two silently disagreeing, got {logs:?}"
+        );
+    }
+
+    #[test]
+    fn a_wallet_that_took_the_lease_update_stays_quiet() {
+        let mut c = deploy_with_open_tla();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_lease_synced(format!("alice.{TLA}"), "retract".to_string());
+        assert!(
+            !near_sdk::test_utils::get_logs()
+                .iter()
+                .any(|l| l.contains("lease_sync_failed")),
+            "a successful push must not raise the alarm"
+        );
     }
 
     #[test]
@@ -721,6 +991,71 @@ mod rental {
     }
 
     #[test]
+    fn a_seal_that_did_not_remove_the_key_is_not_reported_as_sealed() {
+        let mut c = deploy_with_open_tla();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        assert!(!c.after_seal("ed25519:key".to_string(), acc(COUNCIL)));
+        let logs = near_sdk::test_utils::get_logs();
+        assert!(logs.iter().any(|l| l.contains("seal_failed")));
+        assert!(
+            !logs.iter().any(|l| l.contains(r#""event":"sealed""#)),
+            "the launch gate reads this log, so a key that survived must never read as sealed"
+        );
+    }
+
+    #[test]
+    fn the_admin_set_is_bounded_so_its_view_cannot_outgrow_one_call() {
+        let mut c = deploy_with_open_tla();
+        while c.get_admins().len() < 32 {
+            let next = format!("admin{}.testnet", c.get_admins().len());
+            ctx(COUNCIL, 1, 1);
+            c.add_admin(acc(&next)).unwrap();
+        }
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.add_admin(acc("one-too-many.testnet")),
+            Err(ContractError::AuthoritySetFull)
+        ));
+        ctx(COUNCIL, 1, 1);
+        c.remove_admin(acc("admin31.testnet")).unwrap();
+        ctx(COUNCIL, 1, 1);
+        assert!(
+            c.add_admin(acc("one-too-many.testnet")).is_ok(),
+            "the cap bounds the set, it does not close the seat permanently"
+        );
+    }
+
+    #[test]
+    fn the_payment_authority_set_is_bounded() {
+        let mut c = deploy_with_open_tla();
+        for i in 0..32 {
+            ctx(COUNCIL, 1, 1);
+            c.add_payment_authority(acc(&format!("pay{i}.testnet")))
+                .unwrap();
+        }
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.add_payment_authority(acc("one-too-many.testnet")),
+            Err(ContractError::AuthoritySetFull)
+        ));
+    }
+
+    #[test]
+    fn the_recovery_authority_set_is_bounded() {
+        let mut c = deploy_with_open_tla();
+        while c.get_recovery_authorities().len() < 32 {
+            let next = format!("rec{}.testnet", c.get_recovery_authorities().len());
+            ctx(COUNCIL, 1, 1);
+            c.add_recovery_authority(acc(&next)).unwrap();
+        }
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.add_recovery_authority(acc("one-too-many.testnet")),
+            Err(ContractError::AuthoritySetFull)
+        ));
+    }
+
+    #[test]
     fn a_stranger_can_pay_to_renew_a_name_they_do_not_own() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
@@ -736,6 +1071,14 @@ mod rental {
             .0;
         ctx(BOB, rent, 2);
         let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_renewed(
+            acc(TLA),
+            "alice".to_string(),
+            U64(before + ONE_YEAR_NS),
+            acc(BOB),
+            U128(rent),
+        );
         let sub = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
         assert_eq!(sub.expires_at.0, before + ONE_YEAR_NS);
         assert_eq!(sub.owner, acc(ALICE));
@@ -877,6 +1220,37 @@ mod marketplace {
             c.nft_token(key).unwrap().owner_id,
             acc(CAROL),
             "the third party keeps the name"
+        );
+    }
+
+    #[test]
+    fn a_give_back_points_the_payout_at_the_owner_it_returns_to() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        settle_transfer(&mut c, "alice", ALICE, BOB);
+        assert_eq!(
+            payout_of(&c, "alice"),
+            acc(BOB),
+            "a plain transfer repoints the payout at the receiver"
+        );
+
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let kept = c.nft_on_return_resolved(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            acc(ALICE),
+            Ok(true),
+        );
+        assert!(!kept, "the receiver handed the name back");
+        assert_eq!(
+            c.nft_token(format!("alice.{TLA}")).unwrap().owner_id,
+            acc(ALICE)
+        );
+        assert_eq!(
+            payout_of(&c, "alice"),
+            acc(ALICE),
+            "rent and sweeps must follow the name home, never stay aimed at the receiver"
         );
     }
 
@@ -1234,9 +1608,9 @@ mod reclaim {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
-        assert!(c.is_name_available(acc(TLA), "alice".to_string()));
+        assert!(!c.is_name_available(acc(TLA), "alice".to_string()));
         assert_eq!(c.get_stats().sub_account_count, 0);
 
         let rent = c
@@ -1249,7 +1623,7 @@ mod reclaim {
             .rent_sub_account(acc(TLA), "alice".to_string(), None)
             .unwrap();
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_sub_account_re_rented(settled("alice", BOB, BOB, rent, rent));
+        let _ = c.on_sub_account_re_rented(settled("alice", BOB, BOB, rent, rent), Ok(true));
         assert!(!c.is_name_re_rentable(acc(TLA), "alice".to_string()));
         assert_eq!(
             c.get_sub_account(acc(TLA), "alice".to_string())
@@ -1274,15 +1648,97 @@ mod reclaim {
     }
 
     #[test]
+    fn the_paid_lane_recycles_a_parked_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
+        assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        c.bind_payment_authority_tla(acc(BOB), acc(TLA), U64(50))
+            .unwrap();
+        ctx(BOB, 0, 2);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "alice".to_string(),
+                acc(CAROL),
+                acc(CAROL),
+                "ord-re-rent".to_string(),
+            )
+            .expect("a parked name is re-rentable through the paid lane");
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(CAROL)
+        );
+    }
+
+    #[test]
+    fn a_failed_park_does_not_reclaim_the_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(false));
+        assert!(!c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+        assert_eq!(c.get_stats().sub_account_count, 1);
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(ALICE)
+        );
+    }
+
+    #[test]
+    fn a_park_whose_receipt_failed_does_not_reclaim_the_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_reclaim_finalized(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            Err(near_sdk::PromiseError::Failed),
+        );
+        assert!(!c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+        assert_eq!(c.get_stats().sub_account_count, 1);
+    }
+
+    #[test]
+    fn a_failed_owner_swap_does_not_complete_a_re_rent() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        ctx(BOB, rent, 3);
+        let _ = c
+            .rent_sub_account(acc(TLA), "alice".to_string(), None)
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let _ = c.on_sub_account_re_rented(settled("alice", BOB, BOB, rent, rent), Ok(false));
+        assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+        assert!(c.get_sub_account(acc(TLA), "alice".to_string()).is_none());
+    }
+
+    #[test]
     fn double_reclaim_does_not_double_decrement() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         assert_eq!(c.get_stats().sub_account_count, 1);
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert_eq!(c.get_stats().sub_account_count, 0);
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert_eq!(c.get_stats().sub_account_count, 0);
     }
 
@@ -1290,7 +1746,14 @@ mod reclaim {
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
         ctx(ADMIN, 1, 0);
-        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), U64(0), acc(TREASURY), acc(COUNCIL));
+        let _ = TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(0),
+            acc(TREASURY),
+            acc(COUNCIL),
+            None,
+        );
     }
 
     #[test]
@@ -1311,7 +1774,7 @@ mod reclaim {
             Err(ContractError::ReclaimInProgress)
         ));
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
     }
 
@@ -1546,13 +2009,393 @@ mod business {
         );
     }
 
-    fn rent_employee_sub(c: &mut TlaRegistry, name: &str, employee: &str) {
+    #[test]
+    fn an_unbound_authority_cannot_mint_under_a_business_tla() {
+        let mut c = deploy_with_business_tla();
         let creation = c.get_fee_config().account_creation_deposit_yocto.0;
         ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(CAROL)).unwrap();
         ctx(CAROL, creation, 1);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "staff".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "ord-unbound".to_string()
+                ),
+                Err(ContractError::AuthorityNotBoundToTla)
+            ),
+            "naming the licensee as payout_account is not authorisation from them"
+        );
+        assert!(c.get_sub_account(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    fn bound_relay() -> TlaRegistry {
+        let mut c = deploy_with_business_tla();
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
+        c
+    }
+
+    #[test]
+    fn a_paid_mint_that_never_landed_leaves_its_order_spendable_again() {
+        let mut c = bound_relay();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+
+        ctx(CAROL, creation, 1);
         let _ = c
-            .rent_sub_account_paid(acc(TLA), name.to_string(), acc(employee), acc(ALICE))
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-1".to_string(),
+            )
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_created_paid(
+            settled_for_order("staff", BOB, CAROL, "ord-1"),
+            Ok(MintOutcome::CreationFailed),
+        );
+
+        ctx(CAROL, creation, 2);
+        assert!(
+            c.rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-1".to_string(),
+            )
+            .is_ok(),
+            "the customer paid for this order once and the mint never happened, so it must be retryable"
+        );
+    }
+
+    #[test]
+    fn a_paid_mint_that_landed_can_never_be_spent_twice() {
+        let mut c = bound_relay();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-2".to_string(),
+            )
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_created_paid(
+            settled_for_order("staff", BOB, CAROL, "ord-2"),
+            Ok(MintOutcome::Active),
+        );
+
+        ctx(CAROL, creation, 2);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "other".to_string(),
+                    acc(BOB),
+                    acc(BOB),
+                    "ord-2".to_string(),
+                ),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "one settled payment must never buy a second name"
+        );
+    }
+
+    #[test]
+    fn an_order_in_flight_blocks_a_second_attempt_on_the_same_order() {
+        let mut c = bound_relay();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-3".to_string(),
+            )
+            .unwrap();
+
+        ctx(CAROL, creation, 1);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "other".to_string(),
+                    acc(BOB),
+                    acc(BOB),
+                    "ord-3".to_string(),
+                ),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "two mints in one block must not both draw on the same order"
+        );
+    }
+
+    #[test]
+    fn the_admin_hatch_frees_a_stuck_order_but_never_a_settled_one() {
+        let mut c = bound_relay();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-4".to_string(),
+            )
+            .unwrap();
+
+        ctx(BOB, 1, 2);
+        assert!(
+            c.admin_release_paid_order("ord-4".to_string()).is_err(),
+            "the hatch is admin only"
+        );
+
+        ctx(ADMIN, 1, 2);
+        assert!(c.admin_release_paid_order("ord-4".to_string()).is_ok());
+        assert!(
+            matches!(
+                c.admin_release_paid_order("ord-4".to_string()),
+                Err(ContractError::PaidOrderNotFound)
+            ),
+            "releasing twice must not pretend to have done something"
+        );
+
+        ctx(CAROL, creation, 3);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff2".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-4".to_string(),
+            )
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_created_paid(
+            settled_for_order("staff2", BOB, CAROL, "ord-4"),
+            Ok(MintOutcome::Active),
+        );
+
+        ctx(ADMIN, 1, 4);
+        assert!(
+            matches!(
+                c.admin_release_paid_order("ord-4".to_string()),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "the hatch must never reopen a payment that already bought a name"
+        );
+    }
+
+    #[test]
+    fn unbinding_stops_a_relay_that_was_previously_allowed() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
+        assert!(c.is_payment_authority_bound(acc(CAROL), acc(TLA)));
+        ctx(ADMIN, 1, 1);
+        c.unbind_payment_authority_tla(acc(CAROL), acc(TLA))
+            .unwrap();
+        assert!(!c.is_payment_authority_bound(acc(CAROL), acc(TLA)));
+        ctx(CAROL, creation, 1);
+        assert!(matches!(
+            c.rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-unbound-2".to_string()
+            ),
+            Err(ContractError::AuthorityNotBoundToTla)
+        ));
+    }
+
+    #[test]
+    fn a_bound_relay_cannot_mint_past_its_allowance() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(1))
+            .unwrap();
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "one".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-one".to_string(),
+            )
+            .expect("the first mint is inside the allowance");
+        assert_eq!(c.payment_authority_used(acc(CAROL), acc(TLA)).0, 1);
+
+        ctx(CAROL, creation, 1);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "two".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "ord-two".to_string()
+                ),
+                Err(ContractError::AuthorityMintAllowanceSpent)
+            ),
+            "a compromised relay cannot squat the namespace past what the council allowed"
+        );
+        assert!(c.get_sub_account(acc(TLA), "two".to_string()).is_none());
+    }
+
+    #[test]
+    fn a_relay_nearing_its_ceiling_says_so_on_chain() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(5))
+            .unwrap();
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "first".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-a".to_string(),
+            )
+            .unwrap();
+        assert!(
+            near_sdk::test_utils::get_logs()
+                .iter()
+                .any(|l| l.contains("payment_authority_allowance_low")),
+            "the council has to see a relay running out before it stops minting"
+        );
+    }
+
+    #[test]
+    fn a_relay_bound_with_no_allowance_is_refused_rather_than_left_unlimited() {
+        let mut c = deploy_with_business_tla();
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        assert!(
+            matches!(
+                c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(0)),
+                Err(ContractError::AuthorityMintAllowanceZero)
+            ),
+            "zero must not read as an uncapped bind"
+        );
+        assert!(!c.is_payment_authority_bound(acc(CAROL), acc(TLA)));
+    }
+
+    #[test]
+    fn one_settled_order_cannot_be_replayed_into_a_second_name() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "first".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-7".to_string(),
+            )
+            .expect("the order settles the first name");
+
+        ctx(CAROL, creation, 1);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "second".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "ord-7".to_string()
+                ),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "one payment must buy one name"
+        );
+        assert!(c.get_sub_account(acc(TLA), "second".to_string()).is_none());
+    }
+
+    #[test]
+    fn a_paid_mint_must_name_the_order_it_settles() {
+        let mut c = deploy_with_business_tla();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
+        ctx(CAROL, creation, 1);
+        assert!(matches!(
+            c.rent_sub_account_paid(
+                acc(TLA),
+                "first".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                String::new()
+            ),
+            Err(ContractError::InvalidOrderId)
+        ));
+        ctx(CAROL, creation, 1);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "first".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "x".repeat(crate::rental::MAX_ORDER_ID_LEN + 1)
+                ),
+                Err(ContractError::InvalidOrderId)
+            ),
+            "an unbounded identifier is storage a relay can spend for free"
+        );
+    }
+
+    fn rent_employee_sub(c: &mut TlaRegistry, name: &str, employee: &str) {
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        ctx(ADMIN, 1, 1);
+        c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                name.to_string(),
+                acc(employee),
+                acc(ALICE),
+                format!("ord-{name}"),
+            )
             .unwrap();
     }
 
@@ -1568,12 +2411,36 @@ mod business {
             "the employee holds it so their wallet can sign as the account"
         );
         ctx(ALICE, 1, 2);
-        c.schedule_retraction(acc(TLA), "staff".to_string())
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
             .unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
         ctx(ALICE, 1, 3);
         c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    #[test]
+    fn an_elapsed_retraction_reads_reclaimable_to_a_client() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
+            .unwrap();
+
+        let notice = c.get_fee_config().retraction_notice_ns.0;
+        let after = (2 + notice).max(GRACE_NS) + 1;
+        ctx(BOB, 0, after);
+        let view = c.get_sub_account(acc(TLA), "staff".to_string()).unwrap();
+        assert!(
+            matches!(view.lifecycle, LifecycleStatus::Reclaimable),
+            "the view must report what assert_sellable and resolve_reclaimable enforce"
+        );
+        assert!(
+            view.expires_at.0 > after,
+            "its own term has not run, so only the retraction explains the status"
+        );
     }
 
     #[test]
@@ -1608,9 +2475,17 @@ mod business {
         let creation = c.get_fee_config().account_creation_deposit_yocto.0;
         ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(CAROL)).unwrap();
+        c.bind_payment_authority_tla(acc(CAROL), acc(TLA), U64(50))
+            .unwrap();
         ctx(CAROL, creation, 1);
         let _ = c
-            .rent_sub_account_paid(acc(TLA), "staff".to_string(), acc(BOB), acc(ALICE))
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-staff".to_string(),
+            )
             .unwrap();
         assert_eq!(payout_of(&c, "staff"), acc(ALICE));
 
@@ -1660,14 +2535,16 @@ mod business {
 
     #[test]
     fn business_renewal_cost_quotes_the_tla_rent_only() {
-        let c = deploy_with_business_tla();
+        let mut c = deploy_with_business_tla();
         let view = c.get_business_renewal_cost(acc(TLA)).unwrap();
         assert_eq!(view.tla_id, acc(TLA));
-        assert_eq!(view.sub_count, 0);
         assert!(view.tla_rent_yocto.0 > 0);
-        assert!(
-            view.per_sub_yocto.0 > 0,
-            "per-sub cost is reported separately because renew_tla does not charge it"
+
+        rent_business_sub(&mut c, "staff");
+        let with_a_sub = c.get_business_renewal_cost(acc(TLA)).unwrap();
+        assert_eq!(
+            with_a_sub.tla_rent_yocto, view.tla_rent_yocto,
+            "renew_tla charges base rent alone, so the quote cannot move with the sub-account count"
         );
     }
 
@@ -1709,7 +2586,8 @@ mod business {
             Ok(MintOutcome::Active),
         );
         ctx(ALICE, 1, 2);
-        c.schedule_retraction(acc(TLA), "staff".to_string())
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
             .unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
         ctx(ALICE, 1, 3);
@@ -2095,6 +2973,7 @@ mod council_split {
             U64(GRACE_NS),
             acc(TREASURY),
             acc(OTHER_COUNCIL),
+            None,
         )
     }
 
@@ -2195,7 +3074,7 @@ mod council_split {
         ctx(ADMIN, 1, 1);
         c.suspend_tla(acc(TLA)).unwrap();
 
-        ctx("mallory.testnet", 0, 1);
+        ctx("mallory.testnet", 1, 1);
         assert!(matches!(
             c.unsuspend_tla(acc(TLA)),
             Err(ContractError::OnlyAdmin)
@@ -2457,7 +3336,7 @@ mod a_pause_never_traps_a_user {
         ctx(
             ALICE,
             crate::reclaim::SWEEP_ATTACHED_REQUIRED.as_yoctonear(),
-            expires + 1,
+            expires + GRACE_NS + DAY_NS,
         );
         assert!(
             c.reclaim_sweep_ft(acc(TLA), "alice".to_string(), token)
@@ -2620,6 +3499,11 @@ mod paged_views {
         rent_alice_sub(&mut c, "alice");
         let key = format!("alice.{TLA}");
         let before = c.nft_token(key.clone()).unwrap().metadata.unwrap().extra;
+        let expires_before = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
 
         let rent = c
             .get_rent_price(acc(TLA), "alice".to_string())
@@ -2628,6 +3512,14 @@ mod paged_views {
             .0;
         ctx(ALICE, rent, 2);
         let _ = c.renew_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_renewed(
+            acc(TLA),
+            "alice".to_string(),
+            U64(expires_before + ONE_YEAR_NS),
+            acc(ALICE),
+            U128(rent),
+        );
 
         let after = c.nft_token(key).unwrap().metadata.unwrap().extra;
         assert_ne!(
@@ -2675,9 +3567,17 @@ mod paged_views {
             .0;
         ctx(ADMIN, 1, 1);
         c.add_payment_authority(acc(BOB)).unwrap();
+        c.bind_payment_authority_tla(acc(BOB), acc(TLA), U64(50))
+            .unwrap();
         ctx(BOB, creation, 1);
         let _ = c
-            .rent_sub_account_paid(acc(TLA), "alice".to_string(), acc(ALICE), acc(ALICE))
+            .rent_sub_account_paid(
+                acc(TLA),
+                "alice".to_string(),
+                acc(ALICE),
+                acc(ALICE),
+                "ord-paid-alice".to_string(),
+            )
             .unwrap();
         c.on_sub_account_created_paid(
             settled("alice", ALICE, BOB, rent, creation),
@@ -2710,7 +3610,7 @@ mod paged_views {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert!(owned(&c, ALICE).is_empty());
         assert!(c.list_sub_accounts(0, 10).is_empty());
     }
@@ -2922,7 +3822,7 @@ mod paged_views {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
-        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE), Ok(true));
         assert!(c.list_sub_accounts_by_tla(acc(TLA), 0, 10).is_empty());
     }
 
@@ -2956,6 +3856,86 @@ mod migration {
         c.state_version = crate::STATE_VERSION + 1;
         ctx("registry.testnet", 0, 0);
         near_sdk::env::state_write(&c);
+        crate::TlaRegistry::migrate();
+    }
+
+    fn as_v1(c: TlaRegistry) -> crate::legacy::TlaRegistryV1 {
+        crate::legacy::TlaRegistryV1 {
+            state_version: 1,
+            tlas: c.tlas,
+            sub_accounts: c.sub_accounts,
+            sub_accounts_by_owner: c.sub_accounts_by_owner,
+            sub_accounts_by_tla: c.sub_accounts_by_tla,
+            recent_activity: c.recent_activity,
+            activity_cursor: c.activity_cursor,
+            admins: c.admins,
+            fee_config: c.fee_config,
+            total_revenue: c.total_revenue,
+            sub_account_count: c.sub_account_count,
+            paused: c.paused,
+            version: c.version,
+            pending_refunds: c.pending_refunds,
+            total_pending_refunds: c.total_pending_refunds,
+            ft_allowlist: c.ft_allowlist,
+            business_sub_count: c.business_sub_count,
+            business_sub_cap_override: c.business_sub_cap_override,
+            parked_names: c.parked_names,
+            reclaim_pending: c.reclaim_pending,
+            payment_authorities: c.payment_authorities,
+            recovery_authorities: c.recovery_authorities,
+            hos_extension: c.hos_extension,
+            grace_period_ns: c.grace_period_ns,
+            price_oracle: c.price_oracle,
+            near_usd_rate_micro: c.near_usd_rate_micro,
+            rate_updated_at: c.rate_updated_at,
+            rate_sequence: c.rate_sequence,
+            treasury: c.treasury,
+            council: c.council,
+            marketplace_paused: c.marketplace_paused,
+            paused_until_ns: c.paused_until_ns,
+            unpaused_at: c.unpaused_at,
+            sweepable_tokens: c.sweepable_tokens,
+            suspended_until: c.suspended_until,
+            nft_contract_metadata: c.nft_contract_metadata,
+            approved_code_hash: c.approved_code_hash,
+            approved_at: c.approved_at,
+            upgrade_delay_ns: c.upgrade_delay_ns,
+            venues: c.venues,
+            upgrade_proven: c.upgrade_proven,
+        }
+    }
+
+    #[test]
+    fn a_state_left_at_version_one_migrates_through_its_own_reader() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        let council = c.get_council();
+        let old = as_v1(c);
+        ctx("registry.testnet", 0, 0);
+        near_sdk::env::state_write(&old);
+        drop(old);
+
+        let migrated = crate::TlaRegistry::migrate();
+        assert_eq!(migrated.state_version, crate::STATE_VERSION);
+        assert_eq!(migrated.council, council);
+        assert!(
+            migrated.tlas.contains_key(&acc(TLA)),
+            "the shape changed, the data did not"
+        );
+        assert_eq!(migrated.lease_term_ns, crate::PRODUCTION_LEASE_TERM_NS);
+        assert!(migrated.pending_council.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "state version")]
+    fn the_current_reader_is_not_offered_a_shape_it_cannot_read() {
+        let c = deploy();
+        let mut old = as_v1(c);
+        old.state_version = 9;
+        ctx("registry.testnet", 0, 0);
+        near_sdk::env::state_write(&old);
         crate::TlaRegistry::migrate();
     }
 }
@@ -3038,6 +4018,22 @@ mod keyless_upgrade {
         c.upgrade_proven = true;
         ctx(COUNCIL, 1, 0);
         assert!(c.seal(a_key()).is_ok());
+        let deleted: Vec<String> = near_sdk::test_utils::get_created_receipts()
+            .into_iter()
+            .flat_map(|receipt| receipt.actions)
+            .filter_map(|action| match action {
+                near_sdk::mock::MockAction::DeleteKey { public_key, .. } => {
+                    Some(public_key.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deleted,
+            vec![String::from(&a_key())],
+            "the launch gate turns on this account ending with no key, so the seal has to \
+             schedule the removal rather than only report one"
+        );
     }
 
     #[test]
@@ -3109,6 +4105,66 @@ mod keyless_upgrade {
     }
 
     #[test]
+    fn seeding_the_rate_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.admin_set_initial_rate(U128(NEAR_USD_MICRO)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn rotating_the_price_oracle_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.set_price_oracle(acc(BOB)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn widening_the_asset_gate_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.add_ft_allowlist(acc("token.testnet")),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn narrowing_the_asset_gate_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.remove_ft_allowlist(acc("token.testnet")),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn opening_a_tla_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.activate_open_tla(acc(TLA)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn clearing_a_stuck_reclaim_needs_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        assert!(matches!(
+            c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string()),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
     #[should_panic(expected = "council must not be the registry")]
     fn init_rejects_a_council_that_is_the_registry_itself() {
         ctx(ADMIN, 1, 0);
@@ -3118,6 +4174,990 @@ mod keyless_upgrade {
             U64(GRACE_NS),
             acc(TREASURY),
             acc("registry.testnet"),
+            None,
         );
+    }
+}
+
+#[cfg(test)]
+mod deployment_terms {
+    use super::*;
+
+    const MINUTE_NS: u64 = 60 * 1_000_000_000;
+
+    fn deploy_with_terms(lease: Option<U64>, grace: u64) -> TlaRegistry {
+        ctx(ADMIN, 1, 0);
+        TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(grace),
+            acc(TREASURY),
+            acc(COUNCIL),
+            lease,
+        )
+    }
+
+    #[test]
+    fn omitting_the_lease_term_takes_the_production_year() {
+        let c = deploy_with_terms(None, GRACE_NS);
+        assert_eq!(c.lease_term_ns, ONE_YEAR_NS);
+    }
+
+    #[test]
+    #[should_panic(expected = "lease term too short")]
+    fn a_lease_term_under_the_floor_is_refused() {
+        let _ = deploy_with_terms(Some(U64(MINUTE_NS - 1)), GRACE_NS);
+    }
+
+    #[test]
+    #[should_panic(expected = "lease term too long")]
+    fn a_lease_term_over_the_ceiling_is_refused() {
+        let _ = deploy_with_terms(Some(U64(11 * ONE_YEAR_NS)), GRACE_NS);
+    }
+
+    #[test]
+    fn a_test_grade_lease_reports_the_deployment_not_ready() {
+        let c = deploy_with_terms(Some(U64(MINUTE_NS)), GRACE_NS);
+        let readiness = c.deployment_readiness();
+        assert!(
+            !readiness.production_terms,
+            "a one minute lease must not pass as production"
+        );
+        assert!(
+            !readiness.ready,
+            "a deployment carrying test-grade terms must never report ready"
+        );
+    }
+
+    #[test]
+    fn a_test_grade_grace_reports_the_deployment_not_ready() {
+        let c = deploy_with_terms(None, MINUTE_NS);
+        assert!(
+            !c.deployment_readiness().production_terms,
+            "a one minute grace must not pass as production"
+        );
+    }
+
+    #[test]
+    fn production_terms_pass_when_both_meet_the_real_thresholds() {
+        let c = deploy_with_terms(Some(U64(ONE_YEAR_NS)), 30 * 24 * 60 * 60 * 1_000_000_000);
+        assert!(
+            c.deployment_readiness().production_terms,
+            "a year lease and a thirty day grace are production grade"
+        );
+    }
+}
+
+mod valhalla_v2 {
+    use super::*;
+
+    #[test]
+    fn a_stranger_cannot_sweep_during_the_grace_period() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(BOB, 1, expires + 1);
+        assert!(
+            matches!(
+                c.reclaim_sweep_near(acc(TLA), "alice".to_string()),
+                Err(ContractError::SubAccountNotReclaimable)
+            ),
+            "a holder who can still renew must not have their balance swept by a stranger"
+        );
+    }
+
+    #[test]
+    fn the_sweep_opens_once_the_name_is_actually_reclaimable() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(BOB, 1, expires + GRACE_NS + DAY_NS);
+        assert!(c.reclaim_sweep_near(acc(TLA), "alice".to_string()).is_ok());
+    }
+
+    #[test]
+    fn a_delisted_token_can_leave_the_sweepable_set() {
+        let mut c = deploy_with_open_tla();
+        let token = acc("usdc.testnet");
+        ctx(ADMIN, 1, 1);
+        c.add_ft_allowlist(token.clone()).unwrap();
+        c.remove_ft_allowlist(token.clone()).unwrap();
+        ctx(COUNCIL, 1, 1);
+        assert!(c.remove_sweepable_token(token.clone()).is_ok());
+        ctx(ADMIN, 1, 1);
+        assert!(
+            c.add_ft_allowlist(token).is_ok(),
+            "the gate must be reconfigurable after churn"
+        );
+    }
+
+    #[test]
+    fn a_token_still_on_the_gate_cannot_be_made_unsweepable() {
+        let mut c = deploy_with_open_tla();
+        let token = acc("usdc.testnet");
+        ctx(ADMIN, 1, 1);
+        c.add_ft_allowlist(token.clone()).unwrap();
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.remove_sweepable_token(token),
+            Err(ContractError::TokenStillAllowlisted)
+        ));
+    }
+
+    #[test]
+    fn the_council_can_shorten_the_lease_term_for_testing() {
+        let mut c = deploy_with_open_tla();
+        ctx(COUNCIL, 1, 1);
+        assert!(c.set_lease_term_ns(U64(300 * 1_000_000_000)).is_ok());
+        assert_eq!(c.lease_term_ns, 300 * 1_000_000_000);
+    }
+
+    #[test]
+    fn a_shortened_term_applies_to_the_next_rental_only() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "before");
+        let old = c
+            .sub_accounts
+            .get(&format!("before.{TLA}"))
+            .unwrap()
+            .expires_at;
+        ctx(COUNCIL, 1, 1);
+        c.set_lease_term_ns(U64(60 * 1_000_000_000)).unwrap();
+        rent_alice_sub(&mut c, "after");
+        let new = c
+            .sub_accounts
+            .get(&format!("after.{TLA}"))
+            .unwrap()
+            .expires_at;
+        assert!(
+            new < old,
+            "the new rental must expire far sooner than the old one"
+        );
+        assert_eq!(
+            c.sub_accounts
+                .get(&format!("before.{TLA}"))
+                .unwrap()
+                .expires_at,
+            old,
+            "an existing name keeps the expiry it was rented with"
+        );
+    }
+
+    #[test]
+    fn only_the_council_may_change_the_lease_term() {
+        let mut c = deploy_with_open_tla();
+        let before = c.lease_term_ns;
+        ctx(ALICE, 1, 1);
+        assert!(matches!(
+            c.set_lease_term_ns(U64(300 * 1_000_000_000)),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert_eq!(
+            c.lease_term_ns, before,
+            "a refused call must not change the term"
+        );
+    }
+
+    #[test]
+    fn a_lease_term_outside_the_bounds_is_refused() {
+        let mut c = deploy_with_open_tla();
+        ctx(COUNCIL, 1, 1);
+        assert!(matches!(
+            c.set_lease_term_ns(U64(59 * 1_000_000_000)),
+            Err(ContractError::LeaseTermTooShort)
+        ));
+        assert!(matches!(
+            c.set_lease_term_ns(U64(11 * ONE_YEAR_NS)),
+            Err(ContractError::LeaseTermTooLong)
+        ));
+        assert!(c.set_lease_term_ns(U64(60 * 1_000_000_000)).is_ok());
+        assert!(c.set_lease_term_ns(U64(10 * ONE_YEAR_NS)).is_ok());
+    }
+
+    #[test]
+    fn the_owner_index_does_not_keep_an_empty_set_forever() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+        assert!(c.sub_accounts_by_owner.contains_key(&acc(ALICE)));
+        c.sub_account_remove(&key);
+        assert!(
+            !c.sub_accounts_by_owner.contains_key(&acc(ALICE)),
+            "an emptied owner set must leave the outer map, or storage grows with every holder"
+        );
+    }
+}
+
+mod valhalla_v2_more {
+    use super::*;
+
+    #[test]
+    fn an_orphaned_name_can_be_parked_back_onto_the_re_rent_path() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 1);
+        assert!(c.admin_force_park(acc(TLA), "orphan".to_string()).is_ok());
+        assert!(
+            c.is_name_re_rentable(acc(TLA), "orphan".to_string()),
+            "a name whose account exists but whose row was dropped must be re-rentable"
+        );
+    }
+
+    #[test]
+    fn force_park_refuses_a_name_that_is_still_held() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ADMIN, 1, 1);
+        assert!(matches!(
+            c.admin_force_park(acc(TLA), "alice".to_string()),
+            Err(ContractError::SubAccountNameTaken)
+        ));
+    }
+
+    #[test]
+    fn force_park_refuses_an_unknown_tla() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 1);
+        assert!(matches!(
+            c.admin_force_park(acc("nosuch.testnet"), "orphan".to_string()),
+            Err(ContractError::TlaNotFound)
+        ));
+    }
+
+    #[test]
+    fn a_parked_name_that_still_holds_other_names_cannot_be_re_rented() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "acme");
+        let holder: AccountId = format!("acme.{TLA}").parse().unwrap();
+        let held = sub_account_key(&acc(TLA), "invoices");
+        c.sub_account_insert(
+            held,
+            SubAccountEntry {
+                owner: holder.clone(),
+                tla_id: acc(TLA),
+                payout_account: holder.clone(),
+                rented_at: 1,
+                expires_at: GRACE_NS,
+                retraction_at: None,
+            },
+        );
+        ctx(ADMIN, 1, 2);
+        c.sub_account_remove(&format!("acme.{TLA}"));
+        assert!(c.admin_force_park(acc(TLA), "acme".to_string()).is_ok());
+        assert!(
+            !c.is_name_re_rentable(acc(TLA), "acme".to_string()),
+            "the view has to agree with the gate or the checkout offers a name it cannot sell"
+        );
+
+        let rent = rent_near_open(&c, "acme");
+        ctx(BOB, rent, 2);
+        assert!(
+            matches!(
+                c.rent_sub_account(acc(TLA), "acme".to_string(), None),
+                Err(ContractError::NameStillHoldsNames)
+            ),
+            "re-renting a name that owns other names would hand the buyer everything it holds"
+        );
+    }
+
+    #[test]
+    fn a_parked_name_holding_nothing_re_rents_as_before() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "acme");
+        ctx(ADMIN, 1, 2);
+        c.sub_account_remove(&format!("acme.{TLA}"));
+        assert!(c.admin_force_park(acc(TLA), "acme".to_string()).is_ok());
+        assert!(c.is_name_re_rentable(acc(TLA), "acme".to_string()));
+    }
+
+    #[test]
+    fn a_rotation_that_lands_after_the_name_moved_leaves_it_where_it_is() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(c.sub_account_reassign(&key, &acc(CAROL), &acc(CAROL)));
+        ctx("registry.testnet", 0, 2);
+        c.on_sub_account_transferred(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            RotationCause::Transfer,
+            Ok(true),
+        );
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(CAROL),
+            "a transfer approved against an owner who has since moved on must not \
+             overwrite whoever holds the name now"
+        );
+    }
+
+    #[test]
+    fn a_recovery_that_lands_after_the_name_moved_leaves_it_where_it_is() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(c.sub_account_reassign(&key, &acc(CAROL), &acc(CAROL)));
+        ctx("registry.testnet", 0, 2);
+        c.on_sub_account_recovered(
+            acc(TLA),
+            "alice".to_string(),
+            acc(ALICE),
+            acc(BOB),
+            Ok(true),
+        );
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(CAROL),
+            "the wallet and the ledger must agree on who the name left, or a sale \
+             racing a recovery splits them"
+        );
+    }
+
+    #[test]
+    fn a_holders_supply_does_not_walk_their_whole_key_set() {
+        let mut c = deploy_with_open_tla();
+        for name in ["one", "two", "three"] {
+            rent_alice_sub(&mut c, name);
+        }
+        assert_eq!(c.nft_supply_for_owner(acc(ALICE)).0, 3);
+        c.sub_account_remove(&format!("two.{TLA}"));
+        assert_eq!(
+            c.nft_supply_for_owner(acc(ALICE)).0,
+            2,
+            "the set carries its own length, and removal must be reflected in it"
+        );
+        c.sub_account_remove(&format!("one.{TLA}"));
+        c.sub_account_remove(&format!("three.{TLA}"));
+        assert_eq!(
+            c.nft_supply_for_owner(acc(ALICE)).0,
+            0,
+            "an owner whose set was dropped reports nothing, not a stale count"
+        );
+    }
+}
+
+mod valhalla_v2_council_rotation {
+    use super::*;
+
+    const NEW_COUNCIL: &str = "council2.testnet";
+
+    #[test]
+    fn a_rotation_installs_the_new_council_once_the_delay_has_run() {
+        let mut c = deploy();
+        let delay = c.upgrade_delay_ns;
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        assert_eq!(c.pending_council(), Some((acc(NEW_COUNCIL), U64(0))));
+        ctx(NEW_COUNCIL, 1, delay);
+        c.commit_council_rotation().unwrap();
+        assert_eq!(c.get_council(), acc(NEW_COUNCIL));
+        assert!(c.pending_council().is_none());
+    }
+
+    #[test]
+    fn the_outgoing_council_cannot_seat_an_account_that_never_signed() {
+        let mut c = deploy();
+        let delay = c.upgrade_delay_ns;
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx(COUNCIL, 1, delay);
+        assert!(
+            matches!(
+                c.commit_council_rotation(),
+                Err(ContractError::OnlyPendingCouncil)
+            ),
+            "a mistyped council must cost a cancelled rotation, not the contract"
+        );
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn a_rotation_cannot_commit_inside_its_delay() {
+        let mut c = deploy();
+        let delay = c.upgrade_delay_ns;
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx(NEW_COUNCIL, 1, delay - 1);
+        assert!(
+            matches!(
+                c.commit_council_rotation(),
+                Err(ContractError::CouncilRotationTooYoung)
+            ),
+            "the window is what lets anyone watching object before the gate moves"
+        );
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn an_approval_can_be_withdrawn_before_it_commits() {
+        let mut c = deploy();
+        let delay = c.upgrade_delay_ns;
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx(COUNCIL, 1, 1);
+        c.cancel_council_rotation().unwrap();
+        assert!(c.pending_council().is_none());
+        ctx(COUNCIL, 1, delay);
+        assert!(matches!(
+            c.commit_council_rotation(),
+            Err(ContractError::NoCouncilRotationPending)
+        ));
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn only_the_council_can_move_the_council() {
+        let mut c = deploy();
+        ctx(BOB, 1, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(NEW_COUNCIL)),
+            Err(ContractError::OnlyCouncil)
+        ));
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx(BOB, 1, 1);
+        assert!(matches!(
+            c.cancel_council_rotation(),
+            Err(ContractError::OnlyCouncil)
+        ));
+        ctx(BOB, 1, c.upgrade_delay_ns);
+        assert!(matches!(
+            c.commit_council_rotation(),
+            Err(ContractError::OnlyPendingCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_rotation_refuses_a_council_that_would_end_the_gate() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(COUNCIL)),
+            Err(ContractError::CouncilUnchanged)
+        ));
+        ctx(COUNCIL, 1, 0);
+        assert!(
+            matches!(
+                c.approve_council_rotation(acc("registry.testnet")),
+                Err(ContractError::CouncilIsSelf)
+            ),
+            "this account ends with no keys, so naming it council closes every gate for good"
+        );
+    }
+
+    #[test]
+    fn moving_the_council_takes_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(NEW_COUNCIL)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn the_new_council_gates_what_the_old_one_used_to() {
+        let mut c = deploy();
+        let delay = c.upgrade_delay_ns;
+        ctx(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx(NEW_COUNCIL, 1, delay);
+        c.commit_council_rotation().unwrap();
+
+        ctx(COUNCIL, 1, delay);
+        assert!(
+            matches!(
+                c.register_tla(acc("gone"), TlaType::Open, PremiumCategory::Standard, None),
+                Err(ContractError::OnlyCouncil)
+            ),
+            "the outgoing council must lose the gate it handed over"
+        );
+        ctx(NEW_COUNCIL, 1, delay);
+        assert!(c
+            .register_tla(acc("held"), TlaType::Open, PremiumCategory::Standard, None)
+            .is_ok());
+    }
+}
+
+#[test]
+fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
+    let c = deploy();
+    assert_eq!(
+        (
+            crate::STATE_VERSION,
+            near_sdk::borsh::to_vec(&c).unwrap().len()
+        ),
+        (2, 616),
+        "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
+         the shape that is deployed today, and update this fixture. A publish that \
+         skips that leaves migrate unable to read what is on the account."
+    );
+}
+
+mod valhalla_v1_carryovers {
+    use super::*;
+
+    #[test]
+    fn a_parked_name_can_still_have_its_balance_swept() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = sub_account_key(&acc(TLA), "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(BOB, 1, expires + GRACE_NS + DAY_NS);
+        let _ = c.reclaim_finalize(acc(TLA), "alice".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(TREASURY), Ok(true));
+        assert!(
+            c.get_sub_account(acc(TLA), "alice".to_string()).is_none(),
+            "the park has to have removed the row for this to prove anything"
+        );
+        assert!(c.parked_names.contains_key(&key));
+
+        ctx(BOB, 1, expires + GRACE_NS + DAY_NS);
+        assert!(
+            c.reclaim_sweep_near(acc(TLA), "alice".to_string()).is_ok(),
+            "a parked name keeps receiving tokens, so refusing the sweep strands \
+             every balance that lands after the park"
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_neither_parked_nor_reclaimable_is_still_refused() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(BOB, 1, 2);
+        assert!(
+            matches!(
+                c.reclaim_sweep_near(acc(TLA), "alice".to_string()),
+                Err(ContractError::SubAccountNotReclaimable)
+            ),
+            "opening the sweep to parked names must not open it to live ones"
+        );
+        ctx(BOB, 1, 2);
+        assert!(matches!(
+            c.reclaim_sweep_near(acc(TLA), "ghost".to_string()),
+            Err(ContractError::SubAccountNotFound)
+        ));
+    }
+}
+
+mod tla_lapse_notice {
+    use super::*;
+
+    fn lapse_the_tla(c: &mut TlaRegistry) -> u64 {
+        let at = c.tlas.get(&acc(TLA)).unwrap().expires_at + GRACE_NS + DAY_NS;
+        let key = sub_account_key(&acc(TLA), "alice");
+        c.sub_accounts.get_mut(&key).unwrap().expires_at = at + 365 * DAY_NS;
+        at
+    }
+
+    #[test]
+    fn a_lapsed_tla_serves_notice_before_it_takes_a_live_sub() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let at = lapse_the_tla(&mut c);
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .expires_at
+                .0
+                > at,
+            "the sub's own term must still be live or this proves nothing"
+        );
+
+        ctx(BOB, 0, at);
+        assert!(
+            c.reclaim_finalize(acc(TLA), "alice".to_string()).is_ok(),
+            "the first call serves the notice rather than rotating"
+        );
+        assert!(
+            c.sub_accounts.get(&key).unwrap().retraction_at.is_some(),
+            "the notice has to be recorded or the wait is unenforceable"
+        );
+
+        ctx(BOB, 0, at + 1);
+        assert!(
+            matches!(
+                c.reclaim_finalize(acc(TLA), "alice".to_string()),
+                Err(ContractError::RetractionPending)
+            ),
+            "a lapsed parent must not take a paid-up name before the notice runs"
+        );
+    }
+
+    #[test]
+    fn the_reclaim_completes_once_the_notice_has_run() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let at = lapse_the_tla(&mut c);
+        ctx(BOB, 0, at);
+        let _ = c.reclaim_finalize(acc(TLA), "alice".to_string()).unwrap();
+
+        let notice = c.get_fee_config().retraction_notice_ns.0;
+        ctx(BOB, 0, at + notice);
+        assert!(c.reclaim_finalize(acc(TLA), "alice".to_string()).is_ok());
+    }
+
+    #[test]
+    fn an_expired_sub_is_reclaimed_without_any_extra_wait() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0;
+        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
+        assert!(c.reclaim_finalize(acc(TLA), "alice".to_string()).is_ok());
+        let key = sub_account_key(&acc(TLA), "alice");
+        assert!(
+            c.reclaim_pending.contains_key(&key),
+            "a term that ran on its own must rotate on the first call"
+        );
+    }
+}
+
+mod cursor_pages {
+    use super::*;
+
+    #[test]
+    fn a_cursor_page_walks_a_holders_names_without_an_offset() {
+        let mut c = deploy_with_open_tla();
+        for n in ["one", "two", "three", "four", "five"] {
+            rent_alice_sub(&mut c, n);
+        }
+        let first = c
+            .nft_tokens_for_owner_page(acc(ALICE), None, Some(2))
+            .unwrap();
+        assert_eq!(first.tokens.len(), 2);
+        let cursor = first.next.clone().expect("more names remain");
+
+        let second = c
+            .nft_tokens_for_owner_page(acc(ALICE), Some(cursor), Some(2))
+            .unwrap();
+        assert_eq!(second.tokens.len(), 2);
+        let third = c
+            .nft_tokens_for_owner_page(acc(ALICE), second.next.clone(), Some(2))
+            .unwrap();
+        assert_eq!(third.tokens.len(), 1);
+        assert!(third.next.is_none(), "the last page ends the walk");
+
+        let mut seen: Vec<String> = first
+            .tokens
+            .iter()
+            .chain(second.tokens.iter())
+            .chain(third.tokens.iter())
+            .map(|t| t.token_id.clone())
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            5,
+            "every name appears exactly once across pages"
+        );
+    }
+
+    #[test]
+    fn a_cursor_page_for_a_holder_with_nothing_is_empty() {
+        let c = deploy_with_open_tla();
+        let page = c.nft_tokens_for_owner_page(acc(BOB), None, None).unwrap();
+        assert!(page.tokens.is_empty());
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn a_cursor_naming_a_name_the_holder_no_longer_has_is_refused() {
+        let mut c = deploy_with_open_tla();
+        for n in ["one", "two", "three"] {
+            rent_alice_sub(&mut c, n);
+        }
+        let first = c
+            .nft_tokens_for_owner_page(acc(ALICE), None, Some(1))
+            .unwrap();
+        let cursor = first.next.clone().expect("more names remain");
+        assert!(
+            c.nft_tokens_for_owner_page(acc(ALICE), Some(cursor.clone()), Some(1))
+                .is_ok(),
+            "the cursor resumes while the name it points at is still held"
+        );
+
+        c.sub_account_remove(&cursor);
+
+        let Err(err) = c.nft_tokens_for_owner_page(acc(ALICE), Some(cursor), Some(1)) else {
+            panic!("a cursor that no longer exists cannot silently end the walk");
+        };
+        assert!(matches!(err, ContractError::UnknownCursor));
+    }
+
+    #[test]
+    fn a_holder_who_moved_every_name_gets_a_refusal_rather_than_an_empty_last_page() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "one");
+        rent_alice_sub(&mut c, "two");
+        let first = c
+            .nft_tokens_for_owner_page(acc(ALICE), None, Some(1))
+            .unwrap();
+        let cursor = first.next.clone().expect("more names remain");
+
+        c.sub_account_remove(&sub_account_key(&acc(TLA), "one"));
+        c.sub_account_remove(&sub_account_key(&acc(TLA), "two"));
+
+        let Err(err) = c.nft_tokens_for_owner_page(acc(ALICE), Some(cursor), Some(1)) else {
+            panic!("an emptied index must not read as the end of the walk");
+        };
+        assert!(matches!(err, ContractError::UnknownCursor));
+    }
+
+    #[test]
+    fn a_zero_limit_still_hands_back_a_usable_cursor() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "one");
+        rent_alice_sub(&mut c, "two");
+        let page = c
+            .nft_tokens_for_owner_page(acc(ALICE), None, Some(0))
+            .unwrap();
+        assert_eq!(
+            page.tokens.len(),
+            1,
+            "a page of nothing with no cursor cannot say whether more remain"
+        );
+        assert!(page.next.is_some(), "the walk can still be resumed");
+    }
+}
+
+mod notice_floor_interop {
+    use super::*;
+
+    #[test]
+    fn the_pushed_notice_clears_the_wallet_floor_at_the_shortest_legal_setting() {
+        let mut c = deploy_with_open_tla();
+        let mut fees = c.get_fee_config();
+        fees.retraction_notice_ns = U64(24 * 60 * 60 * 1_000_000_000);
+        ctx(COUNCIL, 1, 1);
+        c.update_fee_config(fees).unwrap();
+
+        let notice = c.get_fee_config().retraction_notice_ns.0;
+        assert!(
+            notice > hos_common::MIN_LEASE_RETRACT_NOTICE_NS,
+            "the registry pushes now plus {notice} and the wallet re-checks it a block \
+             later against its own floor, so the two must not be equal"
+        );
+    }
+}
+
+mod launch_batches {
+    use super::*;
+    use crate::admin::MAX_TLA_BATCH;
+
+    fn register_open(c: &mut TlaRegistry, ids: Vec<AccountId>) -> Result<(), ContractError> {
+        c.register_tlas(ids, TlaType::Open, PremiumCategory::Standard, None)
+    }
+
+    fn names(count: usize) -> Vec<AccountId> {
+        (0..count).map(|i| acc(&format!("seed{i}"))).collect()
+    }
+
+    const LAUNCH_SEED: usize = 3_900;
+    const PER_CALL: usize = MAX_TLA_BATCH;
+    const CALLS_PER_PASS: usize = LAUNCH_SEED.div_ceil(PER_CALL);
+
+    fn seed_name(index: usize) -> String {
+        format!("seed{index}")
+    }
+
+    #[test]
+    fn the_whole_launch_seed_registers_and_opens_at_the_measured_batch_size() {
+        let mut c = deploy();
+        let all: Vec<String> = (0..LAUNCH_SEED).map(seed_name).collect();
+
+        let mut register_calls = 0;
+        for chunk in all.chunks(PER_CALL) {
+            ctx(COUNCIL, 1, 0);
+            register_open(&mut c, chunk.iter().map(|n| acc(n)).collect()).unwrap();
+            register_calls += 1;
+        }
+
+        let mut open_calls = 0;
+        for chunk in all.chunks(PER_CALL) {
+            ctx(ADMIN, 1, 1);
+            c.activate_open_tlas(chunk.iter().map(|n| acc(n)).collect())
+                .unwrap();
+            open_calls += 1;
+        }
+
+        assert_eq!(
+            (register_calls, open_calls),
+            (CALLS_PER_PASS, CALLS_PER_PASS)
+        );
+        for index in [0, LAUNCH_SEED / 2, LAUNCH_SEED - 1] {
+            let view = c.get_tla(acc(&seed_name(index))).unwrap();
+            assert!(
+                matches!(view.lifecycle, LifecycleStatus::Active),
+                "{} did not come out open",
+                seed_name(index)
+            );
+        }
+        assert!(c.is_name_available(acc(&seed_name(LAUNCH_SEED - 1)), "alice".to_string()));
+    }
+
+    #[test]
+    fn a_payload_that_would_overrun_the_log_budget_is_refused() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        let too_many: Vec<AccountId> = (0..1_900).map(|i| acc(&seed_name(i))).collect();
+        assert!(matches!(
+            register_open(&mut c, too_many),
+            Err(ContractError::BatchTooLarge)
+        ));
+        assert!(c.get_tla(acc(&seed_name(0))).is_none());
+    }
+
+    #[test]
+    fn the_council_registers_a_whole_batch_in_one_call() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        register_open(&mut c, names(PER_CALL)).unwrap();
+        assert!(c.get_tla(acc("seed0")).is_some());
+        assert!(c.get_tla(acc(&format!("seed{}", PER_CALL - 1))).is_some());
+    }
+
+    #[test]
+    fn an_operations_admin_cannot_register_a_batch() {
+        ctx(ADMIN, 1, 0);
+        let mut c = TlaRegistry::new(
+            acc(ADMIN),
+            acc(HOSEXT),
+            U64(GRACE_NS),
+            acc(TREASURY),
+            acc(OTHER_COUNCIL),
+            None,
+        );
+        ctx(ADMIN, 1, 0);
+        assert!(matches!(
+            register_open(&mut c, names(2)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn one_bad_name_rolls_the_whole_batch_back() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        register_open(&mut c, vec![acc("taken")]).unwrap();
+
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            register_open(&mut c, vec![acc("fresh"), acc("taken")]),
+            Err(ContractError::TlaAlreadyRegistered)
+        ));
+        assert!(
+            c.get_tla(acc("fresh")).is_none(),
+            "a batch that fails part way must leave nothing behind, or a re-run of the \
+             same proposal payload trips on the names the failed run already wrote"
+        );
+    }
+
+    #[test]
+    fn a_batch_past_the_cap_is_refused_before_it_runs_out_of_gas() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            register_open(&mut c, names(MAX_TLA_BATCH + 1)),
+            Err(ContractError::BatchTooLarge)
+        ));
+        assert!(c.get_tla(acc("seed0")).is_none());
+    }
+
+    #[test]
+    fn the_same_name_twice_in_one_payload_is_caught() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(
+            matches!(
+                register_open(&mut c, vec![acc("twice"), acc("other"), acc("twice")]),
+                Err(ContractError::DuplicateInBatch)
+            ),
+            "a generated seed list of thousands is exactly where a repeat hides"
+        );
+        assert!(c.get_tla(acc("other")).is_none());
+    }
+
+    #[test]
+    fn an_empty_batch_is_refused_rather_than_passing_silently() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            register_open(&mut c, vec![]),
+            Err(ContractError::EmptyBatch)
+        ));
+    }
+
+    #[test]
+    fn a_batch_registration_still_needs_one_yocto() {
+        let mut c = deploy();
+        ctx(COUNCIL, 0, 0);
+        assert!(register_open(&mut c, names(1)).is_err());
+    }
+
+    #[test]
+    fn admin_opens_a_batch_and_the_names_become_rentable() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        register_open(&mut c, names(3)).unwrap();
+
+        ctx(ADMIN, 1, 1);
+        c.activate_open_tlas(vec![acc("seed0"), acc("seed1"), acc("seed2")])
+            .unwrap();
+        for i in 0..3 {
+            let view = c.get_tla(acc(&format!("seed{i}"))).unwrap();
+            assert!(matches!(view.lifecycle, LifecycleStatus::Active));
+        }
+        assert!(c.is_name_available(acc("seed0"), "alice".to_string()));
+    }
+
+    #[test]
+    fn opening_a_batch_rolls_back_when_one_was_never_registered() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        register_open(&mut c, names(1)).unwrap();
+
+        ctx(ADMIN, 1, 1);
+        assert!(matches!(
+            c.activate_open_tlas(vec![acc("seed0"), acc("missing")]),
+            Err(ContractError::TlaNotFound)
+        ));
+        let view = c.get_tla(acc("seed0")).unwrap();
+        assert!(!matches!(view.lifecycle, LifecycleStatus::Active));
+    }
+
+    #[test]
+    fn the_single_call_paths_still_work_alongside_the_batches() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.register_tla(acc("solo"), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        ctx(ADMIN, 1, 1);
+        c.activate_open_tla(acc("solo")).unwrap();
+        let view = c.get_tla(acc("solo")).unwrap();
+        assert!(matches!(view.lifecycle, LifecycleStatus::Active));
     }
 }

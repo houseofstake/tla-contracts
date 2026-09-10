@@ -2,10 +2,10 @@ mod common;
 
 use anyhow::{bail, Result};
 use common::*;
-use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::Signer as DalekSigner;
-use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::SigningKey;
 use defuse_wallet::actions::FunctionCall;
 use defuse_wallet::{NearPromise, Request};
+use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::Signer as DalekSigner;
+use defuse_wallet_ed25519::crypto::ed25519::ed25519_dalek::SigningKey;
 use near_sdk::json_types::{Base64VecU8, U64};
 use near_workspaces::types::NearToken;
 use near_workspaces::Contract;
@@ -169,7 +169,7 @@ async fn arm_and_install_name_policy(
                 .unwrap(),
             )
             .gas(near_sdk::Gas::from_tgas(20))
-            .attach_deposit(near_sdk::NearToken::from_yoctonear(0)),
+            .attach_deposit(near_sdk::NearToken::from_yoctonear(1)),
     );
     let armed = fleet
         .bob
@@ -407,6 +407,7 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
             "attestation_key": pubkey_str(&attestation),
             "timelock_secs": TIMELOCK_SECS,
         }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

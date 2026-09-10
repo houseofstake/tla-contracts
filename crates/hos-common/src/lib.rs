@@ -6,12 +6,22 @@ pub const FT_STORAGE_DEPOSIT_YOCTO: u128 = 1_250_000_000_000_000_000_000;
 
 pub const MAX_AUTHORITY_HOLD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
+pub const MIN_LEASE_RETRACT_NOTICE_NS: u64 = 12 * 60 * 60 * 1_000_000_000;
+
+pub const MINT_CALL_TGAS: u64 = 90;
+
 const STATE_KEY: &[u8] = b"STATE";
 
 const GAS_FOR_DEPLOY_AND_MIGRATE: Gas = Gas::from_tgas(60);
 
 pub fn try_state_read<T: BorshDeserialize>() -> Option<T> {
     env::storage_read(STATE_KEY).and_then(|raw| T::try_from_slice(&raw).ok())
+}
+
+pub fn state_version() -> Option<u16> {
+    let raw = env::storage_read(STATE_KEY)?;
+    let bytes: [u8; 2] = raw.get(..2)?.try_into().ok()?;
+    Some(u16::from_le_bytes(bytes))
 }
 
 pub fn deploy_and_migrate(code: Vec<u8>) -> Promise {

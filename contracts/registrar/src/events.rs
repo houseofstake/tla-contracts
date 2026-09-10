@@ -10,13 +10,25 @@ pub enum Event {
     #[event_version("1.0.0")]
     MintFailed { account: AccountId },
     #[event_version("1.0.0")]
-    MinLabelLenSet { min_label_len: u8 },
-    #[event_version("1.0.0")]
     MinBalanceSet { min_balance: NearToken },
     #[event_version("1.0.0")]
     UpgradeApproved { hash: String, by: AccountId },
     #[event_version("1.0.0")]
+    CouncilRotationApproved {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    CouncilRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    CouncilRotated {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     SelfUpgraded {},
     #[event_version("1.0.0")]
     Sealed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
+    SealFailed { public_key: String, by: AccountId },
 }

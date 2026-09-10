@@ -1,5 +1,7 @@
 use crate::admin::MAX_ALLOWLIST_SIZE;
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
+use crate::asset_gate::{
+    ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS, GATE_CALLER_FRAME_TGAS,
+};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -20,10 +22,11 @@ const GAS_FOR_NFT_ON_TRANSFER: Gas = Gas::from_tgas(25);
 /// Must fund the return rotation it may schedule: a force_transfer plus its
 /// callback, not just its own execution.
 const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas::from_tgas(80);
-const DEPOSIT_GATE_CB_TGAS: u64 = 180;
+const DEPOSIT_GATE_CB_TGAS: u64 = 195;
 const GAS_FOR_DEPOSIT_GATE_CB: Gas = Gas::from_tgas(DEPOSIT_GATE_CB_TGAS);
 const _: () = assert!(
-    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + DEPOSIT_GATE_CB_TGAS + 20 <= 300,
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + DEPOSIT_GATE_CB_TGAS + GATE_CALLER_FRAME_TGAS
+        <= 300,
     "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every deposit"
 );
 
@@ -34,6 +37,13 @@ pub struct Token {
     pub owner_id: AccountId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TokenMetadata>,
+}
+
+#[near(serializers = [json])]
+pub struct TokenPage {
+    pub tokens: Vec<Token>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 #[near(serializers = [json])]
@@ -389,19 +399,11 @@ impl TlaRegistry {
     }
 
     pub fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
-        U128(
-            self.sub_accounts_by_owner
-                .get(&account_id)
-                .map_or(0, |keys| {
-                    keys.iter()
-                        .filter(|key| self.sub_accounts.contains_key(*key))
-                        .count() as u128
-                }),
-        )
+        U128(u128::from(self.owner_supply(&account_id)))
     }
 
     pub fn nft_tokens(&self, from_index: Option<U128>, limit: Option<u64>) -> Vec<Token> {
-        let start = from_index.map_or(0, |i| i.0 as usize);
+        let start = from_index.map_or(0, |i| page_offset(i.0));
         self.sub_accounts
             .iter()
             .skip(start)
@@ -419,12 +421,56 @@ impl TlaRegistry {
         let Some(keys) = self.sub_accounts_by_owner.get(&account_id) else {
             return Vec::new();
         };
-        let start = from_index.map_or(0, |i| i.0 as usize);
+        let start = from_index.map_or(0, |i| page_offset(i.0));
         keys.iter()
             .skip(start)
             .take(limit.unwrap_or(MAX_PAGE_LIMIT).min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|key| Some(token_of(key, self.sub_accounts.get(key)?)))
             .collect()
+    }
+
+    #[handle_result]
+    pub fn nft_tokens_for_owner_page(
+        &self,
+        account_id: AccountId,
+        after: Option<String>,
+        limit: Option<u64>,
+    ) -> Result<TokenPage, ContractError> {
+        let Some(keys) = self.sub_accounts_by_owner.get(&account_id) else {
+            if after.is_some() {
+                return Err(ContractError::UnknownCursor);
+            }
+            return Ok(TokenPage {
+                tokens: Vec::new(),
+                next: None,
+            });
+        };
+        let take = limit.unwrap_or(MAX_PAGE_LIMIT).clamp(1, MAX_PAGE_LIMIT) as usize;
+        let mut resumed = after.is_none();
+        let mut tokens = Vec::new();
+        let mut visited: Option<String> = None;
+        let mut more = false;
+        for key in keys.iter() {
+            if !resumed {
+                resumed = after.as_deref() == Some(key.as_str());
+                continue;
+            }
+            if tokens.len() == take {
+                more = true;
+                break;
+            }
+            if let Some(sub) = self.sub_accounts.get(key) {
+                tokens.push(token_of(key, sub));
+            }
+            visited = Some(key.clone());
+        }
+        if !resumed {
+            return Err(ContractError::UnknownCursor);
+        }
+        Ok(TokenPage {
+            tokens,
+            next: if more { visited.or(after) } else { None },
+        })
     }
 }
 

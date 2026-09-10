@@ -1,12 +1,11 @@
 pub const ONLY_REGISTRY: &str = "only registry";
 pub const ONLY_COUNCIL: &str = "only council";
+pub const ONLY_PENDING_COUNCIL: &str = "only the incoming council";
 pub const REQUIRES_ONE_YOCTO: &str = "requires an attached deposit of exactly 1 yoctoNEAR";
 pub const INVALID_NAME: &str = "invalid sub-account name";
-pub const NAME_TOO_SHORT: &str = "name shorter than the minimum label length";
 pub const INSUFFICIENT_DEPOSIT: &str = "deposit below minimum balance";
 pub const LEASE_IN_PAST: &str = "lease_until_ns must be in the future";
 pub const BAD_CHAIN_ID: &str = "chain id must be mainnet or testnet";
-pub const BAD_MIN_LABEL_LEN: &str = "min label length out of bounds";
 pub const BAD_MIN_BALANCE: &str = "min balance below the account storage floor";
 pub const EMPTY_CODE: &str = "code must not be empty";
 pub const NO_APPROVED_HASH: &str = "no upgrade has been approved";
@@ -16,6 +15,10 @@ pub const NO_STATE: &str = "no state to migrate";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be the minted account";
 pub const OWNER_ACCOUNT_IS_SELF: &str = "owner account must not be the minted account";
 pub const COUNCIL_IS_SELF: &str = "council must not be this account, which ends with no keys";
+pub const COUNCIL_UNCHANGED: &str = "the pending council must differ from the current one";
+pub const NO_COUNCIL_ROTATION_PENDING: &str = "no council rotation has been approved";
+pub const COUNCIL_ROTATION_TOO_YOUNG: &str =
+    "an approved council rotation must wait out the delay before it commits";
 pub const REGISTRY_IS_SELF: &str = "registry must not be this account, which ends with no keys";
 pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
 pub const UPGRADE_NOT_PROVEN: &str = "the upgrade path has not been exercised on this account yet";

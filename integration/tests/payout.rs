@@ -52,6 +52,7 @@ async fn expired_lease_sweeps_near_to_the_users_own_account() -> Result<()> {
         .extension
         .call(&tenant, "hos_sweep_near")
         .args_json(json!({}))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?;
@@ -86,6 +87,7 @@ async fn sweep_is_refused_while_the_lease_is_live() -> Result<()> {
         .extension
         .call(&tenant, "hos_sweep_near")
         .args_json(json!({}))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?;
@@ -113,6 +115,7 @@ async fn nobody_can_repoint_the_payout_account_independently() -> Result<()> {
         .extension
         .call(&tenant, "hos_set_payout_account")
         .args_json(json!({ "new_payout_account": fleet.relay.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(30))
         .transact()
         .await?;

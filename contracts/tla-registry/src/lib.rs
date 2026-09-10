@@ -8,6 +8,7 @@ mod events;
 mod fees;
 mod indexes;
 mod interfaces;
+mod legacy;
 mod lifecycle;
 mod marketplace;
 mod nft;
@@ -31,8 +32,46 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const STATE_VERSION: u16 = 1;
-const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const STATE_VERSION: u16 = 2;
+
+const ALLOWANCE_WARN_REMAINING: u64 = 5;
+const AUTHORITY_TLA_PREFIX: &[u8] = b"pa_tla:";
+const AUTHORITY_USED_PREFIX: &[u8] = b"pa_use:";
+
+fn authority_scoped_key(prefix: &[u8], authority: &AccountId, tla_id: &AccountId) -> Vec<u8> {
+    let mut key = prefix.to_vec();
+    key.extend_from_slice(authority.as_str().as_bytes());
+    key.push(b'|');
+    key.extend_from_slice(tla_id.as_str().as_bytes());
+    key
+}
+
+pub(crate) fn authority_tla_key(authority: &AccountId, tla_id: &AccountId) -> Vec<u8> {
+    authority_scoped_key(AUTHORITY_TLA_PREFIX, authority, tla_id)
+}
+
+pub(crate) fn authority_used_key(authority: &AccountId, tla_id: &AccountId) -> Vec<u8> {
+    authority_scoped_key(AUTHORITY_USED_PREFIX, authority, tla_id)
+}
+
+fn read_u64(key: &[u8]) -> Option<u64> {
+    env::storage_read(key)
+        .and_then(|raw| <[u8; 8]>::try_from(raw.as_slice()).ok())
+        .map(u64::from_le_bytes)
+}
+
+pub(crate) fn authority_allowance(authority: &AccountId, tla_id: &AccountId) -> Option<u64> {
+    read_u64(&authority_tla_key(authority, tla_id))
+}
+
+pub(crate) fn authority_used(authority: &AccountId, tla_id: &AccountId) -> u64 {
+    read_u64(&authority_used_key(authority, tla_id)).unwrap_or(0)
+}
+const MIN_GRACE_PERIOD_NS: u64 = 60 * 1_000_000_000;
+pub(crate) const MIN_LEASE_TERM_NS: u64 = 60 * 1_000_000_000;
+pub(crate) const MAX_LEASE_TERM_NS: u64 = 10 * ONE_YEAR_NS;
+pub(crate) const PRODUCTION_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+pub(crate) const PRODUCTION_LEASE_TERM_NS: u64 = ONE_YEAR_NS;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
@@ -71,6 +110,7 @@ pub(crate) enum StorageKey {
     SuspendedUntil,
     RetiredTokenMetadataStore,
     Venues,
+    PaidOrderIds,
 }
 
 #[near(contract_state)]
@@ -100,6 +140,7 @@ pub struct TlaRegistry {
     pub(crate) recovery_authorities: IterableSet<AccountId>,
     pub(crate) hos_extension: AccountId,
     pub(crate) grace_period_ns: u64,
+    pub(crate) lease_term_ns: u64,
     pub(crate) price_oracle: AccountId,
     pub(crate) near_usd_rate_micro: u128,
     pub(crate) rate_updated_at: u64,
@@ -117,6 +158,9 @@ pub struct TlaRegistry {
     pub(crate) upgrade_delay_ns: u64,
     pub(crate) venues: IterableSet<AccountId>,
     pub(crate) upgrade_proven: bool,
+    pub(crate) paid_order_ids: LookupMap<String, PaidOrderState>,
+    pub(crate) pending_council: Option<AccountId>,
+    pub(crate) pending_council_at: Option<u64>,
 }
 
 #[near]
@@ -128,11 +172,15 @@ impl TlaRegistry {
         grace_period_ns: U64,
         treasury: AccountId,
         council: AccountId,
+        lease_term_ns: Option<U64>,
     ) -> Self {
         require!(
             grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
             "grace period too short"
         );
+        let lease_term_ns = lease_term_ns.map_or(PRODUCTION_LEASE_TERM_NS, |value| value.0);
+        require!(lease_term_ns >= MIN_LEASE_TERM_NS, "lease term too short");
+        require!(lease_term_ns <= MAX_LEASE_TERM_NS, "lease term too long");
         let this = env::current_account_id();
         require!(
             hos_extension != this,
@@ -170,6 +218,7 @@ impl TlaRegistry {
             recovery_authorities: IterableSet::new(StorageKey::RecoveryAuthorities),
             hos_extension,
             grace_period_ns: grace_period_ns.0,
+            lease_term_ns,
             price_oracle: admin,
             near_usd_rate_micro: 0,
             rate_updated_at: 0,
@@ -187,19 +236,24 @@ impl TlaRegistry {
             upgrade_delay_ns: admin::UPGRADE_DELAY_NS,
             venues: IterableSet::new(StorageKey::Venues),
             upgrade_proven: false,
+            paid_order_ids: LookupMap::new(StorageKey::PaidOrderIds),
+            pending_council: None,
+            pending_council_at: None,
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let Some(mut current) = hos_common::try_state_read::<Self>() else {
-            env::panic_str(error::NO_STATE)
+        let mut current = match hos_common::state_version() {
+            Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(1) => hos_common::try_state_read::<legacy::TlaRegistryV1>()
+                .map(Self::from)
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(_) => env::panic_str(error::STATE_VERSION_UNKNOWN),
+            None => env::panic_str(error::NO_STATE),
         };
-        near_sdk::require!(
-            current.state_version == STATE_VERSION,
-            error::STATE_VERSION_UNKNOWN
-        );
         current.upgrade_proven = true;
         Event::Upgraded {
             by: env::predecessor_account_id(),
@@ -209,7 +263,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn admin_set_initial_rate(&mut self, rate: U128) -> Result<(), ContractError> {
+        assert_one_yocto()?;
         self.assert_council()?;
         if self.near_usd_rate_micro != 0 {
             return Err(ContractError::RateAlreadyInitialized);
@@ -264,7 +320,9 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
     pub fn set_price_oracle(&mut self, account: AccountId) -> Result<(), ContractError> {
+        assert_one_yocto()?;
         self.assert_council()?;
         self.price_oracle = account.clone();
         Event::PriceOracleUpdated {
@@ -481,6 +539,37 @@ impl TlaRegistry {
             return Err(ContractError::OnlyPaymentAuthority);
         }
         Ok(caller)
+    }
+
+    pub(crate) fn assert_payment_authority_for(
+        &self,
+        tla_id: &AccountId,
+    ) -> Result<AccountId, ContractError> {
+        let caller = self.assert_payment_authority()?;
+        let Some(allowance) = authority_allowance(&caller, tla_id) else {
+            return Err(ContractError::AuthorityNotBoundToTla);
+        };
+        if allowance != 0 && authority_used(&caller, tla_id) >= allowance {
+            return Err(ContractError::AuthorityMintAllowanceSpent);
+        }
+        Ok(caller)
+    }
+
+    pub(crate) fn record_authority_mint(&self, authority: &AccountId, tla_id: &AccountId) {
+        let used = authority_used(authority, tla_id).saturating_add(1);
+        env::storage_write(&authority_used_key(authority, tla_id), &used.to_le_bytes());
+        let Some(allowance) = authority_allowance(authority, tla_id) else {
+            return;
+        };
+        let remaining = allowance.saturating_sub(used);
+        if allowance != 0 && remaining <= ALLOWANCE_WARN_REMAINING {
+            Event::PaymentAuthorityAllowanceLow {
+                account: authority.clone(),
+                tla_id: tla_id.clone(),
+                remaining: U64(remaining),
+            }
+            .emit();
+        }
     }
 
     pub(crate) fn assert_recovery_authority(&self) -> Result<AccountId, ContractError> {

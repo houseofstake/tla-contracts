@@ -1,5 +1,7 @@
 use crate::admin::MAX_ALLOWLIST_SIZE;
-use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS};
+use crate::asset_gate::{
+    ft_balance_fanout, ft_balances_clear, BalanceGate, FT_BALANCE_TGAS, GATE_CALLER_FRAME_TGAS,
+};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::ext_hos_extension;
@@ -9,12 +11,13 @@ use crate::{TlaRegistry, TlaRegistryExt};
 use hos_common::RotationCause;
 use near_sdk::{env, near, AccountId, Gas, Promise};
 
-pub(crate) const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
+pub(crate) const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(60);
 pub(crate) const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(20);
 const TRANSFER_GATE_CB_TGAS: u64 = 180;
 const GAS_FOR_TRANSFER_GATE_CB: Gas = Gas::from_tgas(TRANSFER_GATE_CB_TGAS);
 const _: () = assert!(
-    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + TRANSFER_GATE_CB_TGAS + 20 <= 300,
+    MAX_ALLOWLIST_SIZE as u64 * FT_BALANCE_TGAS + TRANSFER_GATE_CB_TGAS + GATE_CALLER_FRAME_TGAS
+        <= 300,
     "the gate queries every allowlisted token before it dispatches, so widening the allowlist past what one call can fund breaks every transfer"
 );
 
@@ -221,7 +224,11 @@ impl TlaRegistry {
         #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
-        if !matches!(swapped, Ok(true)) {
+        let still_theirs = self
+            .sub_accounts
+            .get(&key)
+            .is_some_and(|sub| sub.owner == from);
+        if !matches!(swapped, Ok(true)) || !still_theirs {
             Event::TransferFailed {
                 full_name: key,
                 from,
@@ -295,6 +302,12 @@ impl TlaRegistry {
             {
                 return Err(ContractError::TransferToRegisteredName);
             }
+        } else if self.sub_accounts.contains_key(new_owner.as_str()) {
+            Event::VenueExitToRegisteredName {
+                full_name: key.clone(),
+                to: new_owner.clone(),
+            }
+            .emit();
         }
         Ok((sub_account, owner))
     }

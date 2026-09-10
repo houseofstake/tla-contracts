@@ -55,6 +55,37 @@ fn deploy(watcher_keys: &[PublicKey], threshold: u32) -> MpcRecovery {
     )
 }
 
+fn seal_callback(result: near_sdk::PromiseResult) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(AccountId::from_str(CONTRACT).unwrap())
+            .predecessor_account_id(AccountId::from_str(CONTRACT).unwrap())
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result],
+    );
+}
+
+#[test]
+fn a_seal_that_did_not_remove_the_key_is_not_reported_as_sealed() {
+    let (_, wk1) = keypair();
+    let (_, wk2) = keypair();
+    let mut c = deploy(&[wk1, wk2], 2);
+    seal_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.after_seal(
+        "ed25519:key".to_string(),
+        AccountId::from_str(OWNER).unwrap()
+    ));
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("seal_failed")));
+    assert!(
+        !logs.iter().any(|l| l.contains(r#""event":"sealed""#)),
+        "the launch gate reads this log, so a key that survived must never read as sealed"
+    );
+}
+
 fn spare() -> &'static (SigningKey, PublicKey) {
     static SPARE: std::sync::OnceLock<(SigningKey, PublicKey)> = std::sync::OnceLock::new();
     SPARE.get_or_init(keypair)
@@ -69,7 +100,7 @@ fn account_id() -> AccountId {
 }
 
 fn install(c: &mut MpcRecovery, attestation_key: PublicKey) {
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(attestation_key.clone(), 60);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), attestation_key, 60);
@@ -155,13 +186,23 @@ fn leased_id() -> AccountId {
 }
 
 fn install_name_policy(c: &mut MpcRecovery, attestation_key: PublicKey) {
-    ctx(leased_id().as_str(), 0, 0);
+    ctx_yocto(leased_id().as_str(), 0, 0);
     c.arm_policy_install(attestation_key.clone(), 60);
     ctx(OWNER, 0, 0);
     c.install_policy(leased_id(), mpc_public_key(), attestation_key, 60);
 }
 
 fn request_name(c: &mut MpcRecovery, sk: &SigningKey, new_owner: &AccountId, round: u64) {
+    request_name_at(c, sk, new_owner, round, 0);
+}
+
+fn request_name_at(
+    c: &mut MpcRecovery,
+    sk: &SigningKey,
+    new_owner: &AccountId,
+    round: u64,
+    ts: u64,
+) {
     let msg = proof::name_request_message(
         &AccountId::from_str(CONTRACT).unwrap(),
         &AccountId::from_str(TLA).unwrap(),
@@ -169,7 +210,7 @@ fn request_name(c: &mut MpcRecovery, sk: &SigningKey, new_owner: &AccountId, rou
         new_owner,
         round,
     );
-    ctx(OWNER, 0, 0);
+    ctx(OWNER, ts, 0);
     c.request_name_recovery(
         AccountId::from_str(TLA).unwrap(),
         "alice".to_string(),
@@ -271,12 +312,12 @@ fn a_quorum_signed_for_an_earlier_round_cannot_settle_a_later_one() {
     let new_owner = AccountId::from_str("bob.testnet").unwrap();
     let (mut c, attestor) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
     let expected = AccountId::from_str(VICTIM).unwrap();
-    let deadline = NAME_TIMELOCK_NS * 4;
+    let deadline = ABORT_COOLDOWN_NS + NAME_TIMELOCK_NS * 4;
     let stale = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
     ctx(OWNER, 0, 0);
     let _ = c.abort_recovery(leased_id());
-    request_name(&mut c, &attestor, &new_owner, 1);
-    name_ctx(NAME_TIMELOCK_NS + 1);
+    request_name_at(&mut c, &attestor, &new_owner, 1, ABORT_COOLDOWN_NS);
+    name_ctx(ABORT_COOLDOWN_NS + NAME_TIMELOCK_NS + 1);
     let _ = c.recover_name(
         AccountId::from_str(TLA).unwrap(),
         "alice".to_string(),
@@ -763,7 +804,7 @@ fn finalize_rejects_an_unauthorized_caller() {
 }
 
 #[test]
-fn abort_from_requested_returns_to_idle() {
+fn abort_from_requested_enters_cooldown() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
@@ -781,12 +822,12 @@ fn abort_from_requested_returns_to_idle() {
     assert!(matches!(out, PromiseOrValue::Value(())));
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
-        Phase::Idle
+        Phase::Cooldown { .. }
     ));
 }
 
 #[test]
-fn abort_from_approved_returns_to_idle() {
+fn abort_from_approved_enters_cooldown() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(&[wk1.clone(), spare_watcher()], 2);
@@ -797,8 +838,41 @@ fn abort_from_approved_returns_to_idle() {
     assert!(matches!(out, PromiseOrValue::Value(())));
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
-        Phase::Idle
+        Phase::Cooldown { .. }
     ));
+}
+
+#[test]
+fn reinstalling_a_policy_does_not_clear_an_active_cooldown() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(OWNER, 0, 2);
+    let _ = c.abort_recovery(account_id());
+    let until = match c.accounts.get(&account_id()).unwrap().phase {
+        Phase::Cooldown { until } => until,
+        _ => panic!("the abort must have entered a cooldown for this test to mean anything"),
+    };
+
+    ctx(OWNER, 0, 3);
+    c.install_policy(account_id(), mpc_public_key(), mother_pk, 60);
+
+    assert!(
+        matches!(
+            c.accounts.get(&account_id()).unwrap().phase,
+            Phase::Cooldown { until: still } if still == until
+        ),
+        "an owner reinstall must carry the cooldown forward, or the party that can abort can also erase the wait it imposed"
+    );
 }
 
 #[test]
@@ -1286,7 +1360,7 @@ fn the_installer_cannot_swap_the_attestation_key_the_account_armed() {
     let (_, armed_pk) = keypair();
     let (_, other_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(armed_pk, 60);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), other_pk, 60);
@@ -1298,7 +1372,7 @@ fn the_installer_cannot_shorten_the_timelock_the_account_armed() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(mother_pk.clone(), 259_200);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 60);
@@ -1325,10 +1399,10 @@ fn an_account_can_withdraw_its_arming_before_the_install() {
     let (_, wk1) = keypair();
     let (_, mother_pk) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(mother_pk, 60);
     assert!(c.armed_policy_install(account_id()).is_some());
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.disarm_policy_install();
     assert!(c.armed_policy_install(account_id()).is_none());
 }
@@ -1340,7 +1414,7 @@ fn a_delegated_installer_can_install_a_policy() {
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(mother_pk.clone(), 259_200);
     ctx(INSTALLER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
@@ -1354,7 +1428,7 @@ fn the_owner_can_still_install_after_delegating() {
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_yocto(OWNER, 0, 0);
     c.set_installer(AccountId::from_str(INSTALLER).unwrap());
-    ctx(VICTIM, 0, 0);
+    ctx_yocto(VICTIM, 0, 0);
     c.arm_policy_install(mother_pk.clone(), 259_200);
     ctx(OWNER, 0, 0);
     c.install_policy(account_id(), mpc_public_key(), mother_pk, 259_200);
@@ -1401,7 +1475,7 @@ fn a_delegated_installer_can_abort_a_recovery() {
     let _ = c.abort_recovery(account_id());
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
-        Phase::Idle
+        Phase::Cooldown { .. }
     ));
 }
 
@@ -1557,7 +1631,7 @@ fn a_non_owner_cannot_rotate_the_watcher_set() {
 }
 
 #[test]
-#[should_panic(expected = "no contract state to migrate")]
+#[should_panic(expected = "state version is not the one this code understands")]
 fn migrate_refuses_a_shape_it_does_not_recognise() {
     ctx_paying(OWNER, 0, 0);
     env::state_write(&(AccountId::from_str(OWNER).unwrap(), 7u64));
@@ -1610,6 +1684,22 @@ fn the_owner_can_seal_the_recovery_contract_once_the_upgrade_path_is_proven() {
     c.upgrade_proven = true;
     seal_ctx(OWNER, 1);
     let _ = c.seal(mpc_public_key());
+    let deleted: Vec<String> = near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| receipt.actions)
+        .filter_map(|action| match action {
+            near_sdk::mock::MockAction::DeleteKey { public_key, .. } => {
+                Some(public_key.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![String::from(&mpc_public_key())],
+        "the launch gate turns on this account ending with no key, so the seal has to schedule \
+         the removal rather than only report one"
+    );
 }
 
 #[test]
@@ -1631,7 +1721,7 @@ fn an_owner_that_cannot_call_cannot_remove_the_key() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
 fn sealing_the_recovery_contract_needs_a_full_access_signature() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
@@ -1746,4 +1836,224 @@ mod state_version {
             "a reader must be able to learn the version without parsing the rest"
         );
     }
+}
+
+#[test]
+#[should_panic(expected = "recently aborted")]
+fn an_aborted_request_cannot_be_reentered_immediately() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(VICTIM, 2, 2);
+    let _ = c.abort_recovery(account_id());
+
+    ctx("anyone.testnet", 3, 3);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(1),
+        attest(&mother, &new_owner, 1),
+    );
+}
+
+#[test]
+fn the_request_reopens_once_the_cooldown_expires() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(VICTIM, 2, 2);
+    let _ = c.abort_recovery(account_id());
+
+    ctx("anyone.testnet", 2 + HOLDER_ABORT_COOLDOWN_NS, 3);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(1),
+        attest(&mother, &new_owner, 1),
+    );
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Requested { .. }
+    ));
+}
+
+#[test]
+fn the_owner_can_still_reinstall_during_the_cooldown() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let (_, fresh_key) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(VICTIM, 2, 2);
+    let _ = c.abort_recovery(account_id());
+
+    ctx_yocto(VICTIM, 3, 3);
+    c.arm_policy_install(fresh_key.clone(), 60);
+    ctx(OWNER, 3, 3);
+    c.install_policy(account_id(), mpc_public_key(), fresh_key.clone(), 60);
+    assert_eq!(
+        c.accounts
+            .get(&account_id())
+            .unwrap()
+            .policy
+            .attestation_key,
+        fresh_key,
+        "rotating a compromised attestation key must not wait out the cooldown"
+    );
+}
+
+#[test]
+#[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+fn a_restricted_key_cannot_arm_a_policy_install() {
+    let (_, wk1) = keypair();
+    let (_, forged) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx(VICTIM, 0, 0);
+    c.arm_policy_install(forged, 60);
+}
+
+#[test]
+#[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+fn a_restricted_key_cannot_disarm_a_policy_install() {
+    let (_, wk1) = keypair();
+    let (_, armed_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_yocto(VICTIM, 0, 0);
+    c.arm_policy_install(armed_pk, 60);
+    ctx(VICTIM, 0, 0);
+    c.disarm_policy_install();
+}
+
+#[test]
+fn a_stuck_name_resolve_has_an_installer_exit() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+    ctx(OWNER, 0, 0);
+    c.claim_name_finalized(leased_id(), U64(0), true);
+    assert_eq!(
+        c.pending_target(leased_id()),
+        None,
+        "settling a stuck resolve must return the account to Idle"
+    );
+}
+
+#[test]
+#[should_panic(expected = "no abortable recovery in progress")]
+fn the_name_exit_cannot_be_replayed_once_it_has_settled() {
+    let (w1, wk1) = keypair();
+    let (w2, wk2) = keypair();
+    let new_owner = AccountId::from_str("bob.testnet").unwrap();
+    let (mut c, _) = armed_name_recovery(&[wk1.clone(), wk2.clone()], 2, &new_owner);
+    let expected = AccountId::from_str(VICTIM).unwrap();
+    let deadline = NAME_TIMELOCK_NS * 4;
+    let sigs = name_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, &expected, deadline);
+    name_ctx(NAME_TIMELOCK_NS + 1);
+    let _ = c.recover_name(
+        AccountId::from_str(TLA).unwrap(),
+        "alice".to_string(),
+        new_owner,
+        expected,
+        U64(deadline),
+        sigs,
+    );
+    ctx(OWNER, 0, 0);
+    c.claim_name_finalized(leased_id(), U64(0), true);
+    ctx(OWNER, 0, 0);
+    c.claim_name_finalized(leased_id(), U64(0), true);
+}
+
+#[test]
+fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1, spare_watcher()], 2);
+    assert_eq!(
+        (
+            crate::STATE_VERSION,
+            near_sdk::borsh::to_vec(&c).unwrap().len()
+        ),
+        (1, 184),
+        "the state shape moved. Bump STATE_VERSION, add a reader for the shape that \
+         is deployed today, and update this fixture. A publish that skips that leaves \
+         migrate unable to read what is on the account."
+    );
+}
+
+#[test]
+fn a_holder_saying_no_buys_more_quiet_than_the_installer_changing_its_mind() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    install(&mut c, mother_pk.clone());
+    let (_, new_owner) = keypair();
+
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(OWNER, 2, 2);
+    let _ = c.abort_recovery(account_id());
+    ctx("anyone.testnet", 2 + ABORT_COOLDOWN_NS, 3);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(1),
+        attest(&mother, &new_owner, 1),
+    );
+
+    let refused_at = 3 + ABORT_COOLDOWN_NS;
+    ctx(VICTIM, refused_at, 4);
+    let _ = c.abort_recovery(account_id());
+    let phase = &c.accounts.get(&account_id()).unwrap().phase;
+    assert!(
+        !phase.accepts_request(refused_at + ABORT_COOLDOWN_NS),
+        "the attestation key alone must not let a request be reopened on the \
+         holder minutes after they refused it"
+    );
+    assert!(phase.accepts_request(refused_at + HOLDER_ABORT_COOLDOWN_NS));
 }

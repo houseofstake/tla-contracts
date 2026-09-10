@@ -5,6 +5,7 @@ use near_sdk::{env, AccountId, Gas, Promise, PromiseError};
 const FT_BALANCE_MAX_LEN: usize = 256;
 pub(crate) const FT_BALANCE_TGAS: u64 = 5;
 const GAS_PER_FT_BALANCE: Gas = Gas::from_tgas(FT_BALANCE_TGAS);
+pub(crate) const GATE_CALLER_FRAME_TGAS: u64 = 20;
 
 pub enum BalanceGate {
     Clear,

@@ -1,5 +1,6 @@
 use crate::error::ContractError;
 use crate::fees;
+use crate::lifecycle::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::{U128, U64};
@@ -25,15 +26,7 @@ impl TlaRegistry {
         let key = sub_account_key(&tla_id, &name);
         let sub = self.sub_accounts.get(&key)?;
         let tla = self.tlas.get(&tla_id)?;
-        Some(to_sub_view(
-            &key,
-            sub,
-            tla,
-            &tla_id,
-            &name,
-            &self.fee_config,
-            &self.clock(),
-        ))
+        Some(self.to_sub_view(&key, sub, tla, &name))
     }
 
     pub fn get_parked_sub_account(
@@ -51,7 +44,7 @@ impl TlaRegistry {
 
     pub fn is_name_re_rentable(&self, tla_id: AccountId, name: String) -> bool {
         let key = sub_account_key(&tla_id, &name);
-        self.parked_names.contains_key(&key)
+        self.parked_names.contains_key(&key) && self.assert_holds_nothing(&key).is_ok()
     }
 
     pub fn is_reclaim_in_progress(&self, tla_id: AccountId, name: String) -> bool {
@@ -91,13 +84,13 @@ impl TlaRegistry {
 
     pub fn is_name_available(&self, tla_id: AccountId, name: String) -> bool {
         let key = sub_account_key(&tla_id, &name);
-        !self.sub_accounts.contains_key(&key)
+        !self.sub_accounts.contains_key(&key) && !self.parked_names.contains_key(&key)
     }
 
     pub fn list_tlas(&self, from_index: u64, limit: u64) -> Vec<TlaView> {
         self.tlas
             .iter()
-            .skip(from_index as usize)
+            .skip(page_offset(u128::from(from_index)))
             .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .map(|(id, entry)| {
                 to_tla_view(
@@ -114,7 +107,7 @@ impl TlaRegistry {
     pub fn list_sub_accounts(&self, from_index: u64, limit: u64) -> Vec<SubAccountDetailView> {
         self.sub_accounts
             .iter()
-            .skip(from_index as usize)
+            .skip(page_offset(u128::from(from_index)))
             .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|(key, sub)| self.to_sub_detail(key, sub))
             .collect()
@@ -157,7 +150,7 @@ impl TlaRegistry {
                 self.recent_activity.get(slot as u32)
             })
             .filter(|r| account.as_ref().is_none_or(|a| &r.account == a))
-            .skip(from_index as usize)
+            .skip(page_offset(u128::from(from_index)))
             .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .map(|r| ActivityView {
                 event: r.event.clone(),
@@ -170,6 +163,10 @@ impl TlaRegistry {
 
     pub fn get_fee_config(&self) -> FeeConfig {
         self.fee_config.clone()
+    }
+
+    pub fn max_tla_batch(&self) -> u32 {
+        crate::admin::MAX_TLA_BATCH as u32
     }
 
     pub fn get_stats(&self) -> RegistryStats {
@@ -208,13 +205,23 @@ impl TlaRegistry {
         let venue_ready = !self.venues.is_empty();
         let metadata_ready = self.nft_contract_metadata.name != this.as_str();
         let wiring_ready = self.hos_extension != this && self.treasury != this;
+        let terms_ready = self.lease_term_ns >= crate::PRODUCTION_LEASE_TERM_NS
+            && self.grace_period_ns >= crate::PRODUCTION_GRACE_PERIOD_NS;
         DeploymentReadiness {
             rate_set: rate_ready,
             recovery_wired: recovery_ready,
             venue_set: venue_ready,
             metadata_set: metadata_ready,
             wiring_sane: wiring_ready,
-            ready: rate_ready && recovery_ready && venue_ready && metadata_ready && wiring_ready,
+            production_terms: terms_ready,
+            lease_term_ns: U64(self.lease_term_ns),
+            grace_period_ns: U64(self.grace_period_ns),
+            ready: rate_ready
+                && recovery_ready
+                && venue_ready
+                && metadata_ready
+                && wiring_ready
+                && terms_ready,
         }
     }
 }
@@ -227,7 +234,7 @@ impl TlaRegistry {
         limit: u64,
     ) -> Vec<SubAccountDetailView> {
         keys.iter()
-            .skip(from_index as usize)
+            .skip(page_offset(u128::from(from_index)))
             .take(limit.min(MAX_PAGE_LIMIT) as usize)
             .filter_map(|key| self.to_sub_detail(key, self.sub_accounts.get(key)?))
             .collect()
@@ -237,15 +244,7 @@ impl TlaRegistry {
         let tla = self.tlas.get(&sub.tla_id)?;
         let name = key.strip_suffix(&format!(".{}", sub.tla_id))?;
         Some(SubAccountDetailView {
-            sub_account: to_sub_view(
-                key,
-                sub,
-                tla,
-                &sub.tla_id,
-                name,
-                &self.fee_config,
-                &self.clock(),
-            ),
+            sub_account: self.to_sub_view(key, sub, tla, name),
             retraction_at: sub.retraction_at.map(U64),
         })
     }
@@ -272,25 +271,31 @@ pub(crate) fn to_tla_view(
     }
 }
 
-pub(crate) fn to_sub_view(
-    key: &str,
-    entry: &SubAccountEntry,
-    tla: &TlaEntry,
-    tla_id: &AccountId,
-    name: &str,
-    config: &FeeConfig,
-    clock: &LifecycleClock,
-) -> SubAccountView {
-    let rent = fees::calculate_rent(tla, tla_id, name, config);
-    SubAccountView {
-        full_name: key.to_string(),
-        owner: entry.owner.clone(),
-        tla_id: entry.tla_id.clone(),
-        payout_account: entry.payout_account.clone(),
-        lifecycle: entry.lifecycle(clock),
-        rented_at: U64(entry.rented_at),
-        expires_at: U64(entry.expires_at),
-        annual_rent: U128(rent),
+impl TlaRegistry {
+    fn to_sub_view(
+        &self,
+        key: &str,
+        entry: &SubAccountEntry,
+        tla: &TlaEntry,
+        name: &str,
+    ) -> SubAccountView {
+        let rent = fees::calculate_rent(tla, &entry.tla_id, name, &self.fee_config);
+        SubAccountView {
+            full_name: key.to_string(),
+            owner: entry.owner.clone(),
+            tla_id: entry.tla_id.clone(),
+            payout_account: entry.payout_account.clone(),
+            lifecycle: effective_sub_lifecycle(
+                entry,
+                tla,
+                self.fee_config.retraction_notice_ns.0,
+                &self.clock(),
+                self.suspension_expiry(&entry.tla_id),
+            ),
+            rented_at: U64(entry.rented_at),
+            expires_at: U64(entry.expires_at),
+            annual_rent: U128(rent),
+        }
     }
 }
 

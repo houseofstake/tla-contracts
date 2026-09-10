@@ -25,11 +25,17 @@ use hos_common::RotationCause;
 
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
-pub const IMPL_VERSION: u32 = 6;
+pub const IMPL_VERSION: u32 = 7;
 pub const STATE_VERSION: u16 = 1;
 const IMPL_PIN_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
+use hos_common::MIN_LEASE_RETRACT_NOTICE_NS;
+const GAS_FOR_PIN_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_FOR_PIN_RESERVE: Gas = Gas::from_tgas(30);
 const MIN_PIN_GAS: Gas = Gas::from_tgas(100);
+const _: () = assert!(
+    GAS_FOR_PIN_CALLBACK.as_tgas() < GAS_FOR_PIN_RESERVE.as_tgas(),
+    "the reserve has to cover the callback that records the pin, or a bind lands with nothing writing it down"
+);
 pub const ROTATION_EPOCH: u32 = 4;
 const _: () = assert!(
     ROTATION_EPOCH <= IMPL_VERSION,
@@ -345,14 +351,20 @@ impl TenantWallet {
     #[init(ignore_state)]
     pub fn hos_migrate(collection_id: AccountId) -> Self {
         let raw = env::storage_read(STATE_KEY).unwrap_or_else(|| env::panic_str(error::NO_STATE));
-        let current =
-            Self::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str(error::NO_STATE));
+        let deployed = raw
+            .get(..2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes)
+            .unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        let current = match deployed {
+            STATE_VERSION => {
+                Self::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str(error::NO_STATE))
+            }
+            _ => env::panic_str(error::STATE_VERSION_UNKNOWN),
+        };
+        let caller = env::predecessor_account_id();
         require!(
-            current.state_version == STATE_VERSION,
-            error::STATE_VERSION_UNKNOWN
-        );
-        require!(
-            env::predecessor_account_id() == current.authority,
+            caller == current.authority || caller == env::current_account_id(),
             error::ONLY_AUTHORITY
         );
         require!(current.owner != current.authority, error::UNAUTHORIZED);
@@ -383,6 +395,7 @@ impl TenantWallet {
         items: Vec<ItemAllowance>,
         expires_at: U64,
     ) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_owner_caller();
         self.assert_renter_active();
         require!(extension != self.owner, error::UNAUTHORIZED);
@@ -413,6 +426,7 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_revoke_spend(&mut self, extension: AccountId) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_owner_caller();
         self.spend_grants.remove(&extension);
         Event::SpendRevoked { extension }.emit();
@@ -514,6 +528,7 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_set_payout_account(&mut self, payout_account: AccountId, expected_owner: AccountId) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_authority();
         require!(self.owner == expected_owner, error::OWNER_MOVED);
         require!(
@@ -567,10 +582,10 @@ impl TenantWallet {
             error::IMPL_PIN_TOO_YOUNG
         );
         require!(env::prepaid_gas() >= MIN_PIN_GAS, error::PIN_GAS_TOO_LOW);
+        let approved_at = self.approved_impl_at;
         self.approved_impl = None;
         self.approved_impl_at = 0;
-        self.pinned_impl = Some(raw);
-        Event::ImplPinned {
+        Event::ImplPinRequested {
             code_hash: String::from(&Base58CryptoHash::from(raw)),
         }
         .emit();
@@ -586,10 +601,39 @@ impl TenantWallet {
                     .saturating_sub(env::used_gas())
                     .saturating_sub(GAS_FOR_PIN_RESERVE),
             )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_PIN_CALLBACK)
+                    .hos_on_pinned(Base58CryptoHash::from(raw), U64(approved_at)),
+            )
+    }
+
+    #[private]
+    pub fn hos_on_pinned(
+        &mut self,
+        code_hash: Base58CryptoHash,
+        approved_at: U64,
+        #[callback_result] bound: Result<(), near_sdk::PromiseError>,
+    ) {
+        if bound.is_err() {
+            self.approved_impl = Some(code_hash.into());
+            self.approved_impl_at = approved_at.0;
+            Event::ImplPinFailed {
+                code_hash: (&code_hash).into(),
+            }
+            .emit();
+            return;
+        }
+        self.pinned_impl = Some(code_hash.into());
+        Event::ImplPinned {
+            code_hash: (&code_hash).into(),
+        }
+        .emit();
     }
 
     #[payable]
     pub fn hos_set_lease(&mut self, lease_until_ns: U64, state: OperatingState) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_authority();
         require!(
             lease_until_ns.0 >= self.lease_until_ns,
@@ -605,6 +649,27 @@ impl TenantWallet {
         .emit();
     }
 
+    #[payable]
+    pub fn hos_retract_lease(&mut self, lease_until_ns: U64) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
+        self.assert_authority();
+        require!(
+            lease_until_ns.0 <= self.lease_until_ns,
+            error::RETRACTION_NOT_SHORTER
+        );
+        require!(
+            lease_until_ns.0 >= env::block_timestamp().saturating_add(MIN_LEASE_RETRACT_NOTICE_NS),
+            error::RETRACTION_NOTICE_TOO_SHORT
+        );
+        let previous = self.lease_until_ns;
+        self.lease_until_ns = lease_until_ns.0;
+        Event::LeaseRetracted {
+            from_ns: U64(previous),
+            until_ns: lease_until_ns,
+        }
+        .emit();
+    }
+
     /// The payout account is read before it is repointed, so the balance goes
     /// to the holder giving the name up rather than the one receiving it.
     #[payable]
@@ -614,6 +679,7 @@ impl TenantWallet {
         cause: RotationCause,
         asked_by: Option<AccountId>,
     ) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_authority();
         if matches!(cause, RotationCause::Recovery) {
             require!(
@@ -660,6 +726,9 @@ impl TenantWallet {
         self.rotation_seq = self.rotation_seq.saturating_add(1);
         self.wallet.extensions.retain(|held| *held == authority);
         self.check_lockout();
+        if cause.parks() {
+            self.state = OperatingState::Parked;
+        }
         if let Some(next) = to {
             self.wallet.extensions.insert(next.clone());
             self.owner = next.clone();
@@ -678,6 +747,7 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_freeze(&mut self) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         let caller = env::predecessor_account_id();
         require!(
             caller == self.authority || caller == self.owner,
@@ -710,6 +780,7 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_unfreeze(&mut self) {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         let caller = env::predecessor_account_id();
         require!(
             caller == self.authority || caller == self.owner,
@@ -731,9 +802,11 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_sweep_near(&mut self) -> Promise {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_sweepable();
         let amount = env::account_balance()
             .as_yoctonear()
+            .saturating_sub(env::attached_deposit().as_yoctonear())
             .saturating_sub(self.reserve());
         require!(amount > 0, error::NOTHING_TO_SWEEP);
         let payout_account = self.payout_account.clone();
@@ -748,6 +821,7 @@ impl TenantWallet {
 
     #[payable]
     pub fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128) -> Promise {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_sweepable();
         require!(amount.0 > 0, error::NOTHING_TO_SWEEP);
         require!(ft != env::current_account_id(), error::SELF_TARGET);

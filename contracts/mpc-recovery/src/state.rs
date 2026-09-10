@@ -16,6 +16,7 @@ pub struct Policy {
 }
 
 #[near(serializers = [borsh])]
+#[derive(Clone)]
 pub enum Phase {
     Idle,
     Requested {
@@ -41,9 +42,24 @@ pub enum Phase {
         round: u64,
         requested_at: u64,
     },
+    Cooldown {
+        until: u64,
+    },
 }
 
 impl Phase {
+    pub fn settled(&self) -> bool {
+        matches!(self, Phase::Idle | Phase::Cooldown { .. })
+    }
+
+    pub fn accepts_request(&self, now: u64) -> bool {
+        match self {
+            Phase::Idle => true,
+            Phase::Cooldown { until } => now >= *until,
+            _ => false,
+        }
+    }
+
     pub fn pending(&self) -> Option<(&PublicKey, u64)> {
         match self {
             Phase::Requested {
@@ -51,7 +67,10 @@ impl Phase {
             }
             | Phase::Approved { new_owner, round }
             | Phase::Resolving { new_owner, round } => Some((new_owner, *round)),
-            Phase::Idle | Phase::NameRequested { .. } | Phase::NameResolving { .. } => None,
+            Phase::Idle
+            | Phase::Cooldown { .. }
+            | Phase::NameRequested { .. }
+            | Phase::NameResolving { .. } => None,
         }
     }
 
@@ -74,6 +93,7 @@ impl Phase {
                 requested_at,
             } => Some((new_owner, *round, *requested_at)),
             Phase::Idle
+            | Phase::Cooldown { .. }
             | Phase::Requested { .. }
             | Phase::Approved { .. }
             | Phase::Resolving { .. }

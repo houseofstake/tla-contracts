@@ -5,7 +5,7 @@ use near_sdk::{ext_contract, AccountId};
 #[allow(dead_code)]
 #[ext_contract(ext_hos_extension)]
 pub trait HosExtension {
-    fn sweep_ft(&mut self, wallet: AccountId, ft: AccountId);
+    fn sweep_ft(&mut self, wallet: AccountId, ft: AccountId, refund_to: AccountId);
     fn sweep_near(&mut self, wallet: AccountId);
     fn force_transfer(
         &mut self,
@@ -15,6 +15,7 @@ pub trait HosExtension {
         asked_by: Option<AccountId>,
     );
     fn push_lease(&mut self, wallet: AccountId, lease_until_ns: U64, state: OperatingState);
+    fn retract_lease(&mut self, wallet: AccountId, lease_until_ns: U64);
     fn set_payout(
         &mut self,
         wallet: AccountId,

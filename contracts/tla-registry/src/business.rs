@@ -4,7 +4,7 @@ use crate::fees;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::{U128, U64};
-use near_sdk::{env, near, AccountId};
+use near_sdk::{env, near, AccountId, Promise};
 
 #[near]
 impl TlaRegistry {
@@ -14,7 +14,7 @@ impl TlaRegistry {
         &mut self,
         tla_id: AccountId,
         name: String,
-    ) -> Result<(), ContractError> {
+    ) -> Result<Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
         validate_name(&name)?;
@@ -39,13 +39,21 @@ impl TlaRegistry {
             return Err(ContractError::RetractionAlreadyScheduled);
         }
         sub.retraction_at = Some(now);
+        let ends_at = now.saturating_add(self.fee_config.retraction_notice_ns.0);
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
         Event::SubAccountRetractionScheduled {
             full_name: key,
             retraction_at: U64(now),
             by: caller,
         }
         .emit();
-        Ok(())
+        Ok(crate::rental::retract_wallet_lease(
+            &self.hos_extension,
+            sub_account,
+            ends_at,
+        ))
     }
 
     #[handle_result]
@@ -141,13 +149,9 @@ impl TlaRegistry {
         }
         let tla_len = tla_id.as_str().len() as u8;
         let tla_rent = self.quote_usd_to_near(fees::base_rent(tla_len, &self.fee_config))?;
-        let per_sub = self.convert_usd_to_near(self.fee_config.sub_fee_per_account_usd_micro.0)?;
-        let count = self.business_sub_count.get(&tla_id).copied().unwrap_or(0);
         Ok(BusinessRenewalCostView {
             tla_id,
             tla_rent_yocto: U128(tla_rent),
-            per_sub_yocto: U128(per_sub),
-            sub_count: count,
         })
     }
 

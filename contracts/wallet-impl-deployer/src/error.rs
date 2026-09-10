@@ -8,6 +8,11 @@ pub const EMPTY_CODE: &str = "code must not be empty";
 pub const COST_OVERFLOW: &str = "storage cost overflow";
 pub const REQUIRES_ONE_YOCTO: &str = "requires an attached deposit of exactly 1 yoctoNEAR";
 pub const COUNCIL_IS_SELF: &str = "council must not be this account, which ends with no keys";
+pub const COUNCIL_UNCHANGED: &str = "the pending council must differ from the current one";
+pub const NO_COUNCIL_ROTATION_PENDING: &str = "no council rotation has been approved";
+pub const ONLY_PENDING_COUNCIL: &str = "only the incoming council";
+pub const COUNCIL_ROTATION_TOO_YOUNG: &str =
+    "an approved council rotation must wait out the delay before it commits";
 pub const NO_APPROVED_UPGRADE: &str = "no approved upgrade hash";
 pub const UPGRADE_HASH_MISMATCH: &str = "code does not match the approved upgrade hash";
 pub const UPGRADE_TOO_YOUNG: &str =

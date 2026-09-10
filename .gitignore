@@ -1,6 +1,8 @@
+target
 target/
 **/*.rs.bk
 neardev/
+deployment.*.json
 .DS_Store
 *.swp
 .idea/

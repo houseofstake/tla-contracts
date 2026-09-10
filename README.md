@@ -92,7 +92,9 @@ up rather than the one receiving it. `RotationCause` decides both halves of that
 name goes into a marketplace venue, is the one cause that does not repoint the payout, and `Recovery`
 and `Revert` are the two that do not sweep.
 
-Freezing runs in both directions. Any extension may call `hos_freeze`. A freeze is recorded as
+Freezing runs in both directions. `hos_freeze` is open to the lease authority and to the owner, and to
+neither unless they are still in the extension set, so a third party extension cannot freeze an account
+it merely holds a grant on. A freeze is recorded as
 `SelfFrozen` when the caller is not the authority and `AuthorityFrozen` when it is. `hos_unfreeze`
 enforces the matching side, so the authority cannot lift an owner's freeze and an owner cannot lift the
 authority's. An authority freeze lapses on its own after seven days, so a lost or misused authority key
@@ -204,6 +206,18 @@ signed over the round the request recorded, so a quorum gathered for one round c
 and the registry call is followed by a callback that restores the request if the rotation fails rather
 than consuming it.
 
+A holder who sees a recovery opened against a name they still control can stop it themselves, and the
+path is not obvious from the outside because a leased account signs nothing directly. The account is in
+its own wallet's extension set, so the owner drives it the same way they arm a policy: send
+`w_execute_extension` from the owning account carrying a call to `abort_recovery` on `mpc-recovery`, with
+the leased account as predecessor. That is the same brake the installer and the owner hold, reached from
+the side the holder actually has. `claim_name_finalized` is the matching exit for the other direction, a
+recovery that settled on chain but whose callback never landed to record it.
+
+The timelock is what makes that brake usable, and the market pause is what stops it being outrun: a
+thief who has started a recovery can still try to sell or transfer the name while the clock runs, and
+`pause_marketplace` closes that door for everyone at once without touching anyone's ability to renew.
+
 This is not trustless. It trusts the watcher set by design.
 
 ## Publishing the wallet implementation
@@ -245,7 +259,8 @@ them is a mainnet step, and until it happens the delay binds the contract path o
 
 ## Trust boundaries
 
-The contracts assume the following and do not re-check them.
+The contracts assume the following and do not re-check them. `THREAT_MODEL.md` covers the parties that
+act during normal operation, what a compromise of each reaches, and which assets move with a name.
 
 Leased accounts reference the wallet implementation by account id rather than by hash, so republishing
 changes the code under every leased account at once. That is deliberate, so a fault can be patched
@@ -335,7 +350,7 @@ wasm32-unknown-unknown` to type-check without producing artifacts.
 The reproducible build is a different thing and the difference matters at deploy time:
 
 ```
-cargo near build reproducible-wasm --no-abi
+cargo near build reproducible-wasm
 ```
 
 It builds the source at the current git commit inside the pinned Docker image, not the working tree.
@@ -352,8 +367,18 @@ cargo test
 cd integration && cargo test
 ```
 
+The integration suite loads the artifacts already sitting in `target/near/`; it never builds them.
+Editing a contract and running it straight away measures the previous binary and reports the result
+as if it were current. The tell is several different single-variable changes producing an identical
+failure. Build the contract first, or run `scripts/gate.sh`, which orders the build ahead of the
+suite. File timestamps do not settle this either way, because `cargo fmt` rewrites a file without
+changing its contents and cargo then correctly skips the rebuild.
+
 The integration suite runs against a nearcore sandbox and needs every contract built first. It touches
 no live network.
+
+`VERSION_LOCK.md` records the pins, where the artifact hashes live and why, and the standing dependency
+advisory position.
 
 ## Status
 

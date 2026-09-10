@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 pub const YEAR_NS: u64 = 31_536_000_000_000_000;
 pub const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
 
+pub fn account(var: &str) -> String {
+    std::env::var(var).unwrap_or_else(|_| panic!("set {var} to the account this run should act on"))
+}
+
 pub fn wasm(name: &str) -> Vec<u8> {
     let path = format!("../target/near/{name}/{name}.wasm");
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
@@ -139,7 +143,6 @@ pub async fn deploy_fleet() -> Result<Fleet> {
             "recovery": recovery.id(),
             "chain_id": "testnet",
             "min_balance": NearToken::from_millinear(100),
-            "min_label_len": 3,
             "wallet_timeout_secs": 3600,
         }}))
         .transact()
@@ -216,6 +219,14 @@ pub const NEAR_USD_MICRO: u128 = 5_000_000;
 pub const GRACE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
 pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
+    deploy_registry_with_terms(fleet, None, GRACE_NS).await
+}
+
+pub async fn deploy_registry_with_terms(
+    fleet: &Fleet,
+    lease_term_ns: Option<u64>,
+    grace_period_ns: u64,
+) -> Result<Contract> {
     let extension = fleet
         .extension
         .deploy(&wasm("hos_extension"))
@@ -264,9 +275,10 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
         .args_json(json!({
             "admin": fleet.council.id(),
             "hos_extension": fleet.extension.id(),
-            "grace_period_ns": U64(GRACE_NS),
+            "grace_period_ns": U64(grace_period_ns),
             "treasury": fleet.council.id(),
             "council": fleet.council.id(),
+            "lease_term_ns": lease_term_ns.map(U64),
         }))
         .max_gas()
         .transact()
@@ -278,6 +290,7 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
         .council
         .call(registry.id(), "admin_set_initial_rate")
         .args_json(json!({ "rate": U128(NEAR_USD_MICRO) }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -300,6 +313,7 @@ pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
         .council
         .call(registry.id(), "activate_open_tla")
         .args_json(json!({ "tla_id": tla }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

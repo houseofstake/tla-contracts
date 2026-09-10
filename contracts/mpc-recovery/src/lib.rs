@@ -20,9 +20,12 @@ use crate::state::{Account, ArmedPolicy, Phase, Policy};
 const SIGN_GAS: Gas = Gas::from_tgas(60);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 const GAS_FOR_RECOVER_NAME: Gas = Gas::from_tgas(120);
-const GAS_FOR_NAME_SETTLE: Gas = Gas::from_tgas(5);
+const GAS_FOR_NAME_SETTLE: Gas = Gas::from_tgas(15);
+const GAS_FOR_SEAL_CB: Gas = Gas::from_tgas(5);
 const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
+const ABORT_COOLDOWN_NS: u64 = 600 * NS_PER_SEC;
+const HOLDER_ABORT_COOLDOWN_NS: u64 = 24 * 60 * 60 * NS_PER_SEC;
 const MIN_TIMELOCK_SECS: u32 = 60;
 const MAX_TIMELOCK_SECS: u32 = 2_592_000;
 /// Code changes wait longer than the wallet publish delay, because this
@@ -115,13 +118,12 @@ impl MpcRecovery {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        let Some(mut current) = hos_common::try_state_read::<Self>() else {
-            env::panic_str(error::NO_STATE)
+        let mut current = match hos_common::state_version() {
+            Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(_) => env::panic_str(error::STATE_VERSION_UNKNOWN),
+            None => env::panic_str(error::NO_STATE),
         };
-        require!(
-            current.state_version == STATE_VERSION,
-            error::STATE_VERSION_UNKNOWN
-        );
         current.upgrade_proven = true;
         Event::Upgraded {}.emit();
         current
@@ -132,12 +134,25 @@ impl MpcRecovery {
         self.assert_one_yocto();
         self.assert_owner();
         require!(self.upgrade_proven, error::UPGRADE_NOT_PROVEN);
-        Event::Sealed {
-            public_key: String::from(&public_key),
-            by: env::predecessor_account_id(),
+        let by = env::predecessor_account_id();
+        let key = String::from(&public_key);
+        Promise::new(env::current_account_id())
+            .delete_key(public_key)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SEAL_CB)
+                    .after_seal(key, by),
+            )
+    }
+
+    #[private]
+    pub fn after_seal(&mut self, public_key: String, by: AccountId) -> bool {
+        if !near_sdk::is_promise_success() {
+            Event::SealFailed { public_key, by }.emit();
+            return false;
         }
-        .emit();
-        Promise::new(env::current_account_id()).delete_key(public_key)
+        Event::Sealed { public_key, by }.emit();
+        true
     }
 
     #[payable]
@@ -229,7 +244,11 @@ impl MpcRecovery {
             .accounts
             .get_mut(&account)
             .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
-        require!(matches!(entry.phase, Phase::Idle), error::NOT_IDLE);
+        require!(entry.phase.settled(), error::NOT_IDLE);
+        require!(
+            entry.phase.accepts_request(env::block_timestamp()),
+            error::COOLING_DOWN
+        );
         let message =
             proof::name_request_message(&contract, &tla_id, &name, &new_owner, entry.round);
         require!(
@@ -366,7 +385,9 @@ impl MpcRecovery {
         settled
     }
 
+    #[payable]
     pub fn arm_policy_install(&mut self, attestation_key: PublicKey, timelock_secs: u32) {
+        self.assert_one_yocto();
         let account = env::predecessor_account_id();
         require!(
             hos_common::is_ed25519(&attestation_key),
@@ -392,7 +413,9 @@ impl MpcRecovery {
         .emit();
     }
 
+    #[payable]
     pub fn disarm_policy_install(&mut self) {
+        self.assert_one_yocto();
         let account = env::predecessor_account_id();
         require!(self.armed.remove(&account).is_some(), error::NOT_ARMED);
         Event::PolicyInstallDisarmed { account }.emit();
@@ -426,14 +449,14 @@ impl MpcRecovery {
             hos_common::is_ed25519(&mpc_public_key),
             error::MPC_NOT_ED25519
         );
-        let round = match self.accounts.get(&account) {
+        let (round, phase) = match self.accounts.get(&account) {
             Some(existing) => {
-                require!(matches!(existing.phase, Phase::Idle), error::NOT_IDLE);
+                require!(existing.phase.settled(), error::NOT_IDLE);
                 require!(
                     env::predecessor_account_id() == self.owner,
                     error::ONLY_OWNER_REINSTALL
                 );
-                existing.round
+                (existing.round, existing.phase.clone())
             }
             None => {
                 let armed = self
@@ -448,7 +471,10 @@ impl MpcRecovery {
                     armed.timelock_secs == timelock_secs,
                     error::ARMED_TIMELOCK_MISMATCH
                 );
-                self.round_floor.get(&account).copied().unwrap_or(0)
+                (
+                    self.round_floor.get(&account).copied().unwrap_or(0),
+                    Phase::Idle,
+                )
             }
         };
         self.accounts.insert(
@@ -460,7 +486,7 @@ impl MpcRecovery {
                     timelock_secs,
                 },
                 round,
-                phase: Phase::Idle,
+                phase,
             },
         );
         Event::PolicyInstalled {
@@ -484,7 +510,11 @@ impl MpcRecovery {
             .accounts
             .get_mut(&account)
             .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
-        require!(matches!(entry.phase, Phase::Idle), error::NOT_IDLE);
+        require!(entry.phase.settled(), error::NOT_IDLE);
+        require!(
+            entry.phase.accepts_request(env::block_timestamp()),
+            error::COOLING_DOWN
+        );
         require!(round.0 == entry.round, error::STALE_ROUND);
         let message = proof::request_message(&contract, &account, &new_owner, entry.round);
         require!(
@@ -603,8 +633,9 @@ impl MpcRecovery {
     }
 
     pub fn abort_recovery(&mut self, account: AccountId) -> PromiseOrValue<()> {
+        let by_holder = env::predecessor_account_id() == account;
         require!(
-            self.is_installer() || env::predecessor_account_id() == account,
+            self.is_installer() || by_holder,
             error::ONLY_INSTALLER_OR_HOLDER
         );
         let entry = self
@@ -615,14 +646,23 @@ impl MpcRecovery {
             Phase::Requested { round, .. }
             | Phase::Approved { round, .. }
             | Phase::NameRequested { round, .. } => *round,
-            Phase::Idle | Phase::Resolving { .. } | Phase::NameResolving { .. } => {
-                env::panic_str(error::NOT_ACTIVE)
-            }
+            Phase::Idle
+            | Phase::Cooldown { .. }
+            | Phase::Resolving { .. }
+            | Phase::NameResolving { .. } => env::panic_str(error::NOT_ACTIVE),
         };
-        entry.phase = Phase::Idle;
+        let cooldown = if by_holder {
+            HOLDER_ABORT_COOLDOWN_NS
+        } else {
+            ABORT_COOLDOWN_NS
+        };
+        entry.phase = Phase::Cooldown {
+            until: env::block_timestamp().saturating_add(cooldown),
+        };
         Event::Aborted {
             account,
             round: U64(round),
+            by_holder,
         }
         .emit();
         PromiseOrValue::Value(())
@@ -666,6 +706,15 @@ impl MpcRecovery {
             _ => env::panic_str(error::NOT_APPROVED),
         }
         entry.phase = Phase::Idle;
+        Event::Finalized { account, round }.emit();
+    }
+
+    pub fn claim_name_finalized(&mut self, account: AccountId, round: U64, settled: bool) {
+        require!(self.is_installer(), error::ONLY_INSTALLER);
+        require!(
+            self.settle_name_resolving(&account, round.0, settled),
+            error::NOT_ACTIVE
+        );
         Event::Finalized { account, round }.emit();
     }
 

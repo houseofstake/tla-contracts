@@ -13,9 +13,15 @@ pub enum Event {
         state: OperatingState,
     },
     #[event_version("1.0.0")]
+    LeaseRetracted { from_ns: U64, until_ns: U64 },
+    #[event_version("1.0.0")]
     PayoutAccountSet { payout_account: AccountId },
     #[event_version("1.0.0")]
+    ImplPinRequested { code_hash: String },
+    #[event_version("1.0.0")]
     ImplPinned { code_hash: String },
+    #[event_version("1.0.0")]
+    ImplPinFailed { code_hash: String },
     #[event_version("1.0.0")]
     ImplApproved { code_hash: String },
     #[event_version("1.0.0")]

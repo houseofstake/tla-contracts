@@ -18,11 +18,7 @@ fn acc(s: &str) -> AccountId {
 }
 
 fn now_ns() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        * 1_000_000_000
+    1_700_000_000 * 1_000_000_000
 }
 
 fn ctx(predecessor: &str, deposit: u128, ts: u64) {
@@ -1739,6 +1735,109 @@ fn sweepable_from(balance: NearToken, c: &TenantWallet) -> u128 {
 }
 
 #[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn moving_the_lease_forward_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 0, now_ns());
+    c.hos_set_lease(U64(now_ns() + YEAR_NS + HOUR_NS), OperatingState::Active);
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn repointing_the_payout_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 0, now_ns());
+    c.hos_set_payout_account(acc(BUYER), acc(OWNER));
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn moving_the_owner_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 0, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Sale, Some(acc(OWNER)));
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn sweeping_near_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 0, now_ns() + YEAR_NS + 1);
+    let _ = c.hos_sweep_near();
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn sweeping_a_token_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 0, now_ns() + YEAR_NS + 1);
+    let _ = c.hos_sweep_ft(acc("usdc.testnet"), U128(1));
+}
+
+#[test]
+fn a_transfer_the_payout_account_refused_is_not_reported_as_swept() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.hos_resolve_sweep(acc(PAYOUT), None, U128(9)));
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("sweep_failed")));
+    assert!(
+        !logs.iter().any(|l| l.contains("swept_near")),
+        "the balance is still here, so the feed must not report it paid out"
+    );
+}
+
+#[test]
+fn a_settled_transfer_names_the_token_it_moved() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+    assert!(c.hos_resolve_sweep(acc(PAYOUT), Some(acc("usdc.testnet")), U128(9)));
+    assert!(near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|l| l.contains("swept_ft")));
+}
+
+fn ctx_callback(result: near_sdk::PromiseResult) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(acc(WALLET))
+            .predecessor_account_id(acc(WALLET))
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result],
+    );
+}
+
+#[test]
+#[should_panic(expected = "nothing to sweep")]
+fn a_sweep_will_not_pay_itself_out_of_the_deposit_that_asked_for_it() {
+    let mut c = deploy();
+    let expired = now_ns() + YEAR_NS + 1;
+    ctx(AUTHORITY, 1, expired);
+    let floor = c.reserve();
+    ctx_bal(AUTHORITY, 1, expired, NearToken::from_yoctonear(floor));
+    let _ = c.hos_sweep_near();
+}
+
+#[test]
+fn a_sweep_hands_over_the_balance_above_the_floor_and_not_the_deposit() {
+    let mut c = deploy();
+    let expired = now_ns() + YEAR_NS + 1;
+    ctx(AUTHORITY, 1, expired);
+    let floor = c.reserve();
+    let balance = NearToken::from_yoctonear(floor + 7);
+    ctx_bal(AUTHORITY, 1, expired, balance);
+    let _ = c.hos_sweep_near();
+    assert_eq!(
+        transfers(),
+        vec![(acc(PAYOUT), 7)],
+        "the seven above the floor moves, the attached yocto stays where it came from"
+    );
+}
+
+#[test]
 fn a_sale_returns_the_balance_to_the_seller_not_the_buyer() {
     let mut c = deploy();
     let balance = NearToken::from_near(4);
@@ -2139,12 +2238,44 @@ mod impl_pinning {
     }
 
     #[test]
-    fn pinning_after_the_delay_records_the_hash_and_clears_the_approval() {
+    fn pinning_after_the_delay_spends_the_approval_without_claiming_the_code_yet() {
         let mut c = approved();
         ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
         let _ = c.hos_pin_impl();
-        assert_eq!(c.pinned_impl, Some([7u8; 32]));
         assert_eq!(c.approved_impl, None);
+        assert_eq!(
+            c.pinned_impl, None,
+            "the bind is a later receipt, so nothing yet proves this account runs that code"
+        );
+    }
+
+    #[test]
+    fn the_pin_is_recorded_once_the_bind_confirms() {
+        let mut c = approved();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        let _ = c.hos_pin_impl();
+        ctx(WALLET, 0, now_ns() + IMPL_PIN_DELAY_NS);
+        c.hos_on_pinned(hash(), U64(now_ns()), Ok(()));
+        assert_eq!(c.pinned_impl, Some([7u8; 32]));
+        assert_eq!(c.hos_impl_pin().pinned, Some(hash()));
+    }
+
+    #[test]
+    fn a_bind_that_failed_leaves_the_account_on_the_code_it_had() {
+        let mut c = approved();
+        ctx(AUTHORITY, 1, now_ns() + IMPL_PIN_DELAY_NS);
+        let _ = c.hos_pin_impl();
+        ctx(WALLET, 0, now_ns() + IMPL_PIN_DELAY_NS);
+        c.hos_on_pinned(hash(), U64(now_ns()), Err(near_sdk::PromiseError::Failed));
+        assert_eq!(
+            c.pinned_impl, None,
+            "a holder reading the pin must not be told the account runs code it never bound"
+        );
+        assert_eq!(
+            (c.approved_impl, c.approved_impl_at),
+            (Some([7u8; 32]), now_ns()),
+            "the approval it spent comes back, so a retry does not wait the delay out again"
+        );
     }
 
     #[test]
@@ -2202,4 +2333,149 @@ mod impl_pinning {
         c.hos_cancel_impl();
         assert_eq!(c.approved_impl, None);
     }
+}
+
+mod one_yocto_gate {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_freeze() {
+        let mut c = deploy();
+        ctx(OWNER, 0, now_ns());
+        c.hos_freeze();
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_unfreeze() {
+        let mut c = deploy();
+        ctx(OWNER, 1, now_ns());
+        c.hos_freeze();
+        ctx(OWNER, 0, now_ns());
+        c.hos_unfreeze();
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_revoke_a_spend_grant() {
+        let mut c = deploy();
+        ctx(OWNER, 0, now_ns());
+        c.hos_revoke_spend(acc(BUYER));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an attached deposit of exactly 1 yoctoNEAR")]
+    fn a_restricted_key_cannot_grant_spend() {
+        let mut c = deploy();
+        ctx(OWNER, 0, now_ns());
+        c.hos_grant_spend(
+            acc(BUYER),
+            vec![acc(BUYER)],
+            U128(1),
+            vec![],
+            vec![],
+            U64(now_ns() + 1_000_000_000),
+        );
+    }
+}
+
+#[test]
+fn migrate_accepts_the_account_itself_so_a_pin_can_complete() {
+    let c = deploy();
+    let legacy = legacy_state(c);
+    ctx(WALLET, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    let migrated = TenantWallet::hos_migrate(acc(REGISTRY));
+    assert_eq!(
+        migrated.owner,
+        acc(OWNER),
+        "hos_pin_impl sends hos_migrate to the account itself, so that caller must be accepted"
+    );
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority may perform this operation")]
+fn migrate_still_refuses_an_unrelated_caller() {
+    let c = deploy();
+    let legacy = legacy_state(c);
+    ctx(BUYER, 0, now_ns());
+    env::storage_write(STATE_KEY, &near_sdk::borsh::to_vec(&legacy).unwrap());
+    TenantWallet::hos_migrate(acc(REGISTRY));
+}
+
+#[test]
+fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
+    let c = deploy();
+    assert_eq!(
+        (
+            crate::STATE_VERSION,
+            near_sdk::borsh::to_vec(&c).unwrap().len()
+        ),
+        (1, 204),
+        "the state shape moved, and this is the contract where that is worst: a \
+         publish reaches every leased account in the same block. Bump STATE_VERSION, \
+         give hos_migrate a reader for the shape those accounts hold today, and \
+         update this fixture."
+    );
+}
+
+mod lease_retraction {
+    use super::*;
+
+    #[test]
+    fn a_retraction_ends_the_term_only_after_the_notice_it_promised() {
+        let mut c = deploy();
+        let ends_at = now_ns() + MIN_LEASE_RETRACT_NOTICE_NS;
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_retract_lease(U64(ends_at));
+        assert_eq!(c.hos_lease().lease_until_ns.0, ends_at);
+
+        ctx(AUTHORITY, 1, ends_at);
+        c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+        assert_eq!(c.w_extensions().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "may only shorten")]
+    fn a_retraction_cannot_extend_a_lease() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 1, now_ns());
+        c.hos_retract_lease(U64(now_ns() + 2 * YEAR_NS));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the lease authority")]
+    fn the_owner_cannot_retract_their_own_lease() {
+        let mut c = deploy();
+        ctx(OWNER, 1, now_ns());
+        c.hos_retract_lease(U64(now_ns()));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly 1 yoctoNEAR")]
+    fn retracting_takes_a_full_access_signature() {
+        let mut c = deploy();
+        ctx(AUTHORITY, 0, now_ns());
+        c.hos_retract_lease(U64(now_ns()));
+    }
+}
+
+#[test]
+#[should_panic(expected = "must leave the holder the full notice period")]
+fn the_authority_cannot_zero_a_live_lease_to_reclaim_it() {
+    let mut c = deploy();
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_retract_lease(U64(0));
+}
+
+#[test]
+#[should_panic(expected = "sweep requires an expired lease")]
+fn a_reclaim_inside_the_retraction_notice_is_refused() {
+    let mut c = deploy();
+    let ends_at = now_ns() + MIN_LEASE_RETRACT_NOTICE_NS;
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_retract_lease(U64(ends_at));
+    ctx(AUTHORITY, 1, ends_at - 1);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
 }

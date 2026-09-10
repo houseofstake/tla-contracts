@@ -4,7 +4,7 @@ use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use hos_common::MintOutcome;
 use near_sdk::json_types::{U128, U64};
-use near_sdk::{is_promise_success, near, AccountId, FunctionError, PromiseError};
+use near_sdk::{env, near, AccountId, FunctionError, PromiseError, PromiseOrValue};
 
 /// `owner` receives the lease, `payer` receives refunds. A sponsored mint
 /// sets them to different accounts.
@@ -16,6 +16,7 @@ pub struct MintSettlement {
     pub payer: AccountId,
     pub rent_yocto: U128,
     pub attached_yocto: U128,
+    pub order_id: Option<String>,
 }
 
 #[near]
@@ -27,8 +28,10 @@ impl TlaRegistry {
         #[callback_result] outcome: Result<MintOutcome, PromiseError>,
     ) {
         let key = sub_account_key(&settlement.tla_id, &settlement.name);
+        let order = settlement.order_id.clone();
         match outcome {
             Ok(MintOutcome::Active) => {
+                self.confirm_order(order.as_ref(), &key);
                 let expires_at = self.record_rental(
                     &key,
                     &settlement.payer,
@@ -44,13 +47,24 @@ impl TlaRegistry {
                     expires_at: U64(expires_at),
                 });
             }
-            Ok(MintOutcome::CreationFailed) | Err(_) => {
+            Ok(MintOutcome::CreationFailed) => {
+                self.release_order(order.as_ref());
                 self.settle_failed_mint(
                     &key,
                     &settlement.tla_id,
                     &settlement.payer,
                     settlement.attached_yocto,
                     "sub-account creation failed",
+                );
+            }
+            Err(_) => {
+                self.release_order(order.as_ref());
+                self.settle_stranded_mint(
+                    &key,
+                    &settlement.tla_id,
+                    &settlement.payer,
+                    settlement.attached_yocto,
+                    "sub-account mint chain failed without an outcome",
                 );
             }
         }
@@ -63,8 +77,10 @@ impl TlaRegistry {
         #[callback_result] outcome: Result<MintOutcome, PromiseError>,
     ) {
         let key = sub_account_key(&settlement.tla_id, &settlement.name);
+        let order = settlement.order_id.clone();
         match outcome {
             Ok(MintOutcome::Active) => {
+                self.confirm_order(order.as_ref(), &key);
                 let expires_at =
                     self.record_paid_rental(&key, &settlement.payer, settlement.attached_yocto);
                 crate::nft::emit_nft_mint(&settlement.owner, &key);
@@ -76,7 +92,8 @@ impl TlaRegistry {
                     expires_at: U64(expires_at),
                 });
             }
-            Ok(MintOutcome::CreationFailed) | Err(_) => {
+            Ok(MintOutcome::CreationFailed) => {
+                self.release_order(order.as_ref());
                 self.settle_failed_mint(
                     &key,
                     &settlement.tla_id,
@@ -85,13 +102,29 @@ impl TlaRegistry {
                     "paid sub-account creation failed",
                 );
             }
+            Err(_) => {
+                self.release_order(order.as_ref());
+                self.settle_stranded_mint(
+                    &key,
+                    &settlement.tla_id,
+                    &settlement.payer,
+                    settlement.attached_yocto,
+                    "paid sub-account mint chain failed without an outcome",
+                );
+            }
         }
     }
 
     #[private]
-    pub fn on_sub_account_re_rented(&mut self, settlement: MintSettlement) {
+    pub fn on_sub_account_re_rented(
+        &mut self,
+        settlement: MintSettlement,
+        #[callback_result] swapped: Result<bool, PromiseError>,
+    ) -> PromiseOrValue<()> {
         let key = sub_account_key(&settlement.tla_id, &settlement.name);
-        if !is_promise_success() {
+        let order = settlement.order_id.clone();
+        if !matches!(swapped, Ok(true)) {
+            self.release_order(order.as_ref());
             self.settle_failed_mint(
                 &key,
                 &settlement.tla_id,
@@ -99,8 +132,9 @@ impl TlaRegistry {
                 settlement.attached_yocto,
                 "sub-account re-rent failed",
             );
-            return;
+            return PromiseOrValue::Value(());
         }
+        self.confirm_order(order.as_ref(), &key);
         self.parked_names.remove(&key);
         crate::nft::emit_nft_mint(&settlement.owner, &key);
         self.sub_account_count = self.sub_account_count.saturating_add(1);
@@ -115,12 +149,20 @@ impl TlaRegistry {
             None => ContractError::SubAccountNotFound.panic(),
         };
         self.emit_activity(Event::SubAccountReRented {
-            full_name: key,
+            full_name: key.clone(),
             tla_id: settlement.tla_id,
             owner: settlement.owner,
             rent_yocto: settlement.rent_yocto,
             expires_at: U64(expires_at),
         });
+        let Ok(sub_account) = key.parse::<AccountId>() else {
+            return PromiseOrValue::Value(());
+        };
+        PromiseOrValue::Promise(crate::rental::push_re_rented_lease(
+            &self.hos_extension,
+            sub_account,
+            expires_at,
+        ))
     }
 }
 
@@ -157,6 +199,33 @@ impl TlaRegistry {
         }
     }
 
+    pub(crate) fn release_order(&mut self, order_id: Option<&String>) {
+        let Some(order_id) = order_id else {
+            return;
+        };
+        if self.paid_order_ids.get(order_id) == Some(&PaidOrderState::Settled) {
+            return;
+        }
+        self.paid_order_ids.remove(order_id);
+        Event::PaidRentalOrderReleased {
+            order_id: order_id.clone(),
+        }
+        .emit();
+    }
+
+    pub(crate) fn confirm_order(&mut self, order_id: Option<&String>, full_name: &str) {
+        let Some(order_id) = order_id else {
+            return;
+        };
+        self.paid_order_ids
+            .insert(order_id.clone(), PaidOrderState::Settled);
+        Event::PaidRentalOrderSettled {
+            full_name: full_name.to_string(),
+            order_id: order_id.clone(),
+        }
+        .emit();
+    }
+
     pub(crate) fn settle_failed_mint(
         &mut self,
         key: &str,
@@ -173,6 +242,42 @@ impl TlaRegistry {
         Event::RefundPending {
             account: payer.clone(),
             amount_yocto: attached,
+            reason: reason.to_string(),
+        }
+        .emit();
+    }
+
+    pub(crate) fn settle_stranded_mint(
+        &mut self,
+        key: &str,
+        tla_id: &AccountId,
+        payer: &AccountId,
+        attached: U128,
+        reason: &str,
+    ) {
+        if self.sub_account_remove(key).is_none() {
+            return;
+        }
+        self.business_count_decrement_if_business(tla_id);
+        self.add_pending_refund(payer, attached.0);
+        self.parked_names.insert(
+            key.to_string(),
+            ParkedEntry {
+                tla_id: tla_id.clone(),
+                parked_at: env::block_timestamp(),
+            },
+        );
+        Event::RefundPending {
+            account: payer.clone(),
+            amount_yocto: attached,
+            reason: reason.to_string(),
+        }
+        .emit();
+        Event::MintFundingStranded {
+            full_name: key.to_string(),
+            tla_id: tla_id.clone(),
+            payer: payer.clone(),
+            account_creation_deposit_yocto: self.fee_config.account_creation_deposit_yocto,
             reason: reason.to_string(),
         }
         .emit();

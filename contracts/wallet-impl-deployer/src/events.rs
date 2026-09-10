@@ -13,5 +13,19 @@ pub enum Event {
     #[event_version("1.0.0")]
     UpgradeApproved { hash: String, by: AccountId },
     #[event_version("1.0.0")]
+    CouncilRotationApproved {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    CouncilRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    CouncilRotated {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     KeyDeleted { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
+    KeyDeleteFailed { public_key: String, by: AccountId },
 }

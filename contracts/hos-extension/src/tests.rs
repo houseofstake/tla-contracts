@@ -24,6 +24,19 @@ fn ctx(predecessor: &str, deposit: u128) {
         .build());
 }
 
+fn ctx_callback(result: near_sdk::PromiseResult) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(acc("hos-extension.testnet"))
+            .predecessor_account_id(acc("hos-extension.testnet"))
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result],
+    );
+}
+
 fn deploy() -> HosExtension {
     ctx(ADMIN, 0);
     HosExtension::new(
@@ -137,7 +150,7 @@ fn non_registry_cannot_push_lease() {
 fn registry_sweeps_ft_with_correct_deposit() {
     let mut c = deploy();
     ctx(REGISTRY, sweep_deposit());
-    assert!(c.sweep_ft(acc(WALLET), acc(TOKEN)).is_ok());
+    assert!(c.sweep_ft(acc(WALLET), acc(TOKEN), acc(BUYER)).is_ok());
 }
 
 #[test]
@@ -145,7 +158,7 @@ fn sweep_rejects_wrong_deposit() {
     let mut c = deploy();
     ctx(REGISTRY, sweep_deposit() - 1);
     assert!(matches!(
-        c.sweep_ft(acc(WALLET), acc(TOKEN)),
+        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(BUYER)),
         Err(ContractError::InsufficientDeposit)
     ));
 }
@@ -155,7 +168,7 @@ fn non_registry_cannot_sweep() {
     let mut c = deploy();
     ctx(ADMIN, sweep_deposit());
     assert!(matches!(
-        c.sweep_ft(acc(WALLET), acc(TOKEN)),
+        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(BUYER)),
         Err(ContractError::OnlyRegistry)
     ));
 }
@@ -431,7 +444,7 @@ fn a_reset_the_recovery_contract_deferred_stays_pending() {
     ctx(ADMIN, 0);
     c.after_recovery_reset(acc(WALLET), Ok(false));
     assert_eq!(
-        c.pending_recovery_resets(),
+        c.pending_recovery_resets(None, None),
         vec![acc(WALLET)],
         "a deferred reset reports success on the wire, so treating any Ok as done would drop \
          the one case where the previous owner keeps their recovery policy"
@@ -444,7 +457,7 @@ fn a_completed_reset_clears_the_pending_entry() {
     ctx(ADMIN, 0);
     c.after_recovery_reset(acc(WALLET), Ok(false));
     c.after_recovery_reset(acc(WALLET), Ok(true));
-    assert!(c.pending_recovery_resets().is_empty());
+    assert!(c.pending_recovery_resets(None, None).is_empty());
 }
 
 #[test]
@@ -452,7 +465,155 @@ fn a_failed_reset_stays_pending() {
     let mut c = deploy();
     ctx(ADMIN, 0);
     c.after_recovery_reset(acc(WALLET), Err(near_sdk::PromiseError::Failed));
-    assert_eq!(c.pending_recovery_resets(), vec![acc(WALLET)]);
+    assert_eq!(c.pending_recovery_resets(None, None), vec![acc(WALLET)]);
+}
+
+#[test]
+fn a_sweep_that_could_not_read_the_payout_refunds_the_caller() {
+    let mut c = deploy();
+    ctx(REGISTRY, sweep_deposit());
+    let _ = c.after_payout_for_sweep(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(BUYER),
+        Err(near_sdk::PromiseError::Failed),
+    );
+    assert_eq!(
+        refunds(),
+        vec![(acc(BUYER), sweep_deposit())],
+        "the caller paid the storage deposit up front, so a sweep that never dispatched owes it \
+         back to them rather than keeping it here"
+    );
+}
+
+#[test]
+fn a_sweep_the_wallet_refused_is_not_reported_as_dispatched() {
+    let mut c = deploy();
+    ctx(REGISTRY, 0);
+    assert!(!c.after_sweep_settled(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        U128(5),
+        Err(near_sdk::PromiseError::Failed),
+    ));
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("sweep_failed")));
+    assert!(
+        !logs.iter().any(|l| l.contains("sweep_dispatched")),
+        "the tokens never moved, so the feed must not say they did"
+    );
+}
+
+fn refunds() -> Vec<(AccountId, u128)> {
+    near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| {
+            let to = receipt.receiver_id.clone();
+            receipt
+                .actions
+                .into_iter()
+                .filter_map(move |action| match action {
+                    near_sdk::mock::MockAction::Transfer { deposit, .. } => {
+                        Some((to.clone(), deposit.as_yoctonear()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
+#[test]
+fn the_pending_reset_backlog_stays_readable_once_it_is_large() {
+    let mut c = deploy();
+    for i in 0..600 {
+        if i % 90 == 0 {
+            ctx(ADMIN, 0);
+        }
+        c.after_recovery_reset(acc(&format!("w{i}.tla.testnet")), Ok(false));
+    }
+    assert_eq!(c.pending_recovery_reset_count(), 600);
+    let first = c.pending_recovery_resets(None, None);
+    assert_eq!(
+        first.len(),
+        500,
+        "the page is capped, so a backlog can never outgrow the call that has to read it"
+    );
+    let rest = c.pending_recovery_resets(Some(500), None);
+    assert_eq!(rest.len(), 100, "the tail is reachable by offset");
+    let past_the_end = c.pending_recovery_resets(Some(u64::from(u32::MAX) + 1), None);
+    assert!(
+        past_the_end.is_empty(),
+        "an offset beyond a 32 bit usize must run off the end, not wrap to the first page"
+    );
+}
+
+#[test]
+fn the_admin_set_is_bounded() {
+    let mut c = deploy();
+    while c.get_admins().len() < 32 {
+        let next = format!("admin{}.testnet", c.get_admins().len());
+        ctx(COUNCIL, 1);
+        c.add_admin(acc(&next)).unwrap();
+    }
+    ctx(COUNCIL, 1);
+    assert!(matches!(
+        c.add_admin(acc("one-too-many.testnet")),
+        Err(ContractError::AdminSetFull)
+    ));
+    ctx(COUNCIL, 1);
+    c.remove_admin(acc("admin31.testnet")).unwrap();
+    ctx(COUNCIL, 1);
+    assert!(
+        c.add_admin(acc("one-too-many.testnet")).is_ok(),
+        "the cap bounds the set, it does not close the seat permanently"
+    );
+}
+
+#[test]
+fn a_seal_that_did_not_remove_the_key_is_not_reported_as_sealed() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.after_seal("ed25519:key".to_string(), acc(COUNCIL)));
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(
+        logs.iter().any(|l| l.contains("seal_failed")),
+        "expected a failure event, got {logs:?}"
+    );
+    assert!(
+        !logs.iter().any(|l| l.contains(r#""event":"sealed""#)),
+        "the launch gate reads this log, so a key that survived must never read as sealed"
+    );
+}
+
+#[test]
+fn a_seal_that_removed_the_key_is_reported_as_sealed() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+    assert!(c.after_seal("ed25519:key".to_string(), acc(COUNCIL)));
+    assert!(near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|l| l.contains(r#""event":"sealed""#)));
+}
+
+#[test]
+fn a_skim_that_never_landed_is_not_reported_as_a_payment() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    assert!(
+        !c.after_skim(U128(7), acc(DEST), acc(ADMIN)),
+        "the treasury never received it, so the event must say so"
+    );
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(
+        logs.iter().any(|l| l.contains("skim_failed")),
+        "expected a failure event, got {logs:?}"
+    );
+    assert!(
+        !logs.iter().any(|l| l.contains("balance_skimmed")),
+        "a failed transfer must never log the completion event"
+    );
 }
 
 #[test]
@@ -475,6 +636,22 @@ fn the_council_can_seal_the_extension_once_the_upgrade_path_is_proven() {
     c.upgrade_proven = true;
     ctx(COUNCIL, 1);
     assert!(c.seal(a_key()).is_ok());
+    let deleted: Vec<String> = near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| receipt.actions)
+        .filter_map(|action| match action {
+            near_sdk::mock::MockAction::DeleteKey { public_key, .. } => {
+                Some(public_key.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![String::from(&a_key())],
+        "the launch gate turns on this account ending with no key, so the seal has to schedule \
+         the removal rather than only report one"
+    );
 }
 
 #[test]
@@ -515,5 +692,219 @@ fn init_rejects_a_council_that_is_the_extension_itself() {
         acc(RECOVERY),
         acc(DEST),
         acc("hos-extension.testnet"),
+    );
+}
+
+#[test]
+fn a_pause_does_not_block_a_renewal_reaching_the_wallet() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    c.pause().unwrap();
+    ctx(REGISTRY, 0);
+    assert!(
+        c.push_lease(acc(WALLET), U64(1), OperatingState::Active)
+            .is_ok(),
+        "the registry does not pause renewal, so pausing the push would take a \
+         holder's rent and leave the wallet lease behind"
+    );
+}
+
+mod council_rotation {
+    use super::*;
+
+    const NEW_COUNCIL: &str = "council2.testnet";
+
+    #[test]
+    fn a_rotation_installs_the_new_council_once_the_delay_has_run() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        assert_eq!(c.pending_council(), Some((acc(NEW_COUNCIL), U64(0))));
+        ctx_at(NEW_COUNCIL, 1, UPGRADE_DELAY_NS);
+        c.commit_council_rotation().unwrap();
+        assert_eq!(c.get_council(), acc(NEW_COUNCIL));
+        assert!(c.pending_council().is_none());
+    }
+
+    #[test]
+    fn the_outgoing_council_cannot_seat_an_account_that_never_signed() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx_at(COUNCIL, 1, UPGRADE_DELAY_NS);
+        assert!(
+            matches!(
+                c.commit_council_rotation(),
+                Err(ContractError::OnlyPendingCouncil)
+            ),
+            "a mistyped council must cost a cancelled rotation, not the contract"
+        );
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn a_rotation_cannot_commit_inside_its_delay() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx_at(NEW_COUNCIL, 1, UPGRADE_DELAY_NS - 1);
+        assert!(matches!(
+            c.commit_council_rotation(),
+            Err(ContractError::CouncilRotationTooYoung)
+        ));
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn an_approval_can_be_withdrawn_before_it_commits() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx_at(COUNCIL, 1, 1);
+        c.cancel_council_rotation().unwrap();
+        ctx_at(COUNCIL, 1, UPGRADE_DELAY_NS);
+        assert!(matches!(
+            c.commit_council_rotation(),
+            Err(ContractError::NoCouncilRotationPending)
+        ));
+        assert_eq!(c.get_council(), acc(COUNCIL));
+    }
+
+    #[test]
+    fn only_the_council_can_move_the_council() {
+        let mut c = deploy();
+        ctx_at(ADMIN, 1, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(NEW_COUNCIL)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_rotation_refuses_a_council_that_would_end_the_gate() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(COUNCIL)),
+            Err(ContractError::CouncilUnchanged)
+        ));
+        ctx_at(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc("hos-extension.testnet")),
+            Err(ContractError::CouncilIsSelf)
+        ));
+    }
+
+    #[test]
+    fn moving_the_council_takes_a_full_access_signature() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 0, 0);
+        assert!(matches!(
+            c.approve_council_rotation(acc(NEW_COUNCIL)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+    }
+
+    #[test]
+    fn the_new_council_gates_what_the_old_one_used_to() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_council_rotation(acc(NEW_COUNCIL)).unwrap();
+        ctx_at(NEW_COUNCIL, 1, UPGRADE_DELAY_NS);
+        c.commit_council_rotation().unwrap();
+        ctx_at(COUNCIL, 1, UPGRADE_DELAY_NS);
+        assert!(matches!(
+            c.add_admin(acc("late.testnet")),
+            Err(ContractError::OnlyCouncil)
+        ));
+        ctx_at(NEW_COUNCIL, 1, UPGRADE_DELAY_NS);
+        assert!(c.add_admin(acc("late.testnet")).is_ok());
+    }
+}
+
+mod legacy_state {
+    use super::*;
+
+    fn as_v1(c: HosExtension) -> crate::legacy::HosExtensionV1 {
+        crate::legacy::HosExtensionV1 {
+            state_version: 1,
+            admins: c.admins,
+            registry: c.registry,
+            recovery: c.recovery,
+            paused: c.paused,
+            version: c.version,
+            treasury: c.treasury,
+            approved_code_hash: c.approved_code_hash,
+            approved_at: c.approved_at,
+            council: c.council,
+            paused_until_ns: c.paused_until_ns,
+            recovery_reset_pending: c.recovery_reset_pending,
+            upgrade_proven: c.upgrade_proven,
+        }
+    }
+
+    #[test]
+    fn a_state_left_at_version_one_migrates_through_its_own_reader() {
+        let c = deploy();
+        let registry = c.registry.clone();
+        let council = c.council.clone();
+        let old = as_v1(c);
+        ctx("hos-extension.testnet", 0);
+        env::state_write(&old);
+        drop(old);
+
+        let migrated = HosExtension::migrate();
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!(migrated.registry, registry);
+        assert_eq!(migrated.council, council);
+        assert!(migrated.pending_council.is_none());
+        assert!(
+            migrated.admins.contains(&acc(ADMIN)),
+            "the shape changed, the data did not"
+        );
+    }
+}
+
+#[test]
+fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
+    let c = deploy();
+    assert_eq!(
+        (STATE_VERSION, near_sdk::borsh::to_vec(&c).unwrap().len()),
+        (2, 136),
+        "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
+         the shape that is deployed today, and update this fixture. A publish that \
+         skips that leaves migrate unable to read what is on the account."
+    );
+}
+
+#[test]
+fn a_sweep_that_does_nothing_returns_the_deposit_to_whoever_paid_it() {
+    let mut c = deploy();
+    ctx(REGISTRY, sweep_deposit());
+    let payer = acc("payer.testnet");
+    let _ = c.after_balance_for_sweep(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        payer.clone(),
+        Ok(U128(0)),
+    );
+    let refunds: Vec<(AccountId, u128)> = near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|r| {
+            let to = r.receiver_id.clone();
+            r.actions.into_iter().filter_map(move |a| match a {
+                near_sdk::mock::MockAction::Transfer { deposit, .. } => {
+                    Some((to.clone(), deposit.as_yoctonear()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(
+        refunds,
+        vec![(payer, sweep_deposit())],
+        "the registry is only the relay, so resting the storage deposit there takes \
+         it from the account that actually paid"
     );
 }

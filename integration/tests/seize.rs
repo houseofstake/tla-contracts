@@ -12,13 +12,34 @@ fn assert_defended(
     result: Result<near_workspaces::result::ExecutionFinalResult, near_workspaces::error::Error>,
     what: &str,
 ) {
-    match result {
-        Err(_) => {}
-        Ok(outcome) => assert!(
-            outcome.is_failure(),
-            "SEIZED via {what}: transaction succeeded on chain\n{outcome:#?}"
-        ),
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            panic!("{what} never reached the contract, so this proves nothing about the guard: {e}")
+        }
+    };
+    assert!(
+        outcome.is_failure(),
+        "SEIZED via {what}: transaction succeeded on chain\n{outcome:#?}"
+    );
+    let refused = refusal(&outcome);
+    assert!(
+        !refused.contains("Failed to deserialize input"),
+        "{what} was rejected for a malformed argument, which happens before the guard runs and \
+         so is not evidence the guard exists: {refused}"
+    );
+}
+
+fn refusal(outcome: &near_workspaces::result::ExecutionFinalResult) -> String {
+    let mut seen: Vec<String> = outcome
+        .receipt_failures()
+        .iter()
+        .map(|f| format!("{f:?}"))
+        .collect();
+    if let Err(e) = outcome.clone().into_result() {
+        seen.push(format!("{e:?}"));
     }
+    seen.join(" | ")
 }
 
 async fn extensions_of(worker: &Worker<Sandbox>, id: &AccountId) -> Result<Vec<String>> {
@@ -159,8 +180,8 @@ async fn the_renter_cannot_reach_the_authority_only_methods() -> Result<()> {
             .call(&alice, "hos_init")
             .args_json(json!({ "config": {
                 "owner_account": fleet.bob.id(),
-                "public_key": null,
-                "authority": fleet.bob.id(),
+                "authority": fleet.extension.id(),
+                "collection_id": fleet.registrar.id(),
                 "payout_account": fleet.bob.id(),
                 "lease_until_ns": far_future.to_string(),
                 "timeout_secs": 3600,

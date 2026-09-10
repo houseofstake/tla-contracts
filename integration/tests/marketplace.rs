@@ -590,6 +590,59 @@ async fn tla_registry_paged_views_serve_the_catalogue_without_an_indexer() -> Re
 }
 
 #[tokio::test]
+async fn an_offset_past_the_end_pages_empty_rather_than_wrapping_to_the_first() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    rent(&fleet, &registry, &tla, "alice").await?;
+    let owner = fleet.bob.id().clone();
+
+    let present = detail_names(
+        &registry,
+        "list_sub_accounts",
+        json!({ "from_index": 0, "limit": 10 }),
+    )
+    .await?;
+    assert_eq!(present.len(), 1, "the name must be pageable at offset zero");
+
+    let beyond = u64::from(u32::MAX) + 1;
+    let wrapped = detail_names(
+        &registry,
+        "list_sub_accounts",
+        json!({ "from_index": beyond, "limit": 10 }),
+    )
+    .await?;
+    assert!(
+        wrapped.is_empty(),
+        "usize is 32 bits in the deployed wasm, so an offset of 2^32 must run off \
+         the end rather than truncate to zero and serve the first page again"
+    );
+
+    let owned: Vec<serde_json::Value> = registry
+        .view("nft_tokens")
+        .args_json(json!({ "from_index": beyond.to_string(), "limit": 10 }))
+        .await?
+        .json()?;
+    assert!(
+        owned.is_empty(),
+        "nft_tokens takes a u128 offset, which truncates the same way"
+    );
+
+    let scoped: Vec<serde_json::Value> = registry
+        .view("nft_tokens_for_owner")
+        .args_json(json!({
+            "account_id": owner,
+            "from_index": beyond.to_string(),
+            "limit": 10,
+        }))
+        .await?
+        .json()?;
+    assert!(owned.is_empty() && scoped.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_wallet_with_many_co_owners_is_still_transferable() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry(&fleet).await?;
@@ -645,6 +698,181 @@ async fn a_wallet_with_many_co_owners_is_still_transferable() -> Result<()> {
         owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
         fleet.relay.id().as_str(),
         "a wallet padded with {added} co-owners must still rotate"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_paid_mint_is_bounded_by_its_tla_binding_and_allowance() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let deposit = NearToken::from_millinear(300);
+
+    fleet
+        .council
+        .call(registry.id(), "add_payment_authority")
+        .args_json(json!({ "account_id": fleet.relay.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let paid_mint = |name: &'static str| {
+        fleet
+            .relay
+            .call(registry.id(), "rent_sub_account_paid")
+            .args_json(json!({
+                "tla_id": tla,
+                "name": name,
+                "owner_account": fleet.bob.id(),
+                "payout_account": fleet.bob.id(),
+                "order_id": format!("ord-{name}"),
+            }))
+            .deposit(deposit)
+            .max_gas()
+    };
+
+    assert!(
+        paid_mint("unbound").transact().await?.is_failure(),
+        "membership alone must not let a relay mint under a namespace"
+    );
+
+    fleet
+        .council
+        .call(registry.id(), "bind_payment_authority_tla")
+        .args_json(json!({
+            "account_id": fleet.relay.id(),
+            "tla_id": tla,
+            "max_mints": "1",
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let minted = paid_mint("bound").transact().await?.into_result()?;
+    if let Some(failure) = minted.receipt_failures().first() {
+        bail!("paid mint receipt failed: {failure:?}");
+    }
+
+    assert!(
+        paid_mint("overrun").transact().await?.is_failure(),
+        "the allowance must bound how much namespace one relay can take"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoking_a_relay_stops_new_mints_and_leaves_settled_ones_alone() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let deposit = NearToken::from_millinear(300);
+
+    let grant = |method: &'static str, args: serde_json::Value| {
+        fleet
+            .council
+            .call(registry.id(), method)
+            .args_json(args)
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+    };
+
+    grant(
+        "add_payment_authority",
+        json!({ "account_id": fleet.relay.id() }),
+    )
+    .transact()
+    .await?
+    .into_result()?;
+    grant(
+        "bind_payment_authority_tla",
+        json!({ "account_id": fleet.relay.id(), "tla_id": tla, "max_mints": "1" }),
+    )
+    .transact()
+    .await?
+    .into_result()?;
+
+    let paid_mint = |name: &'static str| {
+        fleet
+            .relay
+            .call(registry.id(), "rent_sub_account_paid")
+            .args_json(json!({
+                "tla_id": tla,
+                "name": name,
+                "owner_account": fleet.bob.id(),
+                "payout_account": fleet.bob.id(),
+                "order_id": format!("ord-{name}"),
+            }))
+            .deposit(deposit)
+            .max_gas()
+    };
+
+    let settled = paid_mint("settled").transact().await?.into_result()?;
+    if let Some(failure) = settled.receipt_failures().first() {
+        bail!("paid mint receipt failed: {failure:?}");
+    }
+
+    grant(
+        "unbind_payment_authority_tla",
+        json!({ "account_id": fleet.relay.id(), "tla_id": tla }),
+    )
+    .transact()
+    .await?
+    .into_result()?;
+
+    let bound: bool = registry
+        .view("is_payment_authority_bound")
+        .args_json(json!({ "account_id": fleet.relay.id(), "tla_id": tla }))
+        .await?
+        .json()?;
+    assert!(!bound, "unbinding must clear the binding the view reports");
+    assert!(
+        paid_mint("afterunbind").transact().await?.is_failure(),
+        "an unbound relay must lose the namespace even while it keeps membership"
+    );
+
+    let owner: serde_json::Value = registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": "settled" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        owner["owner"],
+        fleet.bob.id().as_str(),
+        "revoking a relay must never reach back into the leases it already paid for"
+    );
+
+    grant(
+        "bind_payment_authority_tla",
+        json!({ "account_id": fleet.relay.id(), "tla_id": tla, "max_mints": "1" }),
+    )
+    .transact()
+    .await?
+    .into_result()?;
+    let used: near_sdk::json_types::U64 = registry
+        .view("payment_authority_used")
+        .args_json(json!({ "account_id": fleet.relay.id(), "tla_id": tla }))
+        .await?
+        .json()?;
+    assert_eq!(
+        used.0, 0,
+        "rebinding issues a fresh allowance, so the council must treat it as a new grant"
+    );
+
+    grant(
+        "remove_payment_authority",
+        json!({ "account_id": fleet.relay.id() }),
+    )
+    .transact()
+    .await?
+    .into_result()?;
+    assert!(
+        paid_mint("afterremoval").transact().await?.is_failure(),
+        "membership is the outer gate, so removing it must refuse a still-bound relay"
     );
     Ok(())
 }

@@ -1,17 +1,20 @@
 mod common;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use common::*;
 use near_sdk::json_types::U128;
 use near_workspaces::types::NearToken;
-use near_workspaces::{AccountId, Contract};
+use near_workspaces::{Account, AccountId, Contract};
 use serde_json::json;
 
 async fn deploy_ft(fleet: &Fleet) -> Result<Contract> {
-    let account = fleet
-        .relay
-        .create_subaccount("ft")
-        .initial_balance(NearToken::from_near(20))
+    deploy_ft_under(&fleet.relay, "ft", NearToken::from_near(20)).await
+}
+
+async fn deploy_ft_under(parent: &Account, label: &str, funding: NearToken) -> Result<Contract> {
+    let account = parent
+        .create_subaccount(label)
+        .initial_balance(funding)
         .transact()
         .await?
         .into_result()?;
@@ -104,6 +107,7 @@ async fn a_name_holding_tokens_cannot_be_deposited_for_sale() -> Result<()> {
         .council
         .call(registry.id(), "add_ft_allowlist")
         .args_json(json!({ "token": ft.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -156,6 +160,7 @@ async fn a_token_holding_name_can_still_leave_custody() -> Result<()> {
         .council
         .call(registry.id(), "add_ft_allowlist")
         .args_json(json!({ "token": ft.id() }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -188,5 +193,116 @@ async fn a_token_holding_name_can_still_leave_custody() -> Result<()> {
             "the exit path must never leave a name owned by nobody"
         );
     }
+    Ok(())
+}
+
+const ALLOWLIST_CAP: usize = 16;
+const CAP_TOKEN_FUNDING: NearToken = NearToken::from_near(5);
+
+async fn fill_allowlist(fleet: &Fleet, registry: &Contract) -> Result<Vec<Contract>> {
+    let root = fleet.worker.root_account()?;
+    let mut tokens = Vec::with_capacity(ALLOWLIST_CAP);
+    for slot in 0..ALLOWLIST_CAP {
+        let ft = deploy_ft_under(&root, &format!("ft{slot}"), CAP_TOKEN_FUNDING).await?;
+        fleet
+            .council
+            .call(registry.id(), "add_ft_allowlist")
+            .args_json(json!({ "token": ft.id() }))
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?
+            .into_result()?;
+        tokens.push(ft);
+    }
+
+    let listed: Vec<String> = registry.view("get_ft_allowlist").await?.json()?;
+    assert_eq!(
+        listed.len(),
+        ALLOWLIST_CAP,
+        "the allowlist did not fill, so the gate below would not be running at its cap"
+    );
+
+    let overflow = deploy_ft_under(&root, "ftover", CAP_TOKEN_FUNDING).await?;
+    let refused = fleet
+        .council
+        .call(registry.id(), "add_ft_allowlist")
+        .args_json(json!({ "token": overflow.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        refused.is_failure(),
+        "the contract cap moved away from {ALLOWLIST_CAP}, so this test is no longer the worst case"
+    );
+    Ok(tokens)
+}
+
+#[tokio::test]
+async fn the_asset_gate_still_clears_a_name_at_a_full_allowlist() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let holder = deploy_holder(&fleet).await?;
+    let tokens = fill_allowlist(&fleet, &registry).await?;
+
+    let clear_name = "clearname";
+    rent(&fleet, &registry, &tla, clear_name).await?;
+    let clear = deposit_into(&fleet, &registry, &holder, &format!("{clear_name}.{tla}")).await?;
+    assert!(
+        clear.is_success(),
+        "querying {ALLOWLIST_CAP} balances plus the gate callback must fit in one call: {clear:#?}"
+    );
+
+    let held_name = "heldname";
+    let tenant = rent(&fleet, &registry, &tla, held_name).await?;
+    let last = tokens.last().expect("the allowlist was filled");
+    fund_with_tokens(&fleet, last, &tenant).await?;
+
+    let blocked = deposit_into(&fleet, &registry, &holder, &format!("{held_name}.{tla}")).await?;
+    let refusal = format!("{:?}", blocked.into_result().err());
+    assert!(
+        refusal.contains("SubAccountHoldsTokens") || refusal.contains("holds_tokens"),
+        "a balance in the last allowlist slot must still be seen at the cap, got {refusal}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_deposit_returns_the_name_at_a_full_allowlist() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let holder = deploy_holder(&fleet).await?;
+    let _tokens = fill_allowlist(&fleet, &registry).await?;
+
+    let name = "giveback";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    let token_id = format!("{name}.{tla}");
+
+    let refused = fleet
+        .bob
+        .call(registry.id(), "nft_transfer_call")
+        .args_json(json!({
+            "receiver_id": holder.id(),
+            "token_id": token_id,
+            "approval_id": null,
+            "memo": null,
+            "msg": "return",
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = refused.receipt_failures().first() {
+        bail!("the give-back chain ran out of room at a full allowlist: {failure:?}");
+    }
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a refused deposit must return the wallet even when the gate fanned out over a full allowlist"
+    );
     Ok(())
 }

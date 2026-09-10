@@ -1,0 +1,38 @@
+[advisories]
+ignore = [
+    # wee_alloc is unmaintained. It is near-sdk's default allocator on wasm32
+    # and the only accepted advisory that reaches a shipped contract. Removing
+    # it means turning off near-sdk's default features, which also drops the
+    # unit-testing harness every contract crate builds against, so it is
+    # tracked upstream rather than patched here.
+    "RUSTSEC-2022-0054",
+
+    # The three below reach the workspace only through near-vm-runner, which is
+    # the sandbox the integration tests run against. Verified absent from the
+    # deployed artifact with
+    # cargo tree -e normal --target wasm32-unknown-unknown -i <crate>,
+    # which prints nothing for each of them.
+    "RUSTSEC-2026-0258",
+    "RUSTSEC-2026-0222",
+    "RUSTSEC-2026-0269",
+
+    # Host-side build and test dependencies, absent from the wasm32 tree by the
+    # same check. anyhow and lru arrive with the sandbox, proc-macro-error3 and
+    # spin with proc macros that do not outlive compilation.
+    "RUSTSEC-2026-0190",
+    "RUSTSEC-2026-0253",
+]
+
+informational_warnings = ["unmaintained", "unsound", "notice"]
+severity_threshold = "low"
+
+# Two transitive proc macro dependencies are yanked upstream, which carries no
+# advisory id and so cannot be listed above. Reported rather than denied,
+# because nothing in this workspace selects either version.
+[yanked]
+enabled = true
+update_index = false
+
+[output]
+quiet = false
+deny = []

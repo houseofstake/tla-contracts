@@ -27,11 +27,31 @@ pub enum Event {
     #[event_version("1.0.0")]
     Sealed { public_key: String, by: AccountId },
     #[event_version("1.0.0")]
+    SealFailed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
     RecoveryResetPending { wallet: AccountId },
     #[event_version("1.0.0")]
     UpgradeApproved { hash: String, by: AccountId },
     #[event_version("1.0.0")]
+    CouncilRotationApproved {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    CouncilRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    CouncilRotated {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     BalanceSkimmed {
+        amount: U128,
+        to: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    SkimFailed {
         amount: U128,
         to: AccountId,
         by: AccountId,

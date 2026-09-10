@@ -12,6 +12,7 @@ pub enum ContractError {
     CannotRemoveLastAdmin,
     InsufficientDeposit,
     InsufficientBalance,
+    AdminSetFull,
     NotEd25519,
     EmptyCode,
     NoApprovedHash,
@@ -22,6 +23,11 @@ pub enum ContractError {
     TransferNeedsHolder,
     RequiresOneYocto,
     UpgradeNotProven,
+    CouncilUnchanged,
+    CouncilIsSelf,
+    NoCouncilRotationPending,
+    OnlyPendingCouncil,
+    CouncilRotationTooYoung,
 }
 
 impl FunctionError for ContractError {

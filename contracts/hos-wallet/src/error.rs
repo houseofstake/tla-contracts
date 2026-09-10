@@ -17,6 +17,9 @@ pub const AUTHORITY_FROZEN: &str =
 pub const INVALID_TIMEOUT: &str = "timeout_secs out of bounds";
 pub const LEASE_IN_PAST: &str = "lease_until_ns must be in the future";
 pub const LEASE_NOT_MONOTONIC: &str = "lease end may not move backwards";
+pub const RETRACTION_NOT_SHORTER: &str = "a retraction may only shorten the lease";
+pub const RETRACTION_NOTICE_TOO_SHORT: &str =
+    "a retraction must leave the holder the full notice period";
 pub const BAD_LEASE_STATE: &str = "state not settable through lease push";
 pub const RESERVE_BREACH: &str = "action would breach the balance reserve";
 pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";

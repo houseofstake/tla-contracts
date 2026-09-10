@@ -144,22 +144,15 @@ async fn tracer_mint_owner_path_rotate_patch() -> Result<()> {
 }
 
 #[tokio::test]
-async fn short_labels_and_foreign_minters_rejected() -> Result<()> {
+async fn a_one_character_label_mints_and_only_the_registry_may_mint() -> Result<()> {
     let fleet = deploy_fleet().await?;
-    let outcome = fleet
-        .registry
-        .call(fleet.registrar.id(), "create_sub_account")
-        .args_json(json!({
-            "name": "ab",
-            "owner_account": fleet.bob.id(),
-            "payout_account": fleet.bob.id(),
-            "lease_until_ns": lease_until_ns(),
-        }))
-        .deposit(NearToken::from_millinear(500))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(!outcome.is_success(), "2-char label must be rejected");
+    let short = mint(&fleet, "a", NearToken::from_near(5)).await?;
+    let lease: serde_json::Value = fleet.worker.view(&short, "hos_lease").await?.json()?;
+    assert_eq!(
+        lease["state"], "Active",
+        "the registrar must hold no label floor of its own, or it refuses a name the registry \
+         has already charged for"
+    );
 
     let outcome = fleet
         .council
@@ -178,6 +171,35 @@ async fn short_labels_and_foreign_minters_rejected() -> Result<()> {
         !outcome.is_success(),
         "non-registry caller must not mint, even council"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_registry_and_the_registrar_agree_on_every_boundary_name() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    fleet
+        .relay
+        .transfer_near(fleet.bob.id(), NearToken::from_near(20))
+        .await?
+        .into_result()?;
+    let longest = "a".repeat(60.min(63usize.saturating_sub(tla.as_str().len())));
+    for name in ["ab", "a-b", "a_b", longest.as_str()] {
+        rent(&fleet, &registry, &tla, name).await?;
+    }
+
+    let refused = rent(&fleet, &registry, &tla, "a").await;
+    assert!(
+        refused.is_err(),
+        "the registry holds the label floor, so a name it would have to refund must never be sold"
+    );
+    let sold: Option<serde_json::Value> = registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": &tla, "name": "a" }))
+        .await?
+        .json()?;
+    assert!(sold.is_none(), "a refused name must leave no row behind");
     Ok(())
 }
 

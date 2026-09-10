@@ -28,10 +28,22 @@ pub enum Event {
         licensee: Option<AccountId>,
     },
     #[event_version("1.0.0")]
+    TlasRegistered {
+        tla_ids: Vec<AccountId>,
+        tla_type: TlaType,
+        premium_category: PremiumCategory,
+        licensee: Option<AccountId>,
+    },
+    #[event_version("1.0.0")]
     TlaActivated {
         tla_id: AccountId,
         expires_at: U64,
         paid_yocto: U128,
+    },
+    #[event_version("1.0.0")]
+    TlasActivated {
+        tla_ids: Vec<AccountId>,
+        expires_at: U64,
     },
     #[event_version("1.0.0")]
     TlaSuspended { tla_id: AccountId, by: AccountId },
@@ -66,6 +78,25 @@ pub enum Event {
     #[event_version("1.0.0")]
     PaymentAuthorityRemoved { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
+    PaymentAuthorityBound {
+        account: AccountId,
+        tla_id: AccountId,
+        max_mints: U64,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    PaymentAuthorityAllowanceLow {
+        account: AccountId,
+        tla_id: AccountId,
+        remaining: U64,
+    },
+    #[event_version("1.0.0")]
+    PaymentAuthorityUnbound {
+        account: AccountId,
+        tla_id: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     RecoveryAuthorityAdded { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
     RecoveryAuthorityRemoved { account: AccountId, by: AccountId },
@@ -85,6 +116,12 @@ pub enum Event {
     FtAllowlistAdded { token: AccountId, by: AccountId },
     #[event_version("1.0.0")]
     FtAllowlistRemoved { token: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
+    SweepableTokenRemoved { token: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
+    LeaseTermChanged { lease_term_ns: U64, by: AccountId },
+    #[event_version("1.0.0")]
+    VenueExitToRegisteredName { full_name: String, to: AccountId },
     #[event_version("1.0.0")]
     BusinessSubCapSet {
         tla_id: AccountId,
@@ -114,6 +151,21 @@ pub enum Event {
         paid_yocto: U128,
     },
     #[event_version("1.0.0")]
+    SubAccountRenewFailed {
+        full_name: String,
+        refunded_yocto: U128,
+    },
+    #[event_version("1.0.0")]
+    PaidRentalOrderReserved {
+        full_name: String,
+        order_id: String,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    PaidRentalOrderReleased { order_id: String },
+    #[event_version("1.0.0")]
+    LeaseSyncFailed { full_name: String, intent: String },
+    #[event_version("1.0.0")]
     PayoutAccountUpdated {
         full_name: String,
         new_payout_account: AccountId,
@@ -129,6 +181,20 @@ pub enum Event {
         amount_yocto: U128,
         reason: String,
     },
+    #[event_version("1.0.0")]
+    MintFundingStranded {
+        full_name: String,
+        tla_id: AccountId,
+        payer: AccountId,
+        account_creation_deposit_yocto: U128,
+        reason: String,
+    },
+    #[event_version("1.0.0")]
+    ParkReleased { full_name: String, by: AccountId },
+    #[event_version("1.0.0")]
+    ParkForced { full_name: String, by: AccountId },
+    #[event_version("1.0.0")]
+    PaidRentalOrderSettled { full_name: String, order_id: String },
     #[event_version("1.0.0")]
     SubAccountTransferred {
         full_name: String,
@@ -163,6 +229,8 @@ pub enum Event {
     #[event_version("1.0.0")]
     Sealed { public_key: String, by: AccountId },
     #[event_version("1.0.0")]
+    SealFailed { public_key: String, by: AccountId },
+    #[event_version("1.0.0")]
     TransferBlockedByBalance {
         full_name: String,
         token: Option<AccountId>,
@@ -186,6 +254,18 @@ pub enum Event {
     ReclaimPendingCleared { full_name: String, by: AccountId },
     #[event_version("1.0.0")]
     UpgradeApproved { hash: String, by: AccountId },
+    #[event_version("1.0.0")]
+    CouncilRotationApproved {
+        new_council: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    CouncilRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    CouncilRotated {
+        new_council: AccountId,
+        by: AccountId,
+    },
     #[event_version("1.0.0")]
     Upgraded { by: AccountId },
 }

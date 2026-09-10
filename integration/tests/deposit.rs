@@ -149,3 +149,60 @@ async fn a_stranger_cannot_withdraw_a_name_deposited_by_someone_else() -> Result
 
     Ok(())
 }
+
+#[tokio::test]
+async fn a_refused_deposit_returns_the_name_inside_the_same_chain() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let holder = deploy_holder(&fleet).await?;
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    let token_id = format!("{name}.{tla}");
+
+    let refused = fleet
+        .bob
+        .call(registry.id(), "nft_transfer_call")
+        .args_json(json!({
+            "receiver_id": holder.id(),
+            "token_id": token_id,
+            "approval_id": null,
+            "memo": null,
+            "msg": "return",
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+
+    for (i, outcome) in refused.receipt_outcomes().iter().enumerate() {
+        println!(
+            "receipt {i}: gas_burnt={} executor={} failed={}",
+            outcome.gas_burnt,
+            outcome.executor_id,
+            outcome.is_failure()
+        );
+    }
+    if let Some(failure) = refused.receipt_failures().first() {
+        bail!("the give-back chain failed: {failure:?}");
+    }
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a receiver that refuses the token must leave the wallet with the original owner"
+    );
+    let sub: serde_json::Value = registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .await?
+        .json()?;
+    assert_eq!(
+        sub["owner"],
+        fleet.bob.id().as_str(),
+        "and the registry index must not record the refused receiver as owner"
+    );
+
+    Ok(())
+}

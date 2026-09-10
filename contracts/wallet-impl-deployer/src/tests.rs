@@ -42,6 +42,32 @@ fn init_rejects_a_council_that_is_the_deployer_itself() {
     let _ = ImplDeployer::new(acc(IMPL), None);
 }
 
+fn key_delete_callback(result: near_sdk::PromiseResult) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(acc(IMPL))
+            .predecessor_account_id(acc(IMPL))
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result],
+    );
+}
+
+#[test]
+fn a_key_that_survived_deletion_is_not_reported_as_deleted() {
+    let mut c = deploy();
+    key_delete_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.gd_on_key_deleted("ed25519:key".to_string(), acc(COUNCIL)));
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("key_delete_failed")));
+    assert!(
+        !logs.iter().any(|l| l.contains(r#""event":"key_deleted""#)),
+        "the launch gate reads this log, so a key that survived must never read as removed"
+    );
+}
+
 fn code() -> Base64VecU8 {
     Base64VecU8::from(vec![7u8; 64])
 }
@@ -274,6 +300,33 @@ fn an_approved_self_upgrade_installs_once_the_window_passes() {
 }
 
 #[test]
+fn the_council_removes_the_key_once_the_upgrade_path_is_proven() {
+    let mut c = deploy();
+    c.upgrade_proven = true;
+    ctx(COUNCIL, 1);
+    let key: near_sdk::PublicKey = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+        .parse()
+        .unwrap();
+    let _ = c.gd_delete_key(key.clone());
+    let deleted: Vec<String> = near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| receipt.actions)
+        .filter_map(|action| match action {
+            near_sdk::mock::MockAction::DeleteKey { public_key, .. } => {
+                Some(public_key.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![String::from(&key)],
+        "this account decides the code under every tenant wallet, so its key removal is the one \
+         the launch gate cannot take on trust"
+    );
+}
+
+#[test]
 #[should_panic(expected = "only council")]
 fn only_the_council_may_remove_a_key() {
     let mut c = deploy();
@@ -311,6 +364,8 @@ fn migrate_drops_a_stuck_deploy_flag_and_a_pending_approval() {
         approved_upgrade_hash: None,
         approved_upgrade_at: None,
         upgrade_proven: false,
+        pending_council: None,
+        pending_council_at: None,
     });
     let migrated = ImplDeployer::migrate();
     assert_eq!(migrated.council, acc(COUNCIL));
@@ -340,4 +395,215 @@ fn state_already_current_survives_a_same_shape_redeploy() {
 fn an_account_with_no_state_refuses_rather_than_writing_a_default() {
     ctx(COUNCIL, 0);
     let _ = ImplDeployer::migrate();
+}
+
+const NEW_COUNCIL: &str = "council2.testnet";
+
+#[test]
+fn a_rotation_installs_the_new_council_once_the_delay_has_run() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+    assert_eq!(
+        c.pending_council(),
+        Some((acc(NEW_COUNCIL), near_sdk::json_types::U64(0)))
+    );
+    ctx_at(NEW_COUNCIL, 1, AFTER_DELAY);
+    c.commit_council_rotation();
+    assert_eq!(c.config().council, acc(NEW_COUNCIL));
+    assert!(c.pending_council().is_none());
+}
+
+#[test]
+#[should_panic(expected = "council rotation must wait out the delay")]
+fn a_rotation_cannot_commit_inside_its_delay() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+    ctx_at(NEW_COUNCIL, 1, DEFAULT_APPROVAL_DELAY_NS - 1);
+    c.commit_council_rotation();
+}
+
+#[test]
+#[should_panic(expected = "only the incoming council")]
+fn the_outgoing_council_cannot_seat_an_account_that_never_signed() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+    ctx_at(COUNCIL, 1, AFTER_DELAY);
+    c.commit_council_rotation();
+}
+
+#[test]
+#[should_panic(expected = "no council rotation has been approved")]
+fn an_approval_can_be_withdrawn_before_it_commits() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+    ctx_at(COUNCIL, 1, 1);
+    c.cancel_council_rotation();
+    assert!(c.pending_council().is_none());
+    ctx_at(COUNCIL, 1, AFTER_DELAY);
+    c.commit_council_rotation();
+}
+
+#[test]
+#[should_panic(expected = "only council")]
+fn only_the_council_can_move_the_council() {
+    let mut c = deploy();
+    ctx_at(PATCH, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+}
+
+#[test]
+#[should_panic(expected = "council must not be this account")]
+fn the_rotation_refuses_a_council_that_would_end_the_gate() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(IMPL));
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn moving_the_council_takes_a_full_access_signature() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 0, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+}
+
+#[test]
+fn the_new_council_gates_what_the_old_one_used_to() {
+    let mut c = deploy();
+    ctx_at(COUNCIL, 1, 0);
+    c.approve_council_rotation(acc(NEW_COUNCIL));
+    ctx_at(NEW_COUNCIL, 1, AFTER_DELAY);
+    c.commit_council_rotation();
+    c.gd_approve(Base58CryptoHash::from([5u8; 32]));
+    assert_eq!(
+        c.approved_hash(),
+        Some(Base58CryptoHash::from([5u8; 32])),
+        "the incoming council must hold the gate the outgoing one handed over"
+    );
+}
+
+fn as_v1(c: ImplDeployer) -> crate::legacy::ImplDeployerV1 {
+    crate::legacy::ImplDeployerV1 {
+        state_version: 1,
+        council: c.council,
+        current_hash: c.current_hash,
+        approved_hash: c.approved_hash,
+        approved_at: c.approved_at,
+        approval_delay_ns: c.approval_delay_ns,
+        deploy_locked_until: c.deploy_locked_until,
+        approved_upgrade_hash: c.approved_upgrade_hash,
+        approved_upgrade_at: c.approved_upgrade_at,
+        upgrade_proven: c.upgrade_proven,
+    }
+}
+
+#[test]
+fn a_state_left_at_version_one_migrates_through_its_own_reader() {
+    let mut c = deploy();
+    c.current_hash = Some([8u8; 32]);
+    let delay = c.approval_delay_ns;
+    let old = as_v1(c);
+    ctx(IMPL, 0);
+    env::state_write(&old);
+    drop(old);
+
+    let migrated = ImplDeployer::migrate();
+    assert_eq!(migrated.state_version, STATE_VERSION);
+    assert_eq!(migrated.council, acc(COUNCIL));
+    assert_eq!(migrated.approval_delay_ns, delay);
+    assert_eq!(
+        migrated.current_hash,
+        Some([8u8; 32]),
+        "the published implementation must survive the shape change"
+    );
+    assert!(migrated.pending_council.is_none());
+}
+
+fn transfers() -> Vec<(AccountId, u128)> {
+    near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|receipt| {
+            let receiver = receipt.receiver_id.clone();
+            receipt
+                .actions
+                .into_iter()
+                .filter_map(move |action| match action {
+                    near_sdk::mock::MockAction::Transfer { deposit, .. } => {
+                        Some((receiver.clone(), deposit.as_yoctonear()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
+fn ctx_with_balance(predecessor: &str, deposit: u128, balance: u128) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(acc(IMPL))
+        .predecessor_account_id(acc(predecessor))
+        .attached_deposit(NearToken::from_yoctonear(deposit))
+        .account_balance(NearToken::from_yoctonear(balance))
+        .build());
+}
+
+#[test]
+fn a_publish_refunds_against_what_it_actually_spent() {
+    let mut c = deploy();
+    let payer = acc("anyone.testnet");
+    let before = 10 * cost();
+    let real_spend = cost() / 4;
+    ctx_with_balance(IMPL, 0, before - real_spend);
+    assert!(c.gd_on_deployed(
+        code_hash(),
+        64,
+        payer.clone(),
+        NearToken::from_yoctonear(cost()),
+        NearToken::from_yoctonear(before),
+        Ok(()),
+    ));
+    assert_eq!(
+        transfers(),
+        vec![(payer, cost() - real_spend)],
+        "the constant is a floor on what the caller attaches, so a publish that \
+         cost less than it must not refund the difference out of this account"
+    );
+}
+
+#[test]
+fn a_publish_that_cost_more_than_was_attached_refunds_nothing() {
+    let mut c = deploy();
+    let payer = acc("anyone.testnet");
+    let before = 10 * cost();
+    ctx_with_balance(IMPL, 0, before - 2 * cost());
+    assert!(c.gd_on_deployed(
+        code_hash(),
+        64,
+        payer,
+        NearToken::from_yoctonear(cost()),
+        NearToken::from_yoctonear(before),
+        Ok(()),
+    ));
+    assert!(
+        transfers().is_empty(),
+        "an underestimate must stop the refund, not run it negative"
+    );
+}
+
+#[test]
+fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
+    let c = deploy();
+    assert_eq!(
+        (
+            crate::STATE_VERSION,
+            near_sdk::borsh::to_vec(&c).unwrap().len()
+        ),
+        (2, 45),
+        "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
+         the shape that is deployed today, and update this fixture. A publish that \
+         skips that leaves migrate unable to read what is on the account."
+    );
 }
