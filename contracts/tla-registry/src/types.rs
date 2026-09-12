@@ -153,12 +153,47 @@ pub struct ParkedEntry {
     pub parked_at: u64,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[borsh(crate = "near_sdk::borsh")]
 #[serde(crate = "near_sdk::serde")]
 pub enum PaidOrderState {
-    InFlight,
+    InFlight {
+        full_name: String,
+        tla_id: AccountId,
+        payer: AccountId,
+        started_at: u64,
+    },
     Settled,
+}
+
+impl PaidOrderState {
+    pub fn in_flight_for(&self, full_name: &str, payer: &AccountId) -> bool {
+        match self {
+            Self::InFlight {
+                full_name: reserved,
+                payer: reserved_payer,
+                ..
+            } => reserved == full_name && reserved_payer == payer,
+            Self::Settled => false,
+        }
+    }
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Default)]
+#[borsh(crate = "near_sdk::borsh")]
+#[serde(crate = "near_sdk::serde")]
+pub struct TlaTerms {
+    pub allocation_fee_usd_micro: Option<U128>,
+    pub tla_rent_usd_micro: Option<U128>,
+    pub sub_fee_usd_micro: Option<U128>,
+}
+
+impl TlaTerms {
+    pub fn is_standard(&self) -> bool {
+        self.allocation_fee_usd_micro.is_none()
+            && self.tla_rent_usd_micro.is_none()
+            && self.sub_fee_usd_micro.is_none()
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
@@ -211,6 +246,7 @@ pub struct DeploymentReadiness {
     pub rate_set: bool,
     pub recovery_wired: bool,
     pub venue_set: bool,
+    pub ft_allowlist_set: bool,
     pub metadata_set: bool,
     pub wiring_sane: bool,
     pub production_terms: bool,

@@ -924,6 +924,11 @@ mod rental {
         assert!(!state.recovery_wired, "no recovery authority yet");
         assert!(!state.venue_set, "no venue yet");
         assert!(
+            !state.ft_allowlist_set,
+            "an empty allowlist skips the balance gate, so a name changes hands \
+             carrying whatever tokens the last holder left in it"
+        );
+        assert!(
             !state.metadata_set,
             "name still derives from the account id"
         );
@@ -939,6 +944,12 @@ mod rental {
         assert!(!c.deployment_readiness().ready, "venue still missing");
         ctx(COUNCIL, 1, 1);
         c.add_venue(acc("venue.testnet")).unwrap();
+        assert!(
+            !c.deployment_readiness().ready,
+            "ft allowlist still missing"
+        );
+        ctx(COUNCIL, 1, 1);
+        c.add_ft_allowlist(acc("usdc.testnet")).unwrap();
         assert!(!c.deployment_readiness().ready, "metadata still missing");
         ctx(ADMIN, 1, 1);
         c.admin_set_nft_metadata("Names".to_string(), "NAME".to_string(), None, None, None)
@@ -1973,6 +1984,215 @@ mod refunds_and_admin {
     }
 }
 
+mod partner_terms {
+    use super::*;
+
+    fn registered_business(c: &mut TlaRegistry) {
+        ctx(ADMIN, 1, 0);
+        c.register_tla(
+            acc(TLA),
+            TlaType::Business,
+            PremiumCategory::Standard,
+            Some(acc(ALICE)),
+        )
+        .unwrap();
+    }
+
+    fn terms(allocation: Option<u128>, rent: Option<u128>, sub: Option<u128>) -> TlaTerms {
+        TlaTerms {
+            allocation_fee_usd_micro: allocation.map(U128),
+            tla_rent_usd_micro: rent.map(U128),
+            sub_fee_usd_micro: sub.map(U128),
+        }
+    }
+
+    #[test]
+    fn a_partner_can_be_given_a_namespace_for_nothing() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), Some(0)))
+            .unwrap();
+
+        ctx(ALICE, 0, 0);
+        assert!(
+            c.activate_tla(acc(TLA)).is_ok(),
+            "a negotiated free namespace must not need the standard allocation fee"
+        );
+    }
+
+    #[test]
+    fn a_negotiated_rate_is_charged_instead_of_the_schedule() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(
+            acc(TLA),
+            terms(
+                Some(7 * crate::pricing::USD_MICRO_PER_DOLLAR),
+                Some(0),
+                None,
+            ),
+        )
+        .unwrap();
+
+        let owed = usd_to_near(7 * crate::pricing::USD_MICRO_PER_DOLLAR);
+        ctx(ALICE, owed.saturating_sub(1), 0);
+        assert!(
+            matches!(
+                c.activate_tla(acc(TLA)),
+                Err(ContractError::InsufficientPayment)
+            ),
+            "the deal price is still a price, not a waiver"
+        );
+        ctx(ALICE, owed, 0);
+        assert!(c.activate_tla(acc(TLA)).is_ok());
+    }
+
+    #[test]
+    fn a_tla_on_standard_terms_pays_the_schedule() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        let scheduled = usd_to_near(
+            c.get_fee_config().tla_allocation_fee_usd_micro.0
+                + fees::base_rent(TLA.len() as u8, &c.get_fee_config()),
+        );
+        ctx(ALICE, scheduled.saturating_sub(1), 0);
+        assert!(matches!(
+            c.activate_tla(acc(TLA)),
+            Err(ContractError::InsufficientPayment)
+        ));
+        ctx(ALICE, scheduled, 0);
+        assert!(c.activate_tla(acc(TLA)).is_ok());
+    }
+
+    #[test]
+    fn a_per_name_rate_overrides_the_global_business_fee() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), None))
+            .unwrap();
+        ctx(ALICE, 0, 0);
+        c.activate_tla(acc(TLA)).unwrap();
+        let scheduled = c
+            .get_rent_price(acc(TLA), "staff".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+        assert!(scheduled > 0, "the schedule must charge something to start");
+
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), Some(0)))
+            .unwrap();
+        assert_eq!(
+            c.get_rent_price(acc(TLA), "staff".to_string())
+                .unwrap()
+                .rent_yocto
+                .0,
+            0,
+            "the quote must follow the agreement, not the fee schedule"
+        );
+    }
+
+    #[test]
+    fn clearing_the_terms_returns_the_tla_to_the_schedule() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), Some(0)))
+            .unwrap();
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(None, None, None)).unwrap();
+
+        assert!(
+            !c.tla_terms.contains_key(&acc(TLA)),
+            "a cleared agreement must leave no override row behind to pay storage on"
+        );
+        assert!(c.get_tla_terms(acc(TLA)).is_standard());
+        ctx(ALICE, 0, 0);
+        assert!(matches!(
+            c.activate_tla(acc(TLA)),
+            Err(ContractError::InsufficientPayment)
+        ));
+    }
+
+    #[test]
+    fn only_the_council_may_write_a_partner_agreement() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(ALICE, 1, 0);
+        assert!(
+            matches!(
+                c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), Some(0))),
+                Err(ContractError::OnlyCouncil)
+            ),
+            "a licensee must not be able to price their own agreement"
+        );
+    }
+
+    #[test]
+    fn a_per_name_rate_is_refused_on_an_open_tla_that_would_ignore_it() {
+        let mut c = deploy_with_open_tla();
+        ctx(COUNCIL, 1, 0);
+        assert!(
+            matches!(
+                c.set_tla_terms(acc(TLA), terms(None, None, Some(0))),
+                Err(ContractError::NotBusinessTla)
+            ),
+            "an open TLA prices names by length tier, so a per-name rate set here \
+             would read as applied and never be charged"
+        );
+        ctx(COUNCIL, 1, 0);
+        assert!(
+            c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), None))
+                .is_ok(),
+            "the allocation and rent halves still apply to an open TLA"
+        );
+    }
+
+    #[test]
+    fn terms_cannot_be_written_for_a_tla_that_does_not_exist() {
+        let mut c = deploy_priced();
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.set_tla_terms(acc("nosuch.testnet"), terms(Some(0), None, None)),
+            Err(ContractError::TlaNotFound)
+        ));
+    }
+
+    #[test]
+    fn a_partner_rate_is_still_bound_by_the_fee_ceiling() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.set_tla_terms(
+                acc(TLA),
+                terms(Some(crate::pricing::MAX_USD_MICRO + 1), None, None)
+            ),
+            Err(ContractError::FeeExceedsCap)
+        ));
+    }
+
+    #[test]
+    fn a_renewal_follows_the_agreement_the_activation_used() {
+        let mut c = deploy_priced();
+        registered_business(&mut c);
+        ctx(COUNCIL, 1, 0);
+        c.set_tla_terms(acc(TLA), terms(Some(0), Some(0), None))
+            .unwrap();
+        ctx(ALICE, 0, 0);
+        c.activate_tla(acc(TLA)).unwrap();
+
+        ctx(ALICE, 0, 1);
+        assert!(
+            c.renew_tla(acc(TLA)).is_ok(),
+            "a partner on free terms must not be billed the schedule at renewal"
+        );
+    }
+}
+
 mod business {
     use super::*;
 
@@ -2168,6 +2388,15 @@ mod business {
         );
 
         ctx(ADMIN, 1, 2);
+        assert!(
+            matches!(
+                c.admin_release_paid_order("ord-4".to_string()),
+                Err(ContractError::PaidOrderStillInFlight)
+            ),
+            "an order may not be released while an honest callback could still land"
+        );
+
+        ctx(ADMIN, 1, crate::admin::MANUAL_ORDER_RELEASE_AFTER_NS + 1);
         assert!(c.admin_release_paid_order("ord-4".to_string()).is_ok());
         assert!(
             matches!(
@@ -2200,6 +2429,169 @@ mod business {
                 Err(ContractError::PaidOrderAlreadySettled)
             ),
             "the hatch must never reopen a payment that already bought a name"
+        );
+    }
+
+    fn parked_business_name(c: &mut TlaRegistry, name: &str) {
+        rent_business_sub(c, name);
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), name.to_string(), acc(ALICE), Ok(true));
+        assert!(c.is_name_re_rentable(acc(TLA), name.to_string()));
+    }
+
+    #[test]
+    fn a_paid_re_rent_pays_the_licensee_rather_than_the_incoming_owner() {
+        let mut c = bound_relay();
+        parked_business_name(&mut c, "staff");
+
+        ctx(CAROL, 0, 2);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-rr".to_string(),
+            )
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let _ =
+            c.on_sub_account_re_rented(settled_for_order("staff", BOB, CAROL, "ord-rr"), Ok(true));
+
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "staff".to_string())
+                .unwrap()
+                .owner,
+            acc(BOB)
+        );
+        assert_eq!(
+            payout_of(&c, "staff"),
+            acc(ALICE),
+            "a re-rent that repointed the payout at the renter would divert the licensee's revenue"
+        );
+
+        ctx(CAROL, 0, 3);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "staff2".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "ord-rr".to_string(),
+                ),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "a settled re-rent order must be as spent as a settled mint order"
+        );
+    }
+
+    #[test]
+    fn a_failed_paid_re_rent_returns_both_the_order_and_the_mint_slot() {
+        let mut c = bound_relay();
+        parked_business_name(&mut c, "staff");
+
+        ctx(CAROL, 0, 2);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-rr".to_string(),
+            )
+            .unwrap();
+        assert_eq!(c.payment_authority_used(acc(CAROL), acc(TLA)).0, 1);
+
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        let _ =
+            c.on_sub_account_re_rented(settled_for_order("staff", BOB, CAROL, "ord-rr"), Ok(false));
+
+        assert_eq!(
+            c.payment_authority_used(acc(CAROL), acc(TLA)).0,
+            0,
+            "a re-rent the wallet refused must not burn an allowance slot the relay never spent"
+        );
+        assert!(c.is_name_re_rentable(acc(TLA), "staff".to_string()));
+
+        ctx(CAROL, 0, 3);
+        assert!(
+            c.rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-rr".to_string(),
+            )
+            .is_ok(),
+            "the customer's payment bought nothing, so the order must be spendable again"
+        );
+    }
+
+    #[test]
+    fn a_late_failure_callback_cannot_release_the_order_that_replaced_it() {
+        let mut c = bound_relay();
+        let creation = c.get_fee_config().account_creation_deposit_yocto.0;
+        let past_hatch = crate::admin::MANUAL_ORDER_RELEASE_AFTER_NS + 1;
+
+        ctx(CAROL, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-5".to_string(),
+            )
+            .unwrap();
+        assert_eq!(c.payment_authority_used(acc(CAROL), acc(TLA)).0, 1);
+
+        ctx(ADMIN, 1, past_hatch);
+        c.admin_release_paid_order("ord-5".to_string()).unwrap();
+        assert_eq!(
+            c.payment_authority_used(acc(CAROL), acc(TLA)).0,
+            0,
+            "the hatch frees an order whose mint will never land, so it must free the \
+             allowance slot that order took as well"
+        );
+
+        ctx(CAROL, creation, past_hatch + 1);
+        let _ = c
+            .rent_sub_account_paid(
+                acc(TLA),
+                "staff2".to_string(),
+                acc(BOB),
+                acc(ALICE),
+                "ord-5".to_string(),
+            )
+            .unwrap();
+        assert_eq!(c.payment_authority_used(acc(CAROL), acc(TLA)).0, 1);
+
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_sub_account_created_paid(
+            settled_for_order("staff", BOB, CAROL, "ord-5"),
+            Ok(MintOutcome::CreationFailed),
+        );
+
+        assert_eq!(
+            c.payment_authority_used(acc(CAROL), acc(TLA)).0,
+            1,
+            "the stale callback belongs to a reservation that is already gone, so it \
+             must not free the slot the live reservation is holding"
+        );
+        ctx(CAROL, creation, past_hatch + 2);
+        assert!(
+            matches!(
+                c.rent_sub_account_paid(
+                    acc(TLA),
+                    "other".to_string(),
+                    acc(BOB),
+                    acc(ALICE),
+                    "ord-5".to_string(),
+                ),
+                Err(ContractError::PaidOrderAlreadySettled)
+            ),
+            "the live reservation must still hold the order id after the stale callback"
         );
     }
 
@@ -2416,8 +2808,51 @@ mod business {
             .unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
         ctx(ALICE, 1, 3);
-        c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        let _ = c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        assert!(
+            c.get_retraction_at(acc(TLA), "staff".to_string()).is_some(),
+            "the registry must not clear the retraction until the wallet lease is restored"
+        );
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_retraction_canceled(format!("staff.{TLA}"), acc(ALICE));
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    #[test]
+    fn a_cancel_the_wallet_refuses_leaves_the_retraction_standing() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_retraction_scheduled(format!("staff.{TLA}"), acc(ALICE));
+        ctx(ALICE, 1, 3);
+        let _ = c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_retraction_canceled(format!("staff.{TLA}"), acc(ALICE));
+        assert!(
+            c.get_retraction_at(acc(TLA), "staff".to_string()).is_some(),
+            "a failed lease restore must not leave the registry claiming the lease is safe"
+        );
+    }
+
+    #[test]
+    fn a_schedule_the_wallet_refuses_rolls_the_registry_back() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
+            .unwrap();
+        assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_retraction_scheduled(format!("staff.{TLA}"), acc(ALICE));
+        assert!(
+            c.get_retraction_at(acc(TLA), "staff".to_string()).is_none(),
+            "a failed lease shortening must not leave a retraction the wallet never applied"
+        );
     }
 
     #[test]
@@ -2591,7 +3026,9 @@ mod business {
             .unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
         ctx(ALICE, 1, 3);
-        c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        let _ = c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_retraction_canceled(format!("staff.{TLA}"), acc(ALICE));
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
     }
 
@@ -4700,10 +5137,144 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
             crate::STATE_VERSION,
             near_sdk::borsh::to_vec(&c).unwrap().len()
         ),
-        (2, 616),
+        (4, 621),
         "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
          the shape that is deployed today, and update this fixture. A publish that \
          skips that leaves migrate unable to read what is on the account."
+    );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn stored_value_shapes() -> Vec<(&'static str, String)> {
+    let sample = |bytes: Vec<u8>| hex(&bytes);
+    vec![
+        (
+            "TlaEntry",
+            sample(
+                near_sdk::borsh::to_vec(&TlaEntry {
+                    tla_type: TlaType::Business,
+                    status: TlaStatus::Active,
+                    licensee: Some(acc(ALICE)),
+                    premium_category: PremiumCategory::Standard,
+                    activated_at: 1,
+                    expires_at: 2,
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "SubAccountEntry",
+            sample(
+                near_sdk::borsh::to_vec(&SubAccountEntry {
+                    owner: acc(BOB),
+                    tla_id: acc(TLA),
+                    payout_account: acc(ALICE),
+                    rented_at: 1,
+                    expires_at: 2,
+                    retraction_at: Some(3),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "ParkedEntry",
+            sample(
+                near_sdk::borsh::to_vec(&ParkedEntry {
+                    tla_id: acc(TLA),
+                    parked_at: 1,
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "PaidOrderState::InFlight",
+            sample(
+                near_sdk::borsh::to_vec(&PaidOrderState::InFlight {
+                    full_name: "a.tla".to_string(),
+                    tla_id: acc(TLA),
+                    payer: acc(CAROL),
+                    started_at: 1,
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "PaidOrderState::Settled",
+            sample(near_sdk::borsh::to_vec(&PaidOrderState::Settled).unwrap()),
+        ),
+        (
+            "TlaTerms",
+            sample(
+                near_sdk::borsh::to_vec(&TlaTerms {
+                    allocation_fee_usd_micro: Some(U128(1)),
+                    tla_rent_usd_micro: Some(U128(2)),
+                    sub_fee_usd_micro: Some(U128(3)),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "ActivityRecord",
+            sample(
+                near_sdk::borsh::to_vec(&ActivityRecord {
+                    event: "e".to_string(),
+                    account: "a".to_string(),
+                    block_height: 1,
+                    block_timestamp: 2,
+                })
+                .unwrap(),
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn the_shape_of_every_stored_value_is_pinned_too() {
+    let pinned = [
+        (
+            "TlaEntry",
+            "0001010d000000616c6963652e746573746e6574020100000000000000\
+             0200000000000000",
+        ),
+        (
+            "SubAccountEntry",
+            "0b000000626f622e746573746e6574050000006d79746c61\
+             0d000000616c6963652e746573746e65740100000000000000\
+             0200000000000000010300000000000000",
+        ),
+        ("ParkedEntry", "050000006d79746c610100000000000000"),
+        (
+            "PaidOrderState::InFlight",
+            "0005000000612e746c61050000006d79746c61\
+             0d0000006361726f6c2e746573746e65740100000000000000",
+        ),
+        ("PaidOrderState::Settled", "01"),
+        (
+            "TlaTerms",
+            "0101000000000000000000000000000000010200000000000000\
+             0000000000000000010300000000000000\
+             0000000000000000",
+        ),
+        (
+            "ActivityRecord",
+            "01000000650100000061010000000000000002000000000000\
+             00",
+        ),
+    ];
+    let pinned: Vec<(&str, String)> = pinned
+        .iter()
+        .map(|(n, h)| (*n, h.chars().filter(|c| !c.is_whitespace()).collect()))
+        .collect();
+    assert_eq!(
+        stored_value_shapes(),
+        pinned,
+        "a value stored inside a collection changed shape. The contract-struct guard \
+         cannot see this, because maps serialise their values lazily and the struct \
+         itself only holds their prefixes. Bump STATE_VERSION, add a reader for the \
+         shape that is deployed today, and update this fixture."
     );
 }
 

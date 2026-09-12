@@ -7,6 +7,7 @@ use near_sdk::{env, near, AccountId};
 use std::collections::BTreeSet;
 
 pub(crate) const MAX_ALLOWLIST_SIZE: u32 = 16;
+pub(crate) const MANUAL_ORDER_RELEASE_AFTER_NS: u64 = 3_600_000_000_000;
 const LOG_BUDGET_BYTES: usize = 16_384;
 const LOG_ENVELOPE_BYTES: usize = 512;
 pub(crate) const MAX_TLA_BATCH: usize = 650;
@@ -672,8 +673,20 @@ impl TlaRegistry {
         match self.paid_order_ids.get(&order_id) {
             None => Err(ContractError::PaidOrderNotFound),
             Some(PaidOrderState::Settled) => Err(ContractError::PaidOrderAlreadySettled),
-            Some(PaidOrderState::InFlight) => {
+            Some(PaidOrderState::InFlight {
+                started_at,
+                payer,
+                tla_id,
+                ..
+            }) => {
+                let held_for = env::block_timestamp().saturating_sub(*started_at);
+                if held_for < MANUAL_ORDER_RELEASE_AFTER_NS {
+                    return Err(ContractError::PaidOrderStillInFlight);
+                }
+                let payer = payer.clone();
+                let tla_id = tla_id.clone();
                 self.paid_order_ids.remove(&order_id);
+                self.release_authority_mint(&payer, &tla_id);
                 Event::PaidRentalOrderReleased { order_id }.emit();
                 Ok(())
             }

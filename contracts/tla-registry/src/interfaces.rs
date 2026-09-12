@@ -14,6 +14,13 @@ pub trait HosExtension {
         cause: RotationCause,
         asked_by: Option<AccountId>,
     );
+    fn re_rent(
+        &mut self,
+        wallet: AccountId,
+        new_owner: AccountId,
+        payout_account: AccountId,
+        lease_until_ns: U64,
+    );
     fn push_lease(&mut self, wallet: AccountId, lease_until_ns: U64, state: OperatingState);
     fn retract_lease(&mut self, wallet: AccountId, lease_until_ns: U64);
     fn set_payout(

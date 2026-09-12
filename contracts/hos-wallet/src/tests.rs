@@ -1176,6 +1176,107 @@ fn parking_leaves_only_the_authority_and_keeps_the_payout_account() {
 }
 
 #[test]
+fn a_re_rent_hands_the_new_renter_a_wallet_they_can_actually_use() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(OWNER, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+    assert_eq!(
+        c.hos_lease().frozen,
+        FreezeState::SelfFrozen,
+        "a park keeps the record, nobody owns the name to unfreeze it"
+    );
+
+    ctx(AUTHORITY, 1, now_ns() + 3);
+    c.hos_re_rent(acc(BUYER), acc(PAYOUT), U64(now_ns() + YEAR_NS));
+    assert_eq!(
+        c.hos_lease().frozen,
+        FreezeState::Unfrozen,
+        "the previous holder's own freeze must not travel with the name to a \
+         renter who just paid for it"
+    );
+    assert_eq!(c.nft_item_info().status, ItemStatus::Active);
+}
+
+#[test]
+fn an_authority_freeze_still_survives_a_rotation() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_re_rent(acc(BUYER), acc(PAYOUT), U64(now_ns() + YEAR_NS));
+    assert_eq!(
+        c.hos_lease().frozen,
+        FreezeState::AuthorityFrozen,
+        "an operator hold is not the outgoing holder's switch and must persist"
+    );
+}
+
+#[test]
+fn a_re_rent_installs_the_owner_the_payout_and_the_lease_in_one_call() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+
+    let until = now_ns() + YEAR_NS;
+    ctx(AUTHORITY, 1, now_ns() + 3);
+    assert!(c.hos_re_rent(acc(BUYER), acc("licensee.testnet"), U64(until)));
+
+    assert!(c.w_is_extension_enabled(acc(BUYER)));
+    assert_eq!(
+        c.hos_payout_account(),
+        acc("licensee.testnet"),
+        "the registry names the payout, so the incoming owner must not overwrite it"
+    );
+    let lease = c.hos_lease();
+    assert_eq!(lease.state, OperatingState::Active);
+    assert_eq!(lease.lease_until_ns, U64(until));
+}
+
+#[test]
+#[should_panic(expected = "a re-rent must go through hos_re_rent")]
+fn a_re_rent_cannot_be_driven_through_the_transfer_path() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::ReRent, None);
+}
+
+#[test]
+#[should_panic(expected = "receiver must not be this account")]
+fn a_re_rent_cannot_point_the_payout_at_the_wallet() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + 2);
+    c.hos_transfer_ownership(None, RotationCause::Reclaim, None);
+    ctx(AUTHORITY, 1, now_ns() + 3);
+    c.hos_re_rent(acc(BUYER), acc(WALLET), U64(now_ns() + YEAR_NS));
+}
+
+#[test]
+#[should_panic(expected = "lease_until_ns must be in the future")]
+fn a_re_rent_cannot_install_a_term_that_has_already_run_out() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(AUTHORITY, 1, now_ns() + HOUR_NS);
+    c.hos_re_rent(acc(BUYER), acc(PAYOUT), U64(now_ns() + 2));
+}
+
+#[test]
+#[should_panic(expected = "lease end may not move backwards")]
+fn a_re_rent_cannot_shorten_the_lease_the_registry_already_sold() {
+    let mut c = init(now_ns(), now_ns() + YEAR_NS);
+    ctx(AUTHORITY, 1, now_ns() + 1);
+    c.hos_re_rent(acc(BUYER), acc(PAYOUT), U64(now_ns() + HOUR_NS));
+}
+
+#[test]
+#[should_panic(expected = "only the lease authority")]
+fn only_the_authority_can_re_rent() {
+    let mut c = init(now_ns(), now_ns() + 1);
+    ctx(OWNER, 1, now_ns() + 2);
+    c.hos_re_rent(acc(BUYER), acc(PAYOUT), U64(now_ns() + YEAR_NS));
+}
+
+#[test]
 #[should_panic(expected = "only the lease authority")]
 fn the_renter_cannot_transfer_ownership() {
     let mut c = deploy();

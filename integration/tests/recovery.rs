@@ -482,3 +482,75 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
     assert_eq!(round, Some(1), "a settled verdict must advance the round");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_re_rent_runs_the_same_post_rotation_path_a_transfer_does() -> Result<()> {
+    const SHORT_TERM_NS: u64 = 60 * 1_000_000_000;
+    const BLOCKS_PAST_TERM_AND_GRACE: u64 = 4_000;
+
+    let fleet = deploy_fleet().await?;
+    let attestation = watcher_key(51);
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let recovery = fleet.recovery.id().clone();
+    let tla = fleet.registrar.id().clone();
+    let tenant = rent(&fleet, &registry, &tla, "lapsed").await?;
+
+    arm_and_install_name_policy(&fleet, &fleet.recovery, &tenant, &attestation).await?;
+    let installed: Option<u32> = fleet
+        .worker
+        .view(&recovery, "timelock_of")
+        .args_json(json!({ "account": tenant }))
+        .await?
+        .json()?;
+    assert!(
+        installed.is_some(),
+        "the holder must really hold a recovery policy, or the clearing below proves nothing"
+    );
+
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+    fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": "lapsed" }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let price = rent_price(&registry, &tla, "lapsed").await?;
+    let re_rented = fleet
+        .relay
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": "lapsed" }))
+        .deposit(NearToken::from_yoctonear(price))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = re_rented.receipt_failures().first() {
+        bail!("re-rent failed: {failure:?}");
+    }
+    assert!(
+        re_rented
+            .logs()
+            .iter()
+            .any(|l| l.contains("force_transfer_completed")),
+        "the re-rent receipt itself must run the post-rotation path, or a policy armed \
+         against this name outlives the holder who armed it"
+    );
+
+    let after: Option<u32> = fleet
+        .worker
+        .view(&recovery, "timelock_of")
+        .args_json(json!({ "account": tenant }))
+        .await?
+        .json()?;
+    assert_eq!(
+        after, None,
+        "the incoming renter must not inherit the previous holder's recovery policy"
+    );
+    Ok(())
+}

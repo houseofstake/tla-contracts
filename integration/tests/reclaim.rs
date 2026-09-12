@@ -102,6 +102,102 @@ async fn an_expired_lease_is_reclaimed_and_the_name_is_parked() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_paid_re_rent_keeps_the_payout_the_registry_was_told_to_use() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "employee";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+    fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    for (method, args) in [
+        (
+            "add_payment_authority",
+            json!({ "account_id": fleet.relay.id() }),
+        ),
+        (
+            "bind_payment_authority_tla",
+            json!({ "account_id": fleet.relay.id(), "tla_id": tla, "max_mints": "4" }),
+        ),
+    ] {
+        fleet
+            .council
+            .call(registry.id(), method)
+            .args_json(args)
+            .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?
+            .into_result()?;
+    }
+
+    let re_rented = fleet
+        .relay
+        .call(registry.id(), "rent_sub_account_paid")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": name,
+            "owner_account": fleet.bob.id(),
+            "payout_account": fleet.council.id(),
+            "order_id": "ord-employee",
+        }))
+        .deposit(near_workspaces::types::NearToken::from_millinear(300))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = re_rented.receipt_failures().first() {
+        bail!("paid re-rent receipt failed: {failure:?}");
+    }
+
+    let wallet_payout: String = fleet
+        .worker
+        .view(&tenant, "hos_payout_account")
+        .await?
+        .json()?;
+    let recorded: serde_json::Value = registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .await?
+        .json()?;
+
+    assert_eq!(
+        recorded["payout_account"],
+        fleet.council.id().as_str(),
+        "the registry must keep the payout it was handed, not the incoming owner"
+    );
+    assert_eq!(
+        wallet_payout,
+        recorded["payout_account"].as_str().unwrap_or_default(),
+        "a sweep would pay the wrong account whenever the wallet and the registry disagree"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "the incoming owner must still receive the name"
+    );
+
+    let lease: serde_json::Value = fleet.worker.view(&tenant, "hos_lease").await?.json()?;
+    assert_eq!(
+        lease["state"], "Active",
+        "settlement must not report success while the wallet is still parked"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_re_rented_name_reaches_its_new_renter_in_working_order() -> Result<()> {
     let fleet = deploy_fleet().await?;
     let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;

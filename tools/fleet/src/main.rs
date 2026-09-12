@@ -1,10 +1,53 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-const RPC: &str = "https://rpc.testnet.near.org";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Network {
+    Testnet,
+    Mainnet,
+}
+
+impl Network {
+    fn rpc(self) -> &'static str {
+        match self {
+            Self::Testnet => "https://rpc.testnet.near.org",
+            Self::Mainnet => "https://rpc.mainnet.near.org",
+        }
+    }
+
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::Testnet => "testnet",
+            Self::Mainnet => "mainnet",
+        }
+    }
+}
+
+impl fmt::Display for Network {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.cli_name())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Test,
+    Production,
+}
+
+impl fmt::Display for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Test => "test",
+            Self::Production => "production",
+        })
+    }
+}
 
 struct Target {
     var: &'static str,
@@ -21,6 +64,30 @@ impl Target {
 
 fn account(var: &str) -> String {
     std::env::var(var).unwrap_or_else(|_| panic!("set {var} to the account this run should act on"))
+}
+
+fn network() -> Result<Network> {
+    match std::env::var("NETWORK").unwrap_or_default().as_str() {
+        "testnet" => Ok(Network::Testnet),
+        "mainnet" => Ok(Network::Mainnet),
+        "" => bail!(
+            "set NETWORK to testnet or mainnet. There is no default, because a default is \
+             how a mainnet run happens by accident"
+        ),
+        other => bail!("NETWORK={other} is not a network this tool knows"),
+    }
+}
+
+fn profile() -> Result<Profile> {
+    match std::env::var("FLEET_PROFILE").unwrap_or_default().as_str() {
+        "test" => Ok(Profile::Test),
+        "production" => Ok(Profile::Production),
+        "" => bail!(
+            "set FLEET_PROFILE to test or production. It decides whether a fleet account \
+             still holding a FullAccess key is a warning or a refusal"
+        ),
+        other => bail!("FLEET_PROFILE={other} is not a profile this tool knows"),
+    }
 }
 
 const FLEET: [Target; 5] = [
@@ -55,6 +122,8 @@ const FLEET: [Target; 5] = [
         probe: "get_stats",
     },
 ];
+
+const WALLET_ARTIFACT: &str = "hos_wallet";
 
 fn repo_root() -> Result<PathBuf> {
     let out = Command::new("git")
@@ -95,6 +164,83 @@ fn tag_hashes(tag: &str) -> Result<Vec<(String, String)>> {
     Ok(found)
 }
 
+enum Release {
+    Tagged {
+        name: String,
+        commit: String,
+        hashes: Vec<(String, String)>,
+    },
+    Planned {
+        name: String,
+        hashes: Vec<(String, String)>,
+    },
+}
+
+impl Release {
+    fn name(&self) -> &str {
+        match self {
+            Self::Tagged { name, .. } | Self::Planned { name, .. } => name,
+        }
+    }
+
+    fn hashes(&self) -> &[(String, String)] {
+        match self {
+            Self::Tagged { hashes, .. } | Self::Planned { hashes, .. } => hashes,
+        }
+    }
+
+    fn want(&self, tag_name: &str) -> Result<String> {
+        self.hashes()
+            .iter()
+            .find(|(n, _)| n == tag_name)
+            .map(|(_, h)| h.clone())
+            .with_context(|| format!("{} names no artifact {tag_name}", self.name()))
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Tagged { name, commit, .. } => format!("tag {name} -> {commit}"),
+            Self::Planned { name, .. } => {
+                format!("plan {name}, not bound to a source commit")
+            }
+        }
+    }
+}
+
+fn manifest_path(root: &Path, name: &str) -> PathBuf {
+    staged_dir(root, name).join("manifest.json")
+}
+
+fn resolve(root: &Path, name: &str) -> Result<Release> {
+    if let Ok(commit) = tag_commit(name) {
+        return Ok(Release::Tagged {
+            name: name.to_string(),
+            commit,
+            hashes: tag_hashes(name)?,
+        });
+    }
+    let path = manifest_path(root, name);
+    let body = std::fs::read(&path).with_context(|| {
+        format!(
+            "{name} is neither a git tag nor a plan; {} does not exist. Run \
+             `fleet plan {name}` after building, or name a tag",
+            path.display()
+        )
+    })?;
+    let doc: serde_json::Value = serde_json::from_slice(&body)?;
+    let table = doc["artifacts"]
+        .as_object()
+        .with_context(|| format!("{} carries no artifact table", path.display()))?;
+    let hashes = table
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|h| (k.clone(), h.to_string())))
+        .collect();
+    Ok(Release::Planned {
+        name: name.to_string(),
+        hashes,
+    })
+}
+
 fn bs58_of(bytes: &[u8]) -> String {
     bs58::encode(Sha256::digest(bytes)).into_string()
 }
@@ -113,42 +259,165 @@ fn embedded_commit(bytes: &[u8]) -> Option<String> {
         })
 }
 
-fn rpc(body: serde_json::Value) -> Result<serde_json::Value> {
-    let resp: serde_json::Value = ureq::post(RPC)
+fn rpc(net: Network, body: serde_json::Value) -> Result<serde_json::Value> {
+    let resp: serde_json::Value = ureq::post(net.rpc())
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())?
         .into_json()?;
+    if !resp["error"].is_null() {
+        bail!("{net} rpc refused the query: {}", resp["error"]);
+    }
     Ok(resp)
 }
 
-fn chain_hash(account: &str) -> Result<String> {
-    let v = rpc(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "query",
-        "params": {"request_type": "view_account", "finality": "final", "account_id": account}
-    }))?;
+fn chain_hash(net: Network, account: &str) -> Result<String> {
+    let v = rpc(
+        net,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "query",
+            "params": {"request_type": "view_account", "finality": "final", "account_id": account}
+        }),
+    )?;
     v["result"]["code_hash"]
         .as_str()
         .map(str::to_string)
-        .with_context(|| format!("no code_hash for {account}"))
+        .with_context(|| format!("no code_hash for {account} on {net}"))
 }
 
-fn probe(account: &str, method: &str) -> Result<()> {
-    let v = rpc(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "query",
-        "params": {"request_type": "call_function", "finality": "final",
-                   "account_id": account, "method_name": method, "args_base64": "e30="}
-    }))?;
+fn view(net: Network, account: &str, method: &str) -> Result<serde_json::Value> {
+    let v = rpc(
+        net,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "query",
+            "params": {"request_type": "call_function", "finality": "final",
+                       "account_id": account, "method_name": method, "args_base64": "e30="}
+        }),
+    )?;
     if let Some(err) = v["result"]["error"].as_str() {
         bail!("{account}.{method} failed: {err}");
     }
-    if v["result"]["result"].is_null() {
-        bail!("{account}.{method} returned nothing: {v}");
+    let raw = v["result"]["result"]
+        .as_array()
+        .with_context(|| format!("{account}.{method} returned nothing: {v}"))?;
+    let bytes: Vec<u8> = raw
+        .iter()
+        .filter_map(|b| b.as_u64())
+        .map(|b| b as u8)
+        .collect();
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("{account}.{method} did not answer with json"))
+}
+
+fn probe(net: Network, account: &str, method: &str) -> Result<()> {
+    view(net, account, method).map(|_| ())
+}
+
+fn staged_dir(root: &Path, name: &str) -> PathBuf {
+    root.join("artifacts").join(name)
+}
+
+fn artifact_path(root: &Path, artifact: &str) -> PathBuf {
+    root.join("target/near")
+        .join(artifact)
+        .join(format!("{artifact}.wasm"))
+}
+
+fn built_artifact(root: &Path, artifact: &str) -> Result<Vec<u8>> {
+    let src = artifact_path(root, artifact);
+    std::fs::read(&src).with_context(|| {
+        format!(
+            "read {}. Only `cargo near build` refreshes target/near; cargo build does not",
+            src.display()
+        )
+    })
+}
+
+fn newest_source_change(root: &Path) -> SystemTime {
+    let mut newest = SystemTime::UNIX_EPOCH;
+    for dir in ["contracts", "crates"] {
+        scan_sources(&root.join(dir), &mut newest);
+    }
+    newest
+}
+
+fn scan_sources(dir: &Path, newest: &mut SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_sources(&path, newest);
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default();
+        let compiled_in = name == "Cargo.toml"
+            || (path.extension().is_some_and(|e| e == "rs") && name != "tests.rs");
+        if !compiled_in {
+            continue;
+        }
+        if let Ok(changed) = entry.metadata().and_then(|m| m.modified()) {
+            *newest = (*newest).max(changed);
+        }
+    }
+}
+
+fn assert_freshly_built(root: &Path, artifact: &str, newest_source: SystemTime) -> Result<()> {
+    let path = artifact_path(root, artifact);
+    let built_at = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .with_context(|| format!("stat {}", path.display()))?;
+    if built_at < newest_source {
+        bail!(
+            "{} is older than the newest contract source. Nothing binds these bytes to a \
+             commit, so a stale artifact would be planned, hashed and deployed as if it \
+             were the code you just tested. Run cargo near build for every contract first",
+            path.display()
+        );
     }
     Ok(())
 }
 
-fn staged_dir(root: &Path, tag: &str) -> PathBuf {
-    root.join("artifacts").join(tag)
+fn artifact_names() -> Vec<(String, String)> {
+    FLEET
+        .iter()
+        .map(|t| (t.artifact.to_string(), t.tag_name.to_string()))
+        .chain(std::iter::once((
+            WALLET_ARTIFACT.to_string(),
+            WALLET_ARTIFACT.replace('_', "-"),
+        )))
+        .collect()
+}
+
+fn plan(name: &str) -> Result<()> {
+    let root = repo_root()?;
+    let dest = staged_dir(&root, name);
+    std::fs::create_dir_all(&dest)?;
+    let mut table = serde_json::Map::new();
+    let newest_source = newest_source_change(&root);
+
+    for (artifact, tag_name) in artifact_names() {
+        assert_freshly_built(&root, &artifact, newest_source)?;
+        let bytes = built_artifact(&root, &artifact)?;
+        let hash = bs58_of(&bytes);
+        std::fs::write(dest.join(format!("{artifact}.wasm")), &bytes)?;
+        println!("planned {tag_name:<22} {hash} ({} bytes)", bytes.len());
+        table.insert(tag_name, serde_json::Value::String(hash));
+    }
+
+    let doc = serde_json::json!({ "name": name, "artifacts": table });
+    std::fs::write(manifest_path(&root, name), serde_json::to_vec_pretty(&doc)?)?;
+    println!(
+        "\n{} artifact(s) planned at {}\nthese bytes carry no source-commit binding; \
+         only a tagged release does",
+        table_len(&doc),
+        dest.display()
+    );
+    Ok(())
+}
+
+fn table_len(doc: &serde_json::Value) -> usize {
+    doc["artifacts"].as_object().map_or(0, serde_json::Map::len)
 }
 
 fn stage(tag: &str) -> Result<()> {
@@ -160,11 +429,7 @@ fn stage(tag: &str) -> Result<()> {
 
     for (name, want) in &table {
         let artifact = name.replace('-', "_");
-        let src = root
-            .join("target/near")
-            .join(&artifact)
-            .join(format!("{artifact}.wasm"));
-        let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
+        let bytes = built_artifact(&root, &artifact)?;
 
         let got = bs58_of(&bytes);
         if &got != want {
@@ -182,34 +447,35 @@ fn stage(tag: &str) -> Result<()> {
     Ok(())
 }
 
-fn load_staged(root: &Path, tag: &str, artifact: &str) -> Result<Vec<u8>> {
-    let path = staged_dir(root, tag).join(format!("{artifact}.wasm"));
-    std::fs::read(&path)
-        .with_context(|| format!("{} missing; run `fleet stage {tag}` first", path.display()))
+fn load_staged(root: &Path, name: &str, artifact: &str) -> Result<Vec<u8>> {
+    let path = staged_dir(root, name).join(format!("{artifact}.wasm"));
+    std::fs::read(&path).with_context(|| {
+        format!(
+            "{} missing; run `fleet stage {name}` or `fleet plan {name}` first",
+            path.display()
+        )
+    })
 }
 
-fn verify(tag: &str) -> Result<bool> {
+fn verify(net: Network, release: &Release) -> Result<bool> {
     let root = repo_root()?;
-    let commit = tag_commit(tag)?;
-    let table = tag_hashes(tag)?;
     let mut clean = true;
 
-    println!("tag {tag} -> {commit}\n");
-    println!("{:<26} {:<46} state", "account", "on chain");
+    println!("{} on {net}\n", release.describe());
+    println!("{:<32} {:<46} state", "account", "on chain");
     for t in &FLEET {
-        let want = table
-            .iter()
-            .find(|(n, _)| n == t.tag_name)
-            .map(|(_, h)| h.clone())
-            .with_context(|| format!("tag has no line for {}", t.tag_name))?;
-        let bytes = load_staged(&root, tag, t.artifact)?;
-        let staged = bs58_of(&bytes);
-        if staged != want {
-            bail!("{}: staged artifact drifted from the tag", t.account());
+        let want = release.want(t.tag_name)?;
+        let bytes = load_staged(&root, release.name(), t.artifact)?;
+        if bs58_of(&bytes) != want {
+            bail!(
+                "{}: staged artifact drifted from {}",
+                t.account(),
+                release.name()
+            );
         }
-        let on_chain = chain_hash(&t.account())?;
+        let on_chain = chain_hash(net, &t.account())?;
         let state = if on_chain == want {
-            match probe(&t.account(), t.probe) {
+            match probe(net, &t.account(), t.probe) {
                 Ok(()) => "current",
                 Err(_) => {
                     clean = false;
@@ -220,19 +486,24 @@ fn verify(tag: &str) -> Result<bool> {
             clean = false;
             "stale"
         };
-        println!("{:<26} {:<46} {}", t.account(), on_chain, state);
+        println!("{:<32} {:<46} {}", t.account(), on_chain, state);
     }
     Ok(clean)
 }
 
-fn deploy_one(t: &Target, path: &Path, want: &str) -> Result<()> {
-    let previous = chain_hash(&t.account())?;
+fn signer() -> String {
+    std::env::var("SIGN_WITH").unwrap_or_else(|_| "sign-with-legacy-keychain".to_string())
+}
+
+fn deploy_one(net: Network, t: &Target, path: &Path, want: &str) -> Result<()> {
+    let previous = chain_hash(net, &t.account())?;
     if previous == want {
-        println!("{:<26} already current, skipping", t.account());
+        println!("{:<32} already current, skipping", t.account());
         return Ok(());
     }
-    println!("{:<26} {previous} -> {want}", t.account());
+    println!("{:<32} {previous} -> {want}", t.account());
 
+    let sign_with = signer();
     let status = Command::new("near")
         .args([
             "contract",
@@ -242,8 +513,8 @@ fn deploy_one(t: &Target, path: &Path, want: &str) -> Result<()> {
             path.to_str().context("artifact path is not utf8")?,
             "without-init-call",
             "network-config",
-            "testnet",
-            "sign-with-keychain",
+            net.cli_name(),
+            &sign_with,
             "send",
         ])
         .status()?;
@@ -251,120 +522,228 @@ fn deploy_one(t: &Target, path: &Path, want: &str) -> Result<()> {
         bail!("{}: near deploy exited {status}", t.account());
     }
 
-    let now = chain_hash(&t.account())?;
+    let now = chain_hash(net, &t.account())?;
     if now != want {
         bail!(
             "{}: deployed but chain reports {now}, expected {want}",
             t.account()
         );
     }
-    if let Err(e) = probe(&t.account(), t.probe) {
+    if let Err(e) = probe(net, &t.account(), t.probe) {
         bail!(
             "{}: DEPLOYED BUT UNREADABLE ({e}). Roll back now with:\n  \
              near contract deploy {} use-file <artifact with hash {previous}> \
-             without-init-call network-config testnet sign-with-keychain send",
+             without-init-call network-config {net} {sign_with} send",
             t.account(),
             t.account()
         );
     }
-    println!("{:<26} deployed and readable", t.account());
+    println!("{:<32} deployed and readable", t.account());
     Ok(())
 }
 
-fn deployer() -> String {
-    account("DEPLOYER_ACCOUNT")
-}
-
-fn full_access_keys(account: &str) -> Result<usize> {
-    let v = rpc(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "query",
-        "params": {"request_type": "view_access_key_list", "finality": "final",
-                   "account_id": account}
-    }))?;
+fn full_access_keys(net: Network, account: &str) -> Result<usize> {
+    let v = rpc(
+        net,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "query",
+            "params": {"request_type": "view_access_key_list", "finality": "final",
+                       "account_id": account}
+        }),
+    )?;
     let keys = v["result"]["keys"]
         .as_array()
-        .with_context(|| format!("no key list for {account}"))?;
+        .with_context(|| format!("no key list for {account} on {net}"))?;
     Ok(keys
         .iter()
         .filter(|k| k["access_key"]["permission"] == "FullAccess")
         .count())
 }
 
-fn the_publish_path_is_the_only_path() -> Result<()> {
-    let deployer = deployer();
-    let held = full_access_keys(&deployer)?;
-    if held > 0 {
-        bail!(
-            "{deployer} holds {held} FullAccess key(s). Any one of them can publish wallet \
-             code directly with a DeployGlobalContract action, skipping gd_approve and the \
-             approval delay entirely, and every leased account follows the new code at once. \
-             Until that account holds none, the delay is a convention rather than a control."
-        );
+fn keys(net: Network, prof: Profile) -> Result<()> {
+    let mut held_total = 0;
+    for t in &FLEET {
+        let held = full_access_keys(net, &t.account())?;
+        held_total += held;
+        let note = if held == 0 { "none" } else { "PRESENT" };
+        println!("{:<32} {held} FullAccess key(s)  {note}", t.account());
     }
-    println!("{deployer:<26} holds no FullAccess key, publishing is contract-gated");
-    Ok(())
+    if held_total == 0 {
+        println!("\nno fleet account can be driven around its own contract");
+        return Ok(());
+    }
+    let message = "a FullAccess key on a fleet account can deploy code and publish wallet \
+                   bytes directly, skipping gd_approve and the approval delay, and every \
+                   leased account follows the new code at once";
+    match prof {
+        Profile::Test => {
+            println!("\n{held_total} FullAccess key(s) across the fleet: {message}.");
+            println!("the test profile keeps them deliberately, so this is a note, not a gate");
+            Ok(())
+        }
+        Profile::Production => bail!(
+            "{held_total} FullAccess key(s) across the fleet: {message}. Until every one is \
+             removed, the delay is a convention rather than a control"
+        ),
+    }
 }
 
-fn deploy(tag: &str) -> Result<()> {
+const READINESS_STEPS: [(&str, &str); 7] = [
+    (
+        "rate_set",
+        "admin_set_initial_rate, then the oracle takes over",
+    ),
+    (
+        "recovery_wired",
+        "add_recovery_authority, council, one yocto",
+    ),
+    ("venue_set", "add_venue, council, one yocto"),
+    (
+        "ft_allowlist_set",
+        "add_ft_allowlist once per settlement token, council, one yocto. Empty means the \
+         balance gate never runs and a name changes hands carrying its tokens",
+    ),
+    ("metadata_set", "admin_set_nft_metadata, admin, one yocto"),
+    (
+        "wiring_sane",
+        "fixed at construction; false means the registry points at itself",
+    ),
+    (
+        "production_terms",
+        "lease_term_ns and grace_period_ns are constructor arguments and cannot be raised later",
+    ),
+];
+
+fn ready(net: Network, prof: Profile) -> Result<()> {
+    let registry = account("REGISTRY_ACCOUNT");
+    let state = view(net, &registry, "deployment_readiness")?;
+    let mut missing = Vec::new();
+
+    println!("{registry} on {net}\n");
+    for (flag, remedy) in READINESS_STEPS {
+        let verdict = match state[flag].as_bool() {
+            Some(true) => "ok",
+            Some(false) => "MISSING",
+            None => "UNKNOWN, the deployed registry predates this check",
+        };
+        println!("{flag:<20} {verdict}");
+        if verdict != "ok" {
+            missing.push(flag);
+            println!("{:<20}   {remedy}", "");
+        }
+    }
+    println!(
+        "\nlease_term_ns {} grace_period_ns {}",
+        state["lease_term_ns"], state["grace_period_ns"]
+    );
+
+    if missing.is_empty() {
+        println!("registry reports ready");
+        return Ok(());
+    }
+    match prof {
+        Profile::Test => {
+            println!(
+                "\n{} step(s) outstanding, reported not refused",
+                missing.len()
+            );
+            Ok(())
+        }
+        Profile::Production => bail!("{} deployment step(s) outstanding", missing.len()),
+    }
+}
+
+fn deploy(net: Network, prof: Profile, release: &Release) -> Result<()> {
     let root = repo_root()?;
-    let table = tag_hashes(tag)?;
-    the_publish_path_is_the_only_path()?;
-    verify(tag).ok();
+    keys(net, prof)?;
+    println!();
+    verify(net, release).ok();
     println!();
 
     for t in &FLEET {
-        let want = table
-            .iter()
-            .find(|(n, _)| n == t.tag_name)
-            .map(|(_, h)| h.clone())
-            .with_context(|| format!("tag has no line for {}", t.tag_name))?;
-        let path = staged_dir(&root, tag).join(format!("{}.wasm", t.artifact));
-        let bytes = load_staged(&root, tag, t.artifact)?;
+        let want = release.want(t.tag_name)?;
+        let path = staged_dir(&root, release.name()).join(format!("{}.wasm", t.artifact));
+        let bytes = load_staged(&root, release.name(), t.artifact)?;
         if bs58_of(&bytes) != want {
-            bail!("{}: staged artifact does not match the tag", t.account());
+            bail!(
+                "{}: staged artifact does not match {}",
+                t.account(),
+                release.name()
+            );
         }
-        deploy_one(t, &path, &want)?;
+        deploy_one(net, t, &path, &want)?;
     }
 
     println!();
-    if verify(tag)? {
-        println!("\nfleet matches {tag} and every contract answers");
+    if verify(net, release)? {
+        println!(
+            "\nfleet matches {} and every contract answers",
+            release.name()
+        );
     } else {
-        bail!("fleet does not match {tag} after deploying");
+        bail!("fleet does not match {} after deploying", release.name());
     }
-    Ok(())
+    ready(net, prof)
 }
 
-fn up(tag: &str) -> Result<()> {
+fn up(net: Network, prof: Profile, name: &str) -> Result<()> {
+    let root = repo_root()?;
     println!("== stage");
-    stage(tag)?;
+    match resolve(&root, name)? {
+        Release::Tagged { .. } => stage(name)?,
+        Release::Planned { .. } => plan(name)?,
+    }
+    let release = resolve(&root, name)?;
     println!("\n== keys");
-    the_publish_path_is_the_only_path()?;
+    keys(net, prof)?;
     println!("\n== deploy");
-    deploy(tag)?;
-    Ok(())
+    deploy(net, prof, &release)
+}
+
+fn usage() -> ! {
+    eprintln!("usage: fleet <up|plan|stage|verify|keys|ready|deploy> [release]");
+    eprintln!("  NETWORK=testnet|mainnet  FLEET_PROFILE=test|production");
+    eprintln!("  SIGN_WITH=sign-with-legacy-keychain (default) | sign-with-keychain");
+    std::process::exit(2)
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let (Some(cmd), Some(tag)) = (args.get(1), args.get(2)) else {
-        eprintln!("usage: fleet <up|stage|verify|keys|deploy> <tag>");
-        std::process::exit(2);
+    let Some(cmd) = args.get(1) else { usage() };
+    let net = network()?;
+    let prof = profile()?;
+    println!("network {net}, profile {prof}\n");
+
+    let release = |name: Option<&String>| -> Result<Release> {
+        let Some(name) = name else { usage() };
+        resolve(&repo_root()?, name)
     };
+
     match cmd.as_str() {
-        "up" => up(tag),
-        "stage" => stage(tag),
-        "keys" => the_publish_path_is_the_only_path(),
+        "keys" => keys(net, prof),
+        "ready" => ready(net, prof),
+        "plan" => match args.get(2) {
+            Some(name) => plan(name),
+            None => usage(),
+        },
+        "stage" => match args.get(2) {
+            Some(name) => stage(name),
+            None => usage(),
+        },
+        "up" => match args.get(2) {
+            Some(name) => up(net, prof, name),
+            None => usage(),
+        },
         "verify" => {
-            if !verify(tag)? {
+            if !verify(net, &release(args.get(2))?)? {
                 std::process::exit(1);
             }
             Ok(())
         }
-        "deploy" => deploy(tag),
+        "deploy" => deploy(net, prof, &release(args.get(2))?),
         other => {
             eprintln!("unknown command {other}");
-            std::process::exit(2);
+            usage()
         }
     }
 }

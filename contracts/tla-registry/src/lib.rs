@@ -32,7 +32,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const STATE_VERSION: u16 = 2;
+const STATE_VERSION: u16 = 4;
 
 const ALLOWANCE_WARN_REMAINING: u64 = 5;
 const AUTHORITY_TLA_PREFIX: &[u8] = b"pa_tla:";
@@ -111,6 +111,7 @@ pub(crate) enum StorageKey {
     RetiredTokenMetadataStore,
     Venues,
     PaidOrderIds,
+    TlaTerms,
 }
 
 #[near(contract_state)]
@@ -134,6 +135,7 @@ pub struct TlaRegistry {
     pub(crate) ft_allowlist: IterableSet<AccountId>,
     pub(crate) business_sub_count: LookupMap<AccountId, u32>,
     pub(crate) business_sub_cap_override: LookupMap<AccountId, u32>,
+    pub(crate) tla_terms: LookupMap<AccountId, TlaTerms>,
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) reclaim_pending: LookupMap<String, bool>,
     pub(crate) payment_authorities: IterableSet<AccountId>,
@@ -212,6 +214,7 @@ impl TlaRegistry {
             ft_allowlist: IterableSet::new(StorageKey::FtAllowlist),
             business_sub_count: LookupMap::new(StorageKey::BusinessSubCount),
             business_sub_cap_override: LookupMap::new(StorageKey::BusinessSubCapOverride),
+            tla_terms: LookupMap::new(StorageKey::TlaTerms),
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             reclaim_pending: LookupMap::new(StorageKey::ReclaimPending),
             payment_authorities: IterableSet::new(StorageKey::PaymentAuthorities),
@@ -247,6 +250,9 @@ impl TlaRegistry {
     pub fn migrate() -> Self {
         let mut current = match hos_common::state_version() {
             Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(2) => hos_common::try_state_read::<legacy::TlaRegistryV2>()
+                .map(Self::from)
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
             Some(1) => hos_common::try_state_read::<legacy::TlaRegistryV1>()
                 .map(Self::from)
@@ -555,6 +561,15 @@ impl TlaRegistry {
         Ok(caller)
     }
 
+    pub(crate) fn release_authority_mint(&self, authority: &AccountId, tla_id: &AccountId) {
+        let used = authority_used(authority, tla_id);
+        if used == 0 {
+            return;
+        }
+        let key = authority_used_key(authority, tla_id);
+        env::storage_write(&key, &used.saturating_sub(1).to_le_bytes());
+    }
+
     pub(crate) fn record_authority_mint(&self, authority: &AccountId, tla_id: &AccountId) {
         let used = authority_used(authority, tla_id).saturating_add(1);
         env::storage_write(&authority_used_key(authority, tla_id), &used.to_le_bytes());
@@ -611,6 +626,23 @@ impl TlaRegistry {
 
     pub(crate) fn suspension_expiry(&self, tla_id: &AccountId) -> u64 {
         self.suspended_until.get(tla_id).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn terms_for(&self, tla_id: &AccountId) -> TlaTerms {
+        self.tla_terms.get(tla_id).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn allocation_fee_usd_micro(&self, tla_id: &AccountId) -> u128 {
+        self.terms_for(tla_id)
+            .allocation_fee_usd_micro
+            .map_or(self.fee_config.tla_allocation_fee_usd_micro.0, |fee| fee.0)
+    }
+
+    pub(crate) fn tla_rent_usd_micro(&self, tla_id: &AccountId) -> u128 {
+        self.terms_for(tla_id).tla_rent_usd_micro.map_or_else(
+            || fees::base_rent(tla_id.as_str().len() as u8, &self.fee_config),
+            |rent| rent.0,
+        )
     }
 
     pub(crate) fn clock(&self) -> LifecycleClock {

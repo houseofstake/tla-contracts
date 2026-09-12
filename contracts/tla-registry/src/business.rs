@@ -43,16 +43,12 @@ impl TlaRegistry {
         let sub_account: AccountId = key
             .parse()
             .map_err(|_| ContractError::InvalidSubAccountId)?;
-        Event::SubAccountRetractionScheduled {
-            full_name: key,
-            retraction_at: U64(now),
-            by: caller,
-        }
-        .emit();
-        Ok(crate::rental::retract_wallet_lease(
+        Ok(crate::rental::retract_wallet_lease_pending(
             &self.hos_extension,
             sub_account,
             ends_at,
+            key,
+            caller,
         ))
     }
 
@@ -62,7 +58,7 @@ impl TlaRegistry {
         &mut self,
         tla_id: AccountId,
         name: String,
-    ) -> Result<(), ContractError> {
+    ) -> Result<Promise, ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
         validate_name(&name)?;
@@ -89,13 +85,60 @@ impl TlaRegistry {
         if now >= retraction_at.saturating_add(retraction_notice_ns) {
             return Err(ContractError::RetractionAlreadyElapsed);
         }
-        sub.retraction_at = None;
-        Event::SubAccountRetractionCanceled {
+        let expires_at = sub.expires_at;
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        Ok(crate::rental::restore_wallet_lease(
+            &self.hos_extension,
+            sub_account,
+            expires_at,
+            key,
+            caller,
+        ))
+    }
+
+    #[private]
+    pub fn on_retraction_scheduled(&mut self, key: String, by: AccountId) {
+        if near_sdk::is_promise_success() {
+            let scheduled_at = self
+                .sub_accounts
+                .get(&key)
+                .and_then(|sub| sub.retraction_at);
+            if let Some(at) = scheduled_at {
+                Event::SubAccountRetractionScheduled {
+                    full_name: key,
+                    retraction_at: U64(at),
+                    by,
+                }
+                .emit();
+            }
+            return;
+        }
+        if let Some(sub) = self.sub_accounts.get_mut(&key) {
+            sub.retraction_at = None;
+        }
+        Event::LeaseSyncFailed {
             full_name: key,
-            by: caller,
+            intent: "retract".to_string(),
         }
         .emit();
-        Ok(())
+    }
+
+    #[private]
+    pub fn on_retraction_canceled(&mut self, key: String, by: AccountId) {
+        if !near_sdk::is_promise_success() {
+            Event::LeaseSyncFailed {
+                full_name: key,
+                intent: "restore".to_string(),
+            }
+            .emit();
+            return;
+        }
+        if let Some(sub) = self.sub_accounts.get_mut(&key) {
+            sub.retraction_at = None;
+        }
+        Event::SubAccountRetractionCanceled { full_name: key, by }.emit();
     }
 
     pub fn get_business_sub_count(&self, tla_id: AccountId) -> u32 {
@@ -104,6 +147,51 @@ impl TlaRegistry {
 
     pub fn get_business_sub_cap(&self, tla_id: AccountId) -> u32 {
         self.effective_business_cap(&tla_id)
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn set_tla_terms(
+        &mut self,
+        tla_id: AccountId,
+        terms: TlaTerms,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
+        if terms.sub_fee_usd_micro.is_some() && tla.tla_type != TlaType::Business {
+            return Err(ContractError::NotBusinessTla);
+        }
+        for fee in [
+            terms.allocation_fee_usd_micro,
+            terms.tla_rent_usd_micro,
+            terms.sub_fee_usd_micro,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if fee.0 > crate::pricing::MAX_USD_MICRO {
+                return Err(ContractError::FeeExceedsCap);
+            }
+        }
+        let event = Event::TlaTermsSet {
+            tla_id: tla_id.clone(),
+            allocation_fee_usd_micro: terms.allocation_fee_usd_micro,
+            tla_rent_usd_micro: terms.tla_rent_usd_micro,
+            sub_fee_usd_micro: terms.sub_fee_usd_micro,
+            by: env::predecessor_account_id(),
+        };
+        if terms.is_standard() {
+            self.tla_terms.remove(&tla_id);
+        } else {
+            self.tla_terms.insert(tla_id, terms);
+        }
+        event.emit();
+        Ok(())
+    }
+
+    pub fn get_tla_terms(&self, tla_id: AccountId) -> TlaTerms {
+        self.terms_for(&tla_id)
     }
 
     #[handle_result]

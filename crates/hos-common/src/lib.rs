@@ -94,13 +94,8 @@ impl RotationCause {
 
     pub fn repoints_payout(self) -> bool {
         match self {
-            Self::Deposit => false,
-            Self::Sale
-            | Self::Transfer
-            | Self::ReRent
-            | Self::Reclaim
-            | Self::Recovery
-            | Self::Revert => true,
+            Self::Deposit | Self::ReRent => false,
+            Self::Sale | Self::Transfer | Self::Reclaim | Self::Recovery | Self::Revert => true,
         }
     }
 

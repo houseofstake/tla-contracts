@@ -21,6 +21,8 @@ pub const RETRACTION_NOT_SHORTER: &str = "a retraction may only shorten the leas
 pub const RETRACTION_NOTICE_TOO_SHORT: &str =
     "a retraction must leave the holder the full notice period";
 pub const BAD_LEASE_STATE: &str = "state not settable through lease push";
+pub const RERENT_NEEDS_OWN_CALL: &str =
+    "a re-rent must go through hos_re_rent so its payout and lease land in one receipt";
 pub const RESERVE_BREACH: &str = "action would breach the balance reserve";
 pub const DEPOSIT_OVERFLOW: &str = "action deposits overflow";
 pub const PAYOUT_IS_SELF: &str = "payout account must not be this account";

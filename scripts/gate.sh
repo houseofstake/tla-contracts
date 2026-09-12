@@ -70,6 +70,9 @@ if ! command -v cargo-audit >/dev/null; then
 fi
 cargo audit
 
+step "integration advisories"
+cargo audit --file integration/Cargo.lock
+
 step "workspace clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 

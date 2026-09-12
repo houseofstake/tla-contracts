@@ -123,6 +123,14 @@ pub enum Event {
     #[event_version("1.0.0")]
     VenueExitToRegisteredName { full_name: String, to: AccountId },
     #[event_version("1.0.0")]
+    TlaTermsSet {
+        tla_id: AccountId,
+        allocation_fee_usd_micro: Option<U128>,
+        tla_rent_usd_micro: Option<U128>,
+        sub_fee_usd_micro: Option<U128>,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     BusinessSubCapSet {
         tla_id: AccountId,
         cap: Option<u32>,
@@ -163,6 +171,8 @@ pub enum Event {
     },
     #[event_version("1.0.0")]
     PaidRentalOrderReleased { order_id: String },
+    #[event_version("1.0.0")]
+    PaidRentalOrderStale { order_id: String, full_name: String },
     #[event_version("1.0.0")]
     LeaseSyncFailed { full_name: String, intent: String },
     #[event_version("1.0.0")]

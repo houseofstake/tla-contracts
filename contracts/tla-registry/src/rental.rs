@@ -9,7 +9,7 @@ use crate::fees;
 use crate::interfaces::{ext_hos_extension, ext_registrar};
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
-use hos_common::{OperatingState, RotationCause};
+use hos_common::OperatingState;
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
@@ -28,22 +28,26 @@ pub struct PendingReRent {
     pub attached: U128,
     pub sub_account: AccountId,
     pub order_id: Option<String>,
+    pub expires_at: u64,
 }
 
 const GAS_FOR_CREATE: Gas = Gas::from_tgas(hos_common::MINT_CALL_TGAS);
 const GAS_FOR_SET_PAYOUT: Gas = Gas::from_tgas(30);
 const GAS_FOR_SET_PAYOUT_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
-const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(45);
-const GAS_FOR_PUSH_LEASE: Gas = Gas::from_tgas(20);
+const PUSH_LEASE_TGAS: u64 = 20;
+const GAS_FOR_PUSH_LEASE: Gas = Gas::from_tgas(PUSH_LEASE_TGAS);
+const RERENT_ROTATE_TGAS: u64 = 45;
+const RERENT_FORCE_TGAS: u64 = RERENT_ROTATE_TGAS + PUSH_LEASE_TGAS;
+const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(RERENT_FORCE_TGAS);
 const GAS_FOR_RENEW_CALLBACK: Gas = Gas::from_tgas(10);
 const LEASE_SYNC_CB_TGAS: u64 = 5;
 const GAS_FOR_LEASE_SYNC_CB: Gas = Gas::from_tgas(LEASE_SYNC_CB_TGAS);
 const RERENT_CALLBACK_TGAS: u64 = 40;
 const GAS_FOR_RERENT_CALLBACK: Gas = Gas::from_tgas(RERENT_CALLBACK_TGAS);
 const _: () = assert!(
-    GAS_FOR_PUSH_LEASE.as_tgas() + LEASE_SYNC_CB_TGAS < RERENT_CALLBACK_TGAS,
-    "the re-rent callback pushes the new term to the wallet out of its own budget, and a wallet left on the previous renter's expired lease refuses the buyer every method they paid for"
+    RERENT_FORCE_TGAS + RERENT_CALLBACK_TGAS + GATE_CALLER_FRAME_TGAS <= 300,
+    "the re-rent dispatch and its settlement callback share one transaction, and a buyer who has already paid must never be left with the order unsettled because the chain ran out of gas"
 );
 const RERENT_BALANCES_CB_TGAS: u64 = 85;
 const GAS_FOR_RERENT_BALANCES_CB: Gas = Gas::from_tgas(RERENT_BALANCES_CB_TGAS);
@@ -60,13 +64,9 @@ impl TlaRegistry {
     pub fn activate_tla(&mut self, tla_id: AccountId) -> Result<(), ContractError> {
         self.assert_not_paused()?;
         let caller = env::predecessor_account_id();
-        let tla_len = tla_id.as_str().len() as u8;
-        let rent_usd = fees::base_rent(tla_len, &self.fee_config);
         let required_usd = self
-            .fee_config
-            .tla_allocation_fee_usd_micro
-            .0
-            .saturating_add(rent_usd);
+            .allocation_fee_usd_micro(&tla_id)
+            .saturating_add(self.tla_rent_usd_micro(&tla_id));
         let required_near = self.convert_usd_to_near(required_usd)?;
         let attached_yocto = env::attached_deposit().as_yoctonear();
         if attached_yocto < required_near {
@@ -178,6 +178,7 @@ impl TlaRegistry {
                 attached,
                 sub_account,
                 order_id: None,
+                expires_at: lease_until_ns,
             }));
         }
 
@@ -254,8 +255,15 @@ impl TlaRegistry {
         };
         self.sub_account_insert(key.clone(), sub_entry);
         self.record_authority_mint(&payer, &tla_id);
-        self.paid_order_ids
-            .insert(order_id.clone(), PaidOrderState::InFlight);
+        self.paid_order_ids.insert(
+            order_id.clone(),
+            PaidOrderState::InFlight {
+                full_name: key.clone(),
+                tla_id: tla_id.clone(),
+                payer: payer.clone(),
+                started_at: now,
+            },
+        );
         Event::PaidRentalOrderReserved {
             full_name: key.clone(),
             order_id: order_id.clone(),
@@ -277,6 +285,7 @@ impl TlaRegistry {
                 attached: U128(attached.as_yoctonear()),
                 sub_account,
                 order_id: Some(order_id),
+                expires_at: lease_until_ns,
             }));
         }
 
@@ -309,8 +318,7 @@ impl TlaRegistry {
     pub fn renew_tla(&mut self, tla_id: AccountId) -> Result<(), ContractError> {
         self.assert_not_paused()?;
         let caller = env::predecessor_account_id();
-        let tla_len = tla_id.as_str().len() as u8;
-        let rent_near = self.convert_usd_to_near(fees::base_rent(tla_len, &self.fee_config))?;
+        let rent_near = self.convert_usd_to_near(self.tla_rent_usd_micro(&tla_id))?;
         let now = env::block_timestamp();
 
         let is_business;
@@ -449,6 +457,7 @@ impl TlaRegistry {
         let key = sub_account_key(&tla_id, &name);
         let caller = env::predecessor_account_id();
         let now = env::block_timestamp();
+        let terms = self.terms_for(&tla_id);
 
         let rent;
         {
@@ -469,7 +478,7 @@ impl TlaRegistry {
             ) {
                 return Err(ContractError::TlaPastGracePeriod);
             }
-            rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);
+            rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config, &terms);
         }
 
         let rent_near = self.convert_usd_to_near(rent)?;
@@ -649,9 +658,10 @@ impl TlaRegistry {
         owner: &AccountId,
     ) -> Result<(u128, bool), ContractError> {
         let is_business = self.assert_accepting(tla_id, owner)?;
+        let terms = self.terms_for(tla_id);
         let entry = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
         Ok((
-            fees::calculate_rent(entry, tla_id, name, &self.fee_config),
+            fees::calculate_rent(entry, tla_id, name, &self.fee_config, &terms),
             is_business,
         ))
     }
@@ -688,25 +698,49 @@ pub(crate) fn retract_wallet_lease(
     watch_lease_sync(pushed, &sub_account, "retract")
 }
 
-pub(crate) fn push_re_rented_lease(
+pub(crate) fn retract_wallet_lease_pending(
+    hos_extension: &AccountId,
+    sub_account: AccountId,
+    ends_at: u64,
+    key: String,
+    by: AccountId,
+) -> Promise {
+    ext_hos_extension::ext(hos_extension.clone())
+        .with_static_gas(GAS_FOR_PUSH_LEASE)
+        .retract_lease(sub_account, U64(ends_at))
+        .then(
+            TlaRegistry::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_LEASE_SYNC_CB)
+                .on_retraction_scheduled(key, by),
+        )
+}
+
+pub(crate) fn restore_wallet_lease(
     hos_extension: &AccountId,
     sub_account: AccountId,
     expires_at: u64,
+    key: String,
+    by: AccountId,
 ) -> Promise {
-    let pushed = ext_hos_extension::ext(hos_extension.clone())
+    ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_PUSH_LEASE)
-        .push_lease(sub_account.clone(), U64(expires_at), OperatingState::Active);
-    watch_lease_sync(pushed, &sub_account, "re-rent")
+        .push_lease(sub_account, U64(expires_at), OperatingState::Active)
+        .then(
+            TlaRegistry::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_LEASE_SYNC_CB)
+                .on_retraction_canceled(key, by),
+        )
 }
 
 fn re_rent_transfer(hos_extension: &AccountId, pending: PendingReRent) -> Promise {
     ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_RERENT_FORCE)
-        .force_transfer(
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .re_rent(
             pending.sub_account,
-            Some(pending.owner.clone()),
-            RotationCause::ReRent,
-            None,
+            pending.owner.clone(),
+            pending.payout_account,
+            U64(pending.expires_at),
         )
         .then(
             TlaRegistry::ext(env::current_account_id())

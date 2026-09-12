@@ -14,7 +14,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const STATE_VERSION: u16 = 2;
+const STATE_VERSION: u16 = 3;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
@@ -72,8 +72,14 @@ trait TenantWallet {
         cause: RotationCause,
         asked_by: Option<AccountId>,
     );
+    fn hos_re_rent(
+        &mut self,
+        to: AccountId,
+        payout_account: AccountId,
+        lease_until_ns: U64,
+    ) -> bool;
     fn hos_sweep_near(&mut self);
-    fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128);
+    fn hos_sweep_ft(&mut self, ft: AccountId, amount: U128) -> bool;
     fn hos_payout_account(&self) -> AccountId;
     fn hos_set_payout_account(&mut self, payout_account: AccountId, expected_owner: AccountId);
     fn hos_migrate(collection_id: AccountId);
@@ -92,6 +98,14 @@ trait MpcRecovery {
 enum StorageKey {
     Admins,
     RecoveryResetPending,
+    SweepPending,
+}
+
+#[near(serializers = [borsh, json])]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct PendingSweep {
+    pub wallet: AccountId,
+    pub ft: Option<AccountId>,
 }
 
 #[near(contract_state)]
@@ -109,6 +123,7 @@ pub struct HosExtension {
     pub(crate) council: AccountId,
     pub(crate) paused_until_ns: u64,
     pub(crate) recovery_reset_pending: IterableSet<AccountId>,
+    pub(crate) sweep_pending: IterableSet<PendingSweep>,
     pub(crate) upgrade_proven: bool,
     pub(crate) pending_council: Option<AccountId>,
     pub(crate) pending_council_at: Option<u64>,
@@ -143,6 +158,7 @@ impl HosExtension {
             council,
             paused_until_ns: 0,
             recovery_reset_pending: IterableSet::new(StorageKey::RecoveryResetPending),
+            sweep_pending: IterableSet::new(StorageKey::SweepPending),
             upgrade_proven: false,
             pending_council: None,
             pending_council_at: None,
@@ -154,6 +170,9 @@ impl HosExtension {
     pub fn migrate() -> Self {
         let mut current = match hos_common::state_version() {
             Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(2) => hos_common::try_state_read::<legacy::HosExtensionV2>()
+                .map(Self::from)
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
             Some(1) => hos_common::try_state_read::<legacy::HosExtensionV1>()
                 .map(Self::from)
@@ -522,6 +541,9 @@ impl HosExtension {
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
+        if matches!(cause, RotationCause::ReRent) {
+            return Err(ContractError::ReRentNeedsOwnCall);
+        }
         if cause.parks() && new_owner.is_some() {
             return Err(ContractError::ParkTakesNoOwner);
         }
@@ -547,6 +569,62 @@ impl HosExtension {
                     .with_static_gas(GAS_FOR_ROTATE_CB)
                     .after_force_swap(wallet),
             ))
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn re_rent(
+        &mut self,
+        wallet: AccountId,
+        new_owner: AccountId,
+        payout_account: AccountId,
+        lease_until_ns: U64,
+    ) -> Result<Promise, ContractError> {
+        self.assert_one_yocto()?;
+        self.assert_registry()?;
+        self.assert_not_paused()?;
+        Event::ForceTransferRequested {
+            wallet: wallet.clone(),
+            new_owner: Some(new_owner.clone()),
+            park: false,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(ext_wallet::ext(wallet.clone())
+            .with_static_gas(GAS_FOR_ROTATE)
+            .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
+            .hos_re_rent(new_owner, payout_account, lease_until_ns)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_ROTATE_CB)
+                    .after_re_rent(wallet),
+            ))
+    }
+
+    #[private]
+    pub fn after_re_rent(
+        &mut self,
+        wallet: AccountId,
+        #[callback_result] swapped: Result<bool, PromiseError>,
+    ) -> bool {
+        let rotated = matches!(swapped, Ok(true));
+        if !rotated {
+            Event::ForceTransferVoided { wallet }.emit();
+            return false;
+        }
+        Event::ForceTransferCompleted {
+            wallet: wallet.clone(),
+        }
+        .emit();
+        let _ = ext_mpc_recovery::ext(self.recovery.clone())
+            .with_static_gas(GAS_FOR_RESET)
+            .on_wallet_transferred(wallet.clone())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_RESET_CALLBACK)
+                    .after_recovery_reset(wallet),
+            );
+        true
     }
 
     #[private]
@@ -584,10 +662,78 @@ impl HosExtension {
             by: env::predecessor_account_id(),
         }
         .emit();
-        Ok(ext_wallet::ext(wallet)
+        Ok(ext_wallet::ext(wallet.clone())
             .with_static_gas(GAS_FOR_SWEEP_CALL)
             .with_attached_deposit(EXTENSION_CALL_DEPOSIT)
-            .hos_sweep_near())
+            .hos_sweep_near()
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SETTLE_CB)
+                    .after_near_sweep(wallet),
+            ))
+    }
+
+    #[private]
+    pub fn after_near_sweep(
+        &mut self,
+        wallet: AccountId,
+        #[callback_result] settled: Result<bool, PromiseError>,
+    ) -> bool {
+        let entry = PendingSweep {
+            wallet: wallet.clone(),
+            ft: None,
+        };
+        if matches!(settled, Ok(true)) {
+            self.sweep_pending.remove(&entry);
+            return true;
+        }
+        self.sweep_pending.insert(entry);
+        Event::SweepPending { wallet, ft: None }.emit();
+        false
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn retry_sweep(
+        &mut self,
+        wallet: AccountId,
+        ft: Option<AccountId>,
+    ) -> Result<Promise, ContractError> {
+        self.assert_registry()?;
+        let entry = PendingSweep {
+            wallet: wallet.clone(),
+            ft: ft.clone(),
+        };
+        if !self.sweep_pending.contains(&entry) {
+            return Err(ContractError::NoPendingSweep);
+        }
+        match ft {
+            None => {
+                if env::attached_deposit() != EXTENSION_CALL_DEPOSIT {
+                    return Err(ContractError::RequiresOneYocto);
+                }
+                self.sweep_near(wallet)
+            }
+            Some(ft) => {
+                let refund_to = env::predecessor_account_id();
+                self.sweep_ft(wallet, ft, refund_to)
+            }
+        }
+    }
+
+    pub fn pending_sweeps(&self, from_index: Option<u64>, limit: Option<u64>) -> Vec<PendingSweep> {
+        let skip = usize::try_from(u128::from(from_index.unwrap_or(0))).unwrap_or(usize::MAX);
+        let take = limit.unwrap_or(MAX_PAGE_LIMIT).clamp(1, MAX_PAGE_LIMIT);
+        self.sweep_pending
+            .iter()
+            .skip(skip)
+            .take(take as usize)
+            .cloned()
+            .collect()
+    }
+
+    pub fn pending_sweep_count(&self) -> u32 {
+        self.sweep_pending.len()
     }
 
     #[payable]
@@ -732,26 +878,40 @@ impl HosExtension {
         ft: AccountId,
         destination: AccountId,
         amount: U128,
-        #[callback_result] settled: Result<(), PromiseError>,
+        #[callback_result] settled: Result<bool, PromiseError>,
     ) -> bool {
-        if settled.is_ok() {
-            Event::SweepDispatched {
-                wallet,
-                ft,
-                destination,
-                amount,
+        let entry = PendingSweep {
+            wallet: wallet.clone(),
+            ft: Some(ft.clone()),
+        };
+        let reason = match settled {
+            Ok(true) => {
+                self.sweep_pending.remove(&entry);
+                Event::SweepDispatched {
+                    wallet,
+                    ft,
+                    destination,
+                    amount,
+                }
+                .emit();
+                return true;
             }
-            .emit();
-            true
-        } else {
-            Event::SweepFailed {
-                wallet,
-                ft,
-                reason: "authority_execute_failed".to_string(),
-            }
-            .emit();
-            false
+            Ok(false) => "wallet_resolver_reported_failure",
+            Err(_) => "authority_execute_failed",
+        };
+        self.sweep_pending.insert(entry);
+        Event::SweepFailed {
+            wallet: wallet.clone(),
+            ft: ft.clone(),
+            reason: reason.to_string(),
         }
+        .emit();
+        Event::SweepPending {
+            wallet,
+            ft: Some(ft),
+        }
+        .emit();
+        false
     }
 
     pub fn get_version(&self) -> u8 {

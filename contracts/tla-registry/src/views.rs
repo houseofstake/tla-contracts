@@ -66,8 +66,9 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
     ) -> Result<RentPriceView, ContractError> {
+        let terms = self.terms_for(&tla_id);
         let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-        let rent_usd = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);
+        let rent_usd = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config, &terms);
         let rent_quoted = self.quote_usd_to_near(rent_usd)?;
         let key = sub_account_key(&tla_id, &name);
         let deposit = if self.parked_names.contains_key(&key) {
@@ -203,6 +204,7 @@ impl TlaRegistry {
         let rate_ready = self.near_usd_rate_micro != 0;
         let recovery_ready = !self.recovery_authorities.is_empty();
         let venue_ready = !self.venues.is_empty();
+        let ft_ready = !self.ft_allowlist.is_empty();
         let metadata_ready = self.nft_contract_metadata.name != this.as_str();
         let wiring_ready = self.hos_extension != this && self.treasury != this;
         let terms_ready = self.lease_term_ns >= crate::PRODUCTION_LEASE_TERM_NS
@@ -211,6 +213,7 @@ impl TlaRegistry {
             rate_set: rate_ready,
             recovery_wired: recovery_ready,
             venue_set: venue_ready,
+            ft_allowlist_set: ft_ready,
             metadata_set: metadata_ready,
             wiring_sane: wiring_ready,
             production_terms: terms_ready,
@@ -219,6 +222,7 @@ impl TlaRegistry {
             ready: rate_ready
                 && recovery_ready
                 && venue_ready
+                && ft_ready
                 && metadata_ready
                 && wiring_ready
                 && terms_ready,
@@ -279,7 +283,8 @@ impl TlaRegistry {
         tla: &TlaEntry,
         name: &str,
     ) -> SubAccountView {
-        let rent = fees::calculate_rent(tla, &entry.tla_id, name, &self.fee_config);
+        let terms = self.terms_for(&entry.tla_id);
+        let rent = fees::calculate_rent(tla, &entry.tla_id, name, &self.fee_config, &terms);
         SubAccountView {
             full_name: key.to_string(),
             owner: entry.owner.clone(),

@@ -31,7 +31,7 @@ impl TlaRegistry {
         let order = settlement.order_id.clone();
         match outcome {
             Ok(MintOutcome::Active) => {
-                self.confirm_order(order.as_ref(), &key);
+                self.confirm_order(order.as_ref(), &key, &settlement.payer);
                 let expires_at = self.record_rental(
                     &key,
                     &settlement.payer,
@@ -48,7 +48,7 @@ impl TlaRegistry {
                 });
             }
             Ok(MintOutcome::CreationFailed) => {
-                self.release_order(order.as_ref());
+                self.release_order(order.as_ref(), &key, &settlement.payer, &settlement.tla_id);
                 self.settle_failed_mint(
                     &key,
                     &settlement.tla_id,
@@ -58,7 +58,7 @@ impl TlaRegistry {
                 );
             }
             Err(_) => {
-                self.release_order(order.as_ref());
+                self.release_order(order.as_ref(), &key, &settlement.payer, &settlement.tla_id);
                 self.settle_stranded_mint(
                     &key,
                     &settlement.tla_id,
@@ -80,7 +80,7 @@ impl TlaRegistry {
         let order = settlement.order_id.clone();
         match outcome {
             Ok(MintOutcome::Active) => {
-                self.confirm_order(order.as_ref(), &key);
+                self.confirm_order(order.as_ref(), &key, &settlement.payer);
                 let expires_at =
                     self.record_paid_rental(&key, &settlement.payer, settlement.attached_yocto);
                 crate::nft::emit_nft_mint(&settlement.owner, &key);
@@ -93,7 +93,7 @@ impl TlaRegistry {
                 });
             }
             Ok(MintOutcome::CreationFailed) => {
-                self.release_order(order.as_ref());
+                self.release_order(order.as_ref(), &key, &settlement.payer, &settlement.tla_id);
                 self.settle_failed_mint(
                     &key,
                     &settlement.tla_id,
@@ -103,7 +103,7 @@ impl TlaRegistry {
                 );
             }
             Err(_) => {
-                self.release_order(order.as_ref());
+                self.release_order(order.as_ref(), &key, &settlement.payer, &settlement.tla_id);
                 self.settle_stranded_mint(
                     &key,
                     &settlement.tla_id,
@@ -124,7 +124,7 @@ impl TlaRegistry {
         let key = sub_account_key(&settlement.tla_id, &settlement.name);
         let order = settlement.order_id.clone();
         if !matches!(swapped, Ok(true)) {
-            self.release_order(order.as_ref());
+            self.release_order(order.as_ref(), &key, &settlement.payer, &settlement.tla_id);
             self.settle_failed_mint(
                 &key,
                 &settlement.tla_id,
@@ -134,7 +134,7 @@ impl TlaRegistry {
             );
             return PromiseOrValue::Value(());
         }
-        self.confirm_order(order.as_ref(), &key);
+        self.confirm_order(order.as_ref(), &key, &settlement.payer);
         self.parked_names.remove(&key);
         crate::nft::emit_nft_mint(&settlement.owner, &key);
         self.sub_account_count = self.sub_account_count.saturating_add(1);
@@ -155,14 +155,7 @@ impl TlaRegistry {
             rent_yocto: settlement.rent_yocto,
             expires_at: U64(expires_at),
         });
-        let Ok(sub_account) = key.parse::<AccountId>() else {
-            return PromiseOrValue::Value(());
-        };
-        PromiseOrValue::Promise(crate::rental::push_re_rented_lease(
-            &self.hos_extension,
-            sub_account,
-            expires_at,
-        ))
+        PromiseOrValue::Value(())
     }
 }
 
@@ -199,24 +192,61 @@ impl TlaRegistry {
         }
     }
 
-    pub(crate) fn release_order(&mut self, order_id: Option<&String>) {
+    pub(crate) fn release_order(
+        &mut self,
+        order_id: Option<&String>,
+        full_name: &str,
+        payer: &AccountId,
+        tla_id: &AccountId,
+    ) {
         let Some(order_id) = order_id else {
             return;
         };
-        if self.paid_order_ids.get(order_id) == Some(&PaidOrderState::Settled) {
+        let still_ours = self
+            .paid_order_ids
+            .get(order_id)
+            .is_some_and(|reserved| reserved.in_flight_for(full_name, payer));
+        if !still_ours {
+            Event::PaidRentalOrderStale {
+                order_id: order_id.clone(),
+                full_name: full_name.to_string(),
+            }
+            .emit();
             return;
         }
         self.paid_order_ids.remove(order_id);
+        self.release_authority_mint(payer, tla_id);
         Event::PaidRentalOrderReleased {
             order_id: order_id.clone(),
         }
         .emit();
     }
 
-    pub(crate) fn confirm_order(&mut self, order_id: Option<&String>, full_name: &str) {
+    pub(crate) fn confirm_order(
+        &mut self,
+        order_id: Option<&String>,
+        full_name: &str,
+        payer: &AccountId,
+    ) {
         let Some(order_id) = order_id else {
             return;
         };
+        let Some(reserved) = self.paid_order_ids.get(order_id) else {
+            Event::PaidRentalOrderStale {
+                order_id: order_id.clone(),
+                full_name: full_name.to_string(),
+            }
+            .emit();
+            return;
+        };
+        if !reserved.in_flight_for(full_name, payer) {
+            Event::PaidRentalOrderStale {
+                order_id: order_id.clone(),
+                full_name: full_name.to_string(),
+            }
+            .emit();
+            return;
+        }
         self.paid_order_ids
             .insert(order_id.clone(), PaidOrderState::Settled);
         Event::PaidRentalOrderSettled {

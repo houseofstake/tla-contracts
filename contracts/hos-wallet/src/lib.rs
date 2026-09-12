@@ -681,12 +681,59 @@ impl TenantWallet {
     ) {
         require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
         self.assert_authority();
+        require!(
+            !matches!(cause, RotationCause::ReRent),
+            error::RERENT_NEEDS_OWN_CALL
+        );
         if matches!(cause, RotationCause::Recovery) {
             require!(
                 self.effective_frozen() != FreezeState::SelfFrozen,
                 error::SELF_FROZEN
             );
         }
+        self.apply_rotation(to, cause, asked_by);
+    }
+
+    #[payable]
+    pub fn hos_re_rent(
+        &mut self,
+        to: AccountId,
+        payout_account: AccountId,
+        lease_until_ns: U64,
+    ) -> bool {
+        require!(env::attached_deposit() == ONE_YOCTO, error::ONE_YOCTO);
+        self.assert_authority();
+        require!(
+            lease_until_ns.0 >= self.lease_until_ns,
+            error::LEASE_NOT_MONOTONIC
+        );
+        require!(
+            lease_until_ns.0 > env::block_timestamp(),
+            error::LEASE_IN_PAST
+        );
+        require!(
+            payout_account != env::current_account_id(),
+            error::SELF_TARGET
+        );
+        self.apply_rotation(Some(to), RotationCause::ReRent, None);
+        self.payout_account = payout_account.clone();
+        Event::PayoutAccountSet { payout_account }.emit();
+        self.lease_until_ns = lease_until_ns.0;
+        self.state = OperatingState::Active;
+        Event::LeaseSet {
+            until_ns: lease_until_ns,
+            state: OperatingState::Active,
+        }
+        .emit();
+        true
+    }
+
+    fn apply_rotation(
+        &mut self,
+        to: Option<AccountId>,
+        cause: RotationCause,
+        asked_by: Option<AccountId>,
+    ) {
         let previous_owner = self.owner.clone();
         if matches!(cause, RotationCause::Revert) {
             let pinned = self
@@ -712,7 +759,7 @@ impl TenantWallet {
             if cause.needs_expiry() {
                 require!(self.lease_expired(), error::LEASE_ACTIVE);
             }
-            self.revert_to = Some(previous_owner);
+            self.revert_to = Some(previous_owner.clone());
             self.revert_until_ns = env::block_timestamp().saturating_add(REVERT_WINDOW_NS);
         }
         self.spend_grants.clear();
@@ -730,6 +777,10 @@ impl TenantWallet {
             self.state = OperatingState::Parked;
         }
         if let Some(next) = to {
+            if next != previous_owner && self.frozen == FreezeState::SelfFrozen {
+                self.frozen = FreezeState::Unfrozen;
+                Event::Unfrozen {}.emit();
+            }
             self.wallet.extensions.insert(next.clone());
             self.owner = next.clone();
             if cause.repoints_payout() {

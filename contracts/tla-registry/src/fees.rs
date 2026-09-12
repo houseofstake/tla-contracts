@@ -1,5 +1,7 @@
 use crate::pricing::USD_MICRO_PER_DOLLAR;
-use crate::types::{total_name_length, FeeConfig, PremiumCategory, TlaEntry, TlaType, ONE_NEAR};
+use crate::types::{
+    total_name_length, FeeConfig, PremiumCategory, TlaEntry, TlaTerms, TlaType, ONE_NEAR,
+};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::AccountId;
 
@@ -18,9 +20,17 @@ pub fn sub_account_rent(total_len: u8, premium: &PremiumCategory, config: &FeeCo
     base.saturating_mul(num) / den
 }
 
-pub fn calculate_rent(tla: &TlaEntry, tla_id: &AccountId, name: &str, config: &FeeConfig) -> u128 {
+pub fn calculate_rent(
+    tla: &TlaEntry,
+    tla_id: &AccountId,
+    name: &str,
+    config: &FeeConfig,
+    terms: &TlaTerms,
+) -> u128 {
     match tla.tla_type {
-        TlaType::Business => config.sub_fee_per_account_usd_micro.0,
+        TlaType::Business => terms
+            .sub_fee_usd_micro
+            .map_or(config.sub_fee_per_account_usd_micro.0, |fee| fee.0),
         TlaType::Open => {
             let total_len = total_name_length(tla_id, name);
             sub_account_rent(total_len, &tla.premium_category, config)

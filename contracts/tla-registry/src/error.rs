@@ -12,6 +12,7 @@ pub enum ContractError {
     AuthorityMintAllowanceSpent,
     AuthorityMintAllowanceZero,
     PaidOrderAlreadySettled,
+    PaidOrderStillInFlight,
     PaidOrderNotFound,
     InvalidOrderId,
     OnlyRecoveryAuthority,

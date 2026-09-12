@@ -96,6 +96,156 @@ fn transfer_without_new_owner_rejected() {
 }
 
 #[test]
+fn re_rent_cause_rejected_on_force_transfer() {
+    let mut c = deploy();
+    ctx(REGISTRY, 0);
+    assert!(matches!(
+        c.force_transfer(
+            acc(WALLET),
+            Some(acc(BUYER)),
+            RotationCause::ReRent,
+            Some(acc(BUYER))
+        ),
+        Err(ContractError::ReRentNeedsOwnCall)
+    ));
+}
+
+#[test]
+fn registry_re_rents_with_its_own_payout() {
+    let mut c = deploy();
+    ctx(REGISTRY, 1);
+    assert!(c
+        .re_rent(acc(WALLET), acc(BUYER), acc(DEST), U64(1))
+        .is_ok());
+}
+
+#[test]
+fn a_failed_near_sweep_is_recorded_so_it_can_be_run_again() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.after_near_sweep(acc(WALLET), Err(near_sdk::PromiseError::Failed)));
+    assert_eq!(c.pending_sweep_count(), 1);
+    assert_eq!(
+        c.pending_sweeps(None, None),
+        vec![PendingSweep {
+            wallet: acc(WALLET),
+            ft: None
+        }],
+        "a sweep nobody records is a payout nobody ever retries"
+    );
+
+    ctx(REGISTRY, 1);
+    assert!(c.retry_sweep(acc(WALLET), None).is_ok());
+
+    ctx_callback(near_sdk::PromiseResult::Successful(
+        near_sdk::serde_json::to_vec(&true).unwrap(),
+    ));
+    assert!(c.after_near_sweep(acc(WALLET), Ok(true)));
+    assert_eq!(
+        c.pending_sweep_count(),
+        0,
+        "a sweep that finally lands must stop asking to be retried"
+    );
+}
+
+#[test]
+fn a_failed_token_sweep_is_recorded_against_its_own_token() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    c.after_sweep_settled(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        U128(5),
+        Err(near_sdk::PromiseError::Failed),
+    );
+    assert_eq!(
+        c.pending_sweeps(None, None),
+        vec![PendingSweep {
+            wallet: acc(WALLET),
+            ft: Some(acc(TOKEN))
+        }],
+        "a token sweep must be retryable for the token that failed, not the wallet at large"
+    );
+    ctx(REGISTRY, 0);
+    assert!(matches!(
+        c.retry_sweep(acc(WALLET), None),
+        Err(ContractError::NoPendingSweep)
+    ));
+}
+
+#[test]
+fn a_sweep_that_never_failed_cannot_be_retried() {
+    let mut c = deploy();
+    ctx(REGISTRY, 1);
+    assert!(matches!(
+        c.retry_sweep(acc(WALLET), None),
+        Err(ContractError::NoPendingSweep)
+    ));
+}
+
+#[test]
+fn only_the_registry_can_retry_a_sweep() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    c.after_near_sweep(acc(WALLET), Err(near_sdk::PromiseError::Failed));
+    ctx(BUYER, 1);
+    assert!(matches!(
+        c.retry_sweep(acc(WALLET), None),
+        Err(ContractError::OnlyRegistry)
+    ));
+}
+
+#[test]
+fn a_settled_re_rent_clears_the_recovery_policy_the_last_holder_armed() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Successful(
+        near_sdk::serde_json::to_vec(&true).unwrap(),
+    ));
+    assert!(
+        c.after_re_rent(acc(WALLET), Ok(true)),
+        "a settled re-rent must report the rotation to its caller"
+    );
+    assert!(
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|l| l.contains("force_transfer_completed")),
+        "the re-rent must run the same post-rotation path a force transfer does, or the \
+         previous holder keeps an armed recovery policy over the new renter's name"
+    );
+}
+
+#[test]
+fn a_refused_re_rent_leaves_the_recovery_policy_alone() {
+    let mut c = deploy();
+    ctx_callback(near_sdk::PromiseResult::Failed);
+    assert!(!c.after_re_rent(acc(WALLET), Ok(false)));
+    assert!(near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|l| l.contains("force_transfer_voided")));
+}
+
+#[test]
+fn non_registry_cannot_re_rent() {
+    let mut c = deploy();
+    ctx(ADMIN, 1);
+    assert!(matches!(
+        c.re_rent(acc(WALLET), acc(BUYER), acc(DEST), U64(1)),
+        Err(ContractError::OnlyRegistry)
+    ));
+}
+
+#[test]
+fn re_rent_without_one_yocto_rejected() {
+    let mut c = deploy();
+    ctx(REGISTRY, 0);
+    assert!(matches!(
+        c.re_rent(acc(WALLET), acc(BUYER), acc(DEST), U64(1)),
+        Err(ContractError::RequiresOneYocto)
+    ));
+}
+
+#[test]
 fn non_registry_cannot_force_transfer() {
     let mut c = deploy();
     ctx(ADMIN, 0);
@@ -870,7 +1020,7 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
     let c = deploy();
     assert_eq!(
         (STATE_VERSION, near_sdk::borsh::to_vec(&c).unwrap().len()),
-        (2, 136),
+        (3, 152),
         "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
          the shape that is deployed today, and update this fixture. A publish that \
          skips that leaves migrate unable to read what is on the account."
