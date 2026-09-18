@@ -772,6 +772,7 @@ impl TlaRegistry {
             return Err(ContractError::TreasuryIsSelf);
         }
         self.pending_treasury = Some(new_treasury.clone());
+        self.pending_treasury_at = Some(env::block_timestamp());
         Event::TreasuryRotationApproved {
             new_treasury,
             by: env::predecessor_account_id(),
@@ -788,6 +789,7 @@ impl TlaRegistry {
         if self.pending_treasury.take().is_none() {
             return Err(ContractError::NoTreasuryRotationPending);
         }
+        self.pending_treasury_at = None;
         Event::TreasuryRotationCancelled {
             by: env::predecessor_account_id(),
         }
@@ -806,8 +808,15 @@ impl TlaRegistry {
         if env::predecessor_account_id() != pending {
             return Err(ContractError::OnlyPendingTreasury);
         }
+        let approved_at = self
+            .pending_treasury_at
+            .ok_or(ContractError::NoTreasuryRotationPending)?;
+        if env::block_timestamp() < approved_at.saturating_add(self.upgrade_delay_ns) {
+            return Err(ContractError::TreasuryRotationTooYoung);
+        }
         let previous_treasury = std::mem::replace(&mut self.treasury, pending.clone());
         self.pending_treasury = None;
+        self.pending_treasury_at = None;
         let unclaimed = self
             .pending_refunds
             .get(&previous_treasury)
@@ -823,8 +832,10 @@ impl TlaRegistry {
         Ok(())
     }
 
-    pub fn pending_treasury(&self) -> Option<AccountId> {
-        self.pending_treasury.clone()
+    pub fn pending_treasury(&self) -> Option<(AccountId, U64)> {
+        self.pending_treasury
+            .clone()
+            .zip(self.pending_treasury_at.map(U64))
     }
 
     #[handle_result]

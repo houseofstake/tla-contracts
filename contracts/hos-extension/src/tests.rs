@@ -420,7 +420,7 @@ fn a_landed_upgrade_clears_the_approval_so_it_cannot_be_replayed() {
 }
 
 #[test]
-fn skim_always_pays_the_treasury_fixed_at_deploy() {
+fn skim_pays_whichever_treasury_the_contract_currently_holds() {
     let mut c = deploy();
     ctx(ADMIN, 1);
     assert!(c.skim(U128(1)).is_ok());
@@ -859,6 +859,96 @@ fn a_pause_does_not_block_a_renewal_reaching_the_wallet() {
     );
 }
 
+mod treasury_rotation {
+    use super::*;
+
+    const NEW_TREASURY: &str = "treasury2.testnet";
+
+    #[test]
+    fn the_skim_destination_follows_a_committed_rotation() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_treasury_rotation(acc(NEW_TREASURY)).unwrap();
+        assert_eq!(c.get_treasury(), acc(DEST));
+        assert_eq!(c.pending_treasury(), Some((acc(NEW_TREASURY), U64(0))));
+        ctx_at(NEW_TREASURY, 1, UPGRADE_DELAY_NS);
+        c.commit_treasury_rotation().unwrap();
+        assert_eq!(
+            c.get_treasury(),
+            acc(NEW_TREASURY),
+            "the registry can rotate its treasury, so skim must be able to follow or revenue \
+             strands on the old account forever"
+        );
+        assert!(c.pending_treasury().is_none());
+    }
+
+    #[test]
+    fn a_rotation_cannot_commit_inside_its_delay() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_treasury_rotation(acc(NEW_TREASURY)).unwrap();
+        ctx_at(NEW_TREASURY, 1, UPGRADE_DELAY_NS - 1);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::TreasuryRotationTooYoung)
+        ));
+        assert_eq!(c.get_treasury(), acc(DEST));
+    }
+
+    #[test]
+    fn an_account_that_never_claimed_it_does_not_become_the_treasury() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_treasury_rotation(acc(NEW_TREASURY)).unwrap();
+        ctx_at(COUNCIL, 1, UPGRADE_DELAY_NS);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::OnlyPendingTreasury)
+        ));
+        assert_eq!(c.get_treasury(), acc(DEST));
+    }
+
+    #[test]
+    fn an_approval_can_be_withdrawn_before_it_commits() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        c.approve_treasury_rotation(acc(NEW_TREASURY)).unwrap();
+        ctx_at(COUNCIL, 1, 1);
+        c.cancel_treasury_rotation().unwrap();
+        assert!(c.pending_treasury().is_none());
+        ctx_at(NEW_TREASURY, 1, UPGRADE_DELAY_NS);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::NoTreasuryRotationPending)
+        ));
+        assert_eq!(c.get_treasury(), acc(DEST));
+    }
+
+    #[test]
+    fn only_the_council_can_move_the_treasury() {
+        let mut c = deploy();
+        ctx_at(ADMIN, 1, 0);
+        assert!(matches!(
+            c.approve_treasury_rotation(acc(NEW_TREASURY)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_rotation_refuses_a_no_op_or_the_contract_itself() {
+        let mut c = deploy();
+        ctx_at(COUNCIL, 1, 0);
+        assert!(matches!(
+            c.approve_treasury_rotation(acc(DEST)),
+            Err(ContractError::TreasuryUnchanged)
+        ));
+        assert!(matches!(
+            c.approve_treasury_rotation(near_sdk::env::current_account_id()),
+            Err(ContractError::TreasuryIsSelf)
+        ));
+    }
+}
+
 mod council_rotation {
     use super::*;
 
@@ -1020,7 +1110,7 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
     let c = deploy();
     assert_eq!(
         (STATE_VERSION, near_sdk::borsh::to_vec(&c).unwrap().len()),
-        (3, 152),
+        (4, 154),
         "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
          the shape that is deployed today, and update this fixture. A publish that \
          skips that leaves migrate unable to read what is on the account."

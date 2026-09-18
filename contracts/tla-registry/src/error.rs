@@ -81,6 +81,7 @@ pub enum ContractError {
     TreasuryIsSelf,
     NoTreasuryRotationPending,
     OnlyPendingTreasury,
+    TreasuryRotationTooYoung,
     NoCouncilRotationPending,
     OnlyPendingCouncil,
     CouncilRotationTooYoung,

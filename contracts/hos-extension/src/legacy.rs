@@ -4,6 +4,51 @@ use near_sdk::store::IterableSet;
 use near_sdk::AccountId;
 
 #[near(serializers = [borsh])]
+pub struct HosExtensionV3 {
+    pub state_version: u16,
+    pub admins: IterableSet<AccountId>,
+    pub registry: AccountId,
+    pub recovery: AccountId,
+    pub paused: bool,
+    pub version: u8,
+    pub treasury: AccountId,
+    pub approved_code_hash: Option<[u8; 32]>,
+    pub approved_at: Option<u64>,
+    pub council: AccountId,
+    pub paused_until_ns: u64,
+    pub recovery_reset_pending: IterableSet<AccountId>,
+    pub sweep_pending: IterableSet<PendingSweep>,
+    pub upgrade_proven: bool,
+    pub pending_council: Option<AccountId>,
+    pub pending_council_at: Option<u64>,
+}
+
+impl From<HosExtensionV3> for HosExtension {
+    fn from(old: HosExtensionV3) -> Self {
+        Self {
+            state_version: crate::STATE_VERSION,
+            admins: old.admins,
+            registry: old.registry,
+            recovery: old.recovery,
+            paused: old.paused,
+            version: old.version,
+            treasury: old.treasury,
+            approved_code_hash: old.approved_code_hash,
+            approved_at: old.approved_at,
+            council: old.council,
+            paused_until_ns: old.paused_until_ns,
+            recovery_reset_pending: old.recovery_reset_pending,
+            sweep_pending: old.sweep_pending,
+            upgrade_proven: old.upgrade_proven,
+            pending_council: old.pending_council,
+            pending_council_at: old.pending_council_at,
+            pending_treasury: None,
+            pending_treasury_at: None,
+        }
+    }
+}
+
+#[near(serializers = [borsh])]
 pub struct HosExtensionV2 {
     pub state_version: u16,
     pub admins: IterableSet<AccountId>,
@@ -41,6 +86,8 @@ impl From<HosExtensionV2> for HosExtension {
             upgrade_proven: old.upgrade_proven,
             pending_council: old.pending_council,
             pending_council_at: old.pending_council_at,
+            pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 }
@@ -81,6 +128,8 @@ impl From<HosExtensionV1> for HosExtension {
             upgrade_proven: old.upgrade_proven,
             pending_council: None,
             pending_council_at: None,
+            pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 }

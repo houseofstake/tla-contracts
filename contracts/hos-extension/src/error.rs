@@ -30,6 +30,11 @@ pub enum ContractError {
     NoCouncilRotationPending,
     OnlyPendingCouncil,
     CouncilRotationTooYoung,
+    TreasuryUnchanged,
+    TreasuryIsSelf,
+    NoTreasuryRotationPending,
+    OnlyPendingTreasury,
+    TreasuryRotationTooYoung,
 }
 
 impl FunctionError for ContractError {

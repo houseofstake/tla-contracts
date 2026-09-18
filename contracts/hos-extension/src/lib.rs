@@ -14,7 +14,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const STATE_VERSION: u16 = 3;
+const STATE_VERSION: u16 = 4;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
@@ -127,6 +127,8 @@ pub struct HosExtension {
     pub(crate) upgrade_proven: bool,
     pub(crate) pending_council: Option<AccountId>,
     pub(crate) pending_council_at: Option<u64>,
+    pub(crate) pending_treasury: Option<AccountId>,
+    pub(crate) pending_treasury_at: Option<u64>,
 }
 
 #[near]
@@ -162,6 +164,8 @@ impl HosExtension {
             upgrade_proven: false,
             pending_council: None,
             pending_council_at: None,
+            pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 
@@ -170,6 +174,9 @@ impl HosExtension {
     pub fn migrate() -> Self {
         let mut current = match hos_common::state_version() {
             Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(3) => hos_common::try_state_read::<legacy::HosExtensionV3>()
+                .map(Self::from)
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
             Some(2) => hos_common::try_state_read::<legacy::HosExtensionV2>()
                 .map(Self::from)
@@ -265,6 +272,81 @@ impl HosExtension {
         self.pending_council
             .clone()
             .zip(self.pending_council_at.map(U64))
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn approve_treasury_rotation(
+        &mut self,
+        new_treasury: AccountId,
+    ) -> Result<(), ContractError> {
+        self.assert_one_yocto()?;
+        self.assert_council()?;
+        if new_treasury == self.treasury {
+            return Err(ContractError::TreasuryUnchanged);
+        }
+        if new_treasury == env::current_account_id() {
+            return Err(ContractError::TreasuryIsSelf);
+        }
+        self.pending_treasury = Some(new_treasury.clone());
+        self.pending_treasury_at = Some(env::block_timestamp());
+        Event::TreasuryRotationApproved {
+            new_treasury,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn cancel_treasury_rotation(&mut self) -> Result<(), ContractError> {
+        self.assert_one_yocto()?;
+        self.assert_council()?;
+        if self.pending_treasury.take().is_none() {
+            return Err(ContractError::NoTreasuryRotationPending);
+        }
+        self.pending_treasury_at = None;
+        Event::TreasuryRotationCancelled {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[payable]
+    #[handle_result]
+    pub fn commit_treasury_rotation(&mut self) -> Result<(), ContractError> {
+        self.assert_one_yocto()?;
+        let pending = self
+            .pending_treasury
+            .clone()
+            .ok_or(ContractError::NoTreasuryRotationPending)?;
+        if env::predecessor_account_id() != pending {
+            return Err(ContractError::OnlyPendingTreasury);
+        }
+        let approved_at = self
+            .pending_treasury_at
+            .ok_or(ContractError::NoTreasuryRotationPending)?;
+        if env::block_timestamp() < approved_at.saturating_add(UPGRADE_DELAY_NS) {
+            return Err(ContractError::TreasuryRotationTooYoung);
+        }
+        let previous_treasury = std::mem::replace(&mut self.treasury, pending.clone());
+        self.pending_treasury = None;
+        self.pending_treasury_at = None;
+        Event::TreasuryRotated {
+            previous_treasury,
+            new_treasury: pending,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    pub fn pending_treasury(&self) -> Option<(AccountId, U64)> {
+        self.pending_treasury
+            .clone()
+            .zip(self.pending_treasury_at.map(U64))
     }
 
     #[handle_result]

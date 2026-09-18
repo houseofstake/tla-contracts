@@ -778,7 +778,9 @@ fn permanence(net: Network) -> Result<()> {
     let grace = view(net, &registry, "get_grace_period_ns")?;
 
     let mut bad = Vec::new();
-    println!("no setter exists for any of these. a wrong value means redeploying that contract.\n");
+    println!("no setter exists for the derived or chosen fields. a wrong value there means");
+    println!("redeploying that contract. treasury is the exception: both contracts rotate it");
+    println!("behind a council approval and a 48h delay, and both must be rotated together.\n");
     println!("{:<30} {:<34} state", "field", "on chain");
 
     println!("\n-- derived from the fleet layout");
@@ -859,6 +861,25 @@ fn permanence(net: Network) -> Result<()> {
                 "{:<30} {:<34} NO GETTER",
                 "extension.treasury", "unreadable"
             );
+        }
+    }
+
+    for (label, account) in [
+        ("registry.pending_treasury", &registry),
+        ("extension.pending_treasury", &extension),
+    ] {
+        match view_if_present(net, account, "pending_treasury")? {
+            Some(serde_json::Value::Null) | None => {
+                println!("{label:<30} {:<34} none in flight", "-")
+            }
+            Some(pending) => {
+                let to = pending[0].as_str().unwrap_or("<unreadable>");
+                bad.push(format!(
+                    "{label} is mid-rotation to {to}; commit or cancel it on both contracts \
+                     before trusting the treasury above"
+                ));
+                println!("{label:<30} {to:<34} ROTATION IN FLIGHT");
+            }
         }
     }
 

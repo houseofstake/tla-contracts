@@ -164,6 +164,7 @@ pub struct TlaRegistry {
     pub(crate) pending_council: Option<AccountId>,
     pub(crate) pending_council_at: Option<u64>,
     pub(crate) pending_treasury: Option<AccountId>,
+    pub(crate) pending_treasury_at: Option<u64>,
 }
 
 #[near]
@@ -244,6 +245,7 @@ impl TlaRegistry {
             pending_council: None,
             pending_council_at: None,
             pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 

@@ -3505,27 +3505,49 @@ mod council_split {
     }
 
     fn rotate_treasury_to(c: &mut TlaRegistry, next: &str) {
-        ctx(OTHER_COUNCIL, 1, 1);
+        let delay = c.upgrade_delay_ns;
+        ctx(OTHER_COUNCIL, 1, 0);
         c.approve_treasury_rotation(acc(next)).unwrap();
-        ctx(next, 1, 1);
+        ctx(next, 1, delay);
         c.commit_treasury_rotation().unwrap();
     }
 
     #[test]
     fn a_rotation_takes_effect_only_once_the_incoming_treasury_claims_it() {
         let mut c = deploy_split();
-        ctx(OTHER_COUNCIL, 1, 1);
+        let delay = c.upgrade_delay_ns;
+        ctx(OTHER_COUNCIL, 1, 0);
         c.approve_treasury_rotation(acc(BOB)).unwrap();
         assert_eq!(
             c.get_treasury(),
             acc(TREASURY),
             "approving a rotation must not move the destination on its own"
         );
-        assert_eq!(c.pending_treasury(), Some(acc(BOB)));
-        ctx(BOB, 1, 1);
+        assert_eq!(c.pending_treasury(), Some((acc(BOB), U64(0))));
+        ctx(BOB, 1, delay);
         c.commit_treasury_rotation().unwrap();
         assert_eq!(c.get_treasury(), acc(BOB));
         assert_eq!(c.pending_treasury(), None);
+    }
+
+    #[test]
+    fn a_treasury_rotation_cannot_commit_inside_its_delay() {
+        let mut c = deploy_split();
+        let delay = c.upgrade_delay_ns;
+        ctx(OTHER_COUNCIL, 1, 0);
+        c.approve_treasury_rotation(acc(BOB)).unwrap();
+        ctx(BOB, 1, delay - 1);
+        assert!(
+            matches!(
+                c.commit_treasury_rotation(),
+                Err(ContractError::TreasuryRotationTooYoung)
+            ),
+            "a council that can redirect revenue instantly needs no quorum to steal it"
+        );
+        assert_eq!(c.get_treasury(), acc(TREASURY));
+        ctx(BOB, 1, delay);
+        c.commit_treasury_rotation().unwrap();
+        assert_eq!(c.get_treasury(), acc(BOB));
     }
 
     #[test]
@@ -5400,7 +5422,7 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
             crate::STATE_VERSION,
             near_sdk::borsh::to_vec(&c).unwrap().len()
         ),
-        (5, 622),
+        (5, 623),
         "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
          the shape that is deployed today, and update this fixture. A publish that \
          skips that leaves migrate unable to read what is on the account."

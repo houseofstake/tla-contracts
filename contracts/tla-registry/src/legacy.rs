@@ -104,6 +104,7 @@ impl From<TlaRegistryV4> for TlaRegistry {
             pending_council: old.pending_council,
             pending_council_at: old.pending_council_at,
             pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 }
@@ -207,6 +208,7 @@ impl From<TlaRegistryV2> for TlaRegistry {
             pending_council: old.pending_council,
             pending_council_at: old.pending_council_at,
             pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 }
@@ -306,6 +308,7 @@ impl From<TlaRegistryV1> for TlaRegistry {
             pending_council: None,
             pending_council_at: None,
             pending_treasury: None,
+            pending_treasury_at: None,
         }
     }
 }

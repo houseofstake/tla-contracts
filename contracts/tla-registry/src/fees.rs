@@ -84,6 +84,16 @@ mod tests {
     }
 
     #[test]
+    fn a_label_long_enough_to_overflow_the_length_byte_never_reaches_pricing() {
+        let longest = "a".repeat(60);
+        let tla: AccountId = "hos".parse().unwrap();
+        crate::types::validate_mintable_name(&tla, &longest)
+            .expect("60 bytes is the longest label the validator accepts");
+        assert!(u8::try_from(longest.len()).is_ok());
+        assert!(crate::types::validate_mintable_name(&tla, &"a".repeat(61)).is_err());
+    }
+
+    #[test]
     fn the_same_label_costs_the_same_under_any_namespace() {
         let config = default_fee_config();
         let terms = TlaTerms {

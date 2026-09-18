@@ -50,6 +50,19 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
+    TreasuryRotationApproved {
+        new_treasury: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    TreasuryRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    TreasuryRotated {
+        previous_treasury: AccountId,
+        new_treasury: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     BalanceSkimmed {
         amount: U128,
         to: AccountId,
