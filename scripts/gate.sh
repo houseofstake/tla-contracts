@@ -55,11 +55,20 @@ integration() {
   (cd integration && CARGO_TARGET_DIR=$INTEGRATION_TARGET "$@")
 }
 
+FLEET_TARGET=${FLEET_TARGET:-$PWD/target/fleet}
+
+fleet() {
+  (cd tools/fleet && CARGO_TARGET_DIR=$FLEET_TARGET "$@")
+}
+
 step "workspace fmt"
 cargo fmt --all --check
 
 step "integration fmt"
 integration cargo fmt --check
+
+step "fleet fmt"
+fleet cargo fmt --check
 
 step "advisories"
 if ! command -v cargo-audit >/dev/null; then
@@ -73,11 +82,17 @@ cargo audit
 step "integration advisories"
 cargo audit --file integration/Cargo.lock
 
+step "fleet advisories"
+cargo audit --file tools/fleet/Cargo.lock
+
 step "workspace clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
 step "integration clippy"
 integration cargo clippy --all-targets -- -D warnings
+
+step "fleet clippy"
+fleet cargo clippy --all-targets --locked -- -D warnings
 
 step "workspace unit tests"
 cargo test --workspace --lib

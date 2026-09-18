@@ -6,6 +6,7 @@ use near_sdk::FunctionError;
 pub enum ContractError {
     OnlyAdmin,
     OnlyCouncil,
+    OnlyTreasuryOrCouncil,
     MarketplacePaused,
     OnlyPaymentAuthority,
     AuthorityNotBoundToTla,
@@ -76,6 +77,10 @@ pub enum ContractError {
     UpgradeNotProven,
     CouncilUnchanged,
     CouncilIsSelf,
+    TreasuryUnchanged,
+    TreasuryIsSelf,
+    NoTreasuryRotationPending,
+    OnlyPendingTreasury,
     NoCouncilRotationPending,
     OnlyPendingCouncil,
     CouncilRotationTooYoung,

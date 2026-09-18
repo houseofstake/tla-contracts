@@ -86,8 +86,8 @@ fn rent_total(c: &TlaRegistry, name: &str) -> u128 {
 }
 
 fn rent_usd_open(c: &TlaRegistry, name: &str) -> u128 {
-    let total_len = (name.len() + 1 + TLA.len()) as u8;
-    fees::sub_account_rent(total_len, &PremiumCategory::Standard, &c.get_fee_config())
+    let label_len = u8::try_from(name.len()).unwrap_or(0);
+    fees::sub_account_rent(label_len, &PremiumCategory::Standard, &c.get_fee_config())
 }
 
 fn rent_near_open(c: &TlaRegistry, name: &str) -> u128 {
@@ -207,6 +207,31 @@ mod names {
             })
         ));
         assert!(validate_mintable_name(&tla, "ab").is_ok());
+    }
+
+    #[test]
+    fn a_quote_refuses_a_name_the_mint_could_never_accept() {
+        let c = deploy_with_open_tla();
+        let one_over = "a".repeat(64 - TLA.len());
+        assert!(matches!(
+            c.get_rent_price(acc(TLA), one_over),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::AccountIdTooLong
+            })
+        ));
+        assert!(matches!(
+            c.get_rent_price(acc(TLA), "-bad".to_string()),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::EdgeSeparator
+            })
+        ));
+        assert!(matches!(
+            c.get_rent_price(acc(TLA), "a".to_string()),
+            Err(ContractError::InvalidName {
+                reason: NameInvalidReason::LabelTooShort
+            })
+        ));
+        assert!(c.get_rent_price(acc(TLA), "ab".to_string()).is_ok());
     }
 
     #[test]
@@ -3435,7 +3460,170 @@ mod council_split {
         ));
         assert!(matches!(
             c.withdraw(U128(1)),
+            Err(ContractError::OnlyTreasuryOrCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_treasury_releases_revenue_without_a_council_vote() {
+        let mut c = deploy_split();
+        c.total_revenue = 500;
+        ctx(TREASURY, 1, 1);
+        c.withdraw(U128(500)).unwrap();
+        assert_eq!(
+            c.get_pending_refund(acc(TREASURY)).0,
+            500,
+            "the treasury must be able to release its own revenue on its own authority"
+        );
+        assert_eq!(c.get_stats().total_revenue_yocto.0, 0);
+    }
+
+    #[test]
+    fn revenue_still_only_ever_lands_on_the_treasury() {
+        let mut c = deploy_split();
+        c.total_revenue = 500;
+        ctx(OTHER_COUNCIL, 1, 1);
+        c.withdraw(U128(500)).unwrap();
+        assert_eq!(
+            c.get_pending_refund(acc(TREASURY)).0,
+            500,
+            "a council withdrawal credits the treasury, never the caller"
+        );
+        assert_eq!(c.get_pending_refund(acc(OTHER_COUNCIL)).0, 0);
+    }
+
+    #[test]
+    fn an_outsider_cannot_release_revenue() {
+        let mut c = deploy_split();
+        c.total_revenue = 500;
+        ctx(BOB, 1, 1);
+        assert!(matches!(
+            c.withdraw(U128(500)),
+            Err(ContractError::OnlyTreasuryOrCouncil)
+        ));
+        assert_eq!(c.get_stats().total_revenue_yocto.0, 500);
+    }
+
+    fn rotate_treasury_to(c: &mut TlaRegistry, next: &str) {
+        ctx(OTHER_COUNCIL, 1, 1);
+        c.approve_treasury_rotation(acc(next)).unwrap();
+        ctx(next, 1, 1);
+        c.commit_treasury_rotation().unwrap();
+    }
+
+    #[test]
+    fn a_rotation_takes_effect_only_once_the_incoming_treasury_claims_it() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 1, 1);
+        c.approve_treasury_rotation(acc(BOB)).unwrap();
+        assert_eq!(
+            c.get_treasury(),
+            acc(TREASURY),
+            "approving a rotation must not move the destination on its own"
+        );
+        assert_eq!(c.pending_treasury(), Some(acc(BOB)));
+        ctx(BOB, 1, 1);
+        c.commit_treasury_rotation().unwrap();
+        assert_eq!(c.get_treasury(), acc(BOB));
+        assert_eq!(c.pending_treasury(), None);
+    }
+
+    #[test]
+    fn an_address_that_cannot_sign_never_becomes_the_treasury() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 1, 1);
+        c.approve_treasury_rotation(acc(BOB)).unwrap();
+        ctx(OTHER_COUNCIL, 1, 1);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::OnlyPendingTreasury)
+        ));
+        ctx(ADMIN, 1, 1);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::OnlyPendingTreasury)
+        ));
+        assert_eq!(c.get_treasury(), acc(TREASURY));
+    }
+
+    #[test]
+    fn the_council_can_cancel_a_rotation_before_it_is_claimed() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 1, 1);
+        c.approve_treasury_rotation(acc(BOB)).unwrap();
+        c.cancel_treasury_rotation().unwrap();
+        assert_eq!(c.pending_treasury(), None);
+        ctx(BOB, 1, 1);
+        assert!(matches!(
+            c.commit_treasury_rotation(),
+            Err(ContractError::NoTreasuryRotationPending)
+        ));
+        assert_eq!(c.get_treasury(), acc(TREASURY));
+    }
+
+    #[test]
+    fn the_treasury_cannot_rotate_itself() {
+        let mut c = deploy_split();
+        ctx(TREASURY, 1, 1);
+        assert!(matches!(
+            c.approve_treasury_rotation(acc(BOB)),
             Err(ContractError::OnlyCouncil)
+        ));
+        assert_eq!(
+            c.get_treasury(),
+            acc(TREASURY),
+            "withdrawing freely must not let the treasury move the destination"
+        );
+    }
+
+    #[test]
+    fn an_operations_admin_cannot_rotate_the_treasury() {
+        let mut c = deploy_split();
+        ctx(ADMIN, 1, 1);
+        assert!(matches!(
+            c.approve_treasury_rotation(acc(BOB)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn the_treasury_cannot_be_rotated_to_a_no_op_or_to_the_registry() {
+        let mut c = deploy_split();
+        ctx(OTHER_COUNCIL, 1, 1);
+        assert!(matches!(
+            c.approve_treasury_rotation(acc(TREASURY)),
+            Err(ContractError::TreasuryUnchanged)
+        ));
+        assert!(matches!(
+            c.approve_treasury_rotation(near_sdk::env::current_account_id()),
+            Err(ContractError::TreasuryIsSelf)
+        ));
+    }
+
+    #[test]
+    fn revenue_released_after_a_rotation_lands_on_the_new_treasury() {
+        let mut c = deploy_split();
+        c.total_revenue = 500;
+        rotate_treasury_to(&mut c, BOB);
+        ctx(BOB, 1, 1);
+        c.withdraw(U128(500)).unwrap();
+        assert_eq!(c.get_pending_refund(acc(BOB)).0, 500);
+        assert_eq!(
+            c.get_pending_refund(acc(TREASURY)).0,
+            0,
+            "the outgoing treasury must not be credited after it is rotated out"
+        );
+    }
+
+    #[test]
+    fn the_outgoing_treasury_can_no_longer_release_revenue() {
+        let mut c = deploy_split();
+        c.total_revenue = 500;
+        rotate_treasury_to(&mut c, BOB);
+        ctx(TREASURY, 1, 1);
+        assert!(matches!(
+            c.withdraw(U128(500)),
+            Err(ContractError::OnlyTreasuryOrCouncil)
         ));
     }
 
@@ -4365,6 +4553,81 @@ mod migration {
         assert!(migrated.pending_council.is_none());
     }
 
+    fn as_v4(c: TlaRegistry) -> crate::legacy::TlaRegistryV4 {
+        crate::legacy::TlaRegistryV4 {
+            state_version: 4,
+            tlas: c.tlas,
+            sub_accounts: c.sub_accounts,
+            sub_accounts_by_owner: c.sub_accounts_by_owner,
+            sub_accounts_by_tla: c.sub_accounts_by_tla,
+            recent_activity: c.recent_activity,
+            activity_cursor: c.activity_cursor,
+            admins: c.admins,
+            fee_config: c.fee_config,
+            total_revenue: c.total_revenue,
+            sub_account_count: c.sub_account_count,
+            paused: c.paused,
+            version: c.version,
+            pending_refunds: c.pending_refunds,
+            total_pending_refunds: c.total_pending_refunds,
+            ft_allowlist: c.ft_allowlist,
+            business_sub_count: c.business_sub_count,
+            business_sub_cap_override: c.business_sub_cap_override,
+            tla_terms: c.tla_terms,
+            parked_names: c.parked_names,
+            reclaim_pending: c.reclaim_pending,
+            payment_authorities: c.payment_authorities,
+            recovery_authorities: c.recovery_authorities,
+            hos_extension: c.hos_extension,
+            grace_period_ns: c.grace_period_ns,
+            lease_term_ns: c.lease_term_ns,
+            price_oracle: c.price_oracle,
+            near_usd_rate_micro: c.near_usd_rate_micro,
+            rate_updated_at: c.rate_updated_at,
+            rate_sequence: c.rate_sequence,
+            treasury: c.treasury,
+            council: c.council,
+            marketplace_paused: c.marketplace_paused,
+            paused_until_ns: c.paused_until_ns,
+            unpaused_at: c.unpaused_at,
+            sweepable_tokens: c.sweepable_tokens,
+            suspended_until: c.suspended_until,
+            nft_contract_metadata: c.nft_contract_metadata,
+            approved_code_hash: c.approved_code_hash,
+            approved_at: c.approved_at,
+            upgrade_delay_ns: c.upgrade_delay_ns,
+            venues: c.venues,
+            upgrade_proven: c.upgrade_proven,
+            paid_order_ids: c.paid_order_ids,
+            pending_council: c.pending_council,
+            pending_council_at: c.pending_council_at,
+        }
+    }
+
+    #[test]
+    fn the_deployed_shape_migrates_and_starts_with_no_rotation_pending() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        c.total_revenue = 500;
+        let treasury = c.get_treasury();
+        let old = as_v4(c);
+        ctx("registry.testnet", 0, 0);
+        near_sdk::env::state_write(&old);
+        drop(old);
+
+        let migrated = crate::TlaRegistry::migrate();
+        assert_eq!(migrated.state_version, crate::STATE_VERSION);
+        assert_eq!(migrated.treasury, treasury, "the destination must survive");
+        assert_eq!(migrated.total_revenue, 500, "revenue must survive");
+        assert!(migrated.tlas.contains_key(&acc(TLA)));
+        assert!(
+            migrated.pending_treasury.is_none(),
+            "an upgrade must not arrive with a rotation already half-committed"
+        );
+    }
+
     #[test]
     #[should_panic(expected = "state version")]
     fn the_current_reader_is_not_offered_a_shape_it_cannot_read() {
@@ -5137,7 +5400,7 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
             crate::STATE_VERSION,
             near_sdk::borsh::to_vec(&c).unwrap().len()
         ),
-        (4, 621),
+        (5, 622),
         "the state shape moved. Bump STATE_VERSION, add a reader in legacy.rs for \
          the shape that is deployed today, and update this fixture. A publish that \
          skips that leaves migrate unable to read what is on the account."

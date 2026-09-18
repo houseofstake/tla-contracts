@@ -934,6 +934,10 @@ impl HosExtension {
         self.recovery.clone()
     }
 
+    pub fn get_treasury(&self) -> AccountId {
+        self.treasury.clone()
+    }
+
     pub fn approved_upgrade_hash(&self) -> Option<Base58CryptoHash> {
         self.approved_code_hash.map(Base58CryptoHash::from)
     }

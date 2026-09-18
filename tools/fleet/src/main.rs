@@ -308,6 +308,14 @@ fn view(net: Network, account: &str, method: &str) -> Result<serde_json::Value> 
         .with_context(|| format!("{account}.{method} did not answer with json"))
 }
 
+fn view_if_present(net: Network, account: &str, method: &str) -> Result<Option<serde_json::Value>> {
+    match view(net, account, method) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.to_string().contains("MethodNotFound") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn probe(net: Network, account: &str, method: &str) -> Result<()> {
     view(net, account, method).map(|_| ())
 }
@@ -614,6 +622,331 @@ const READINESS_STEPS: [(&str, &str); 7] = [
     ),
 ];
 
+const GLOBAL_CODE_COST_PER_BYTE: u128 = 100_000_000_000_000_000_000;
+
+const GLOBALS: [(&str, &str, &str); 1] = [("registrar", "registrar", "REGISTRAR_GLOBAL_ACCOUNT")];
+
+fn global_hash(net: Network, account: &str) -> Result<Option<String>> {
+    let answer = rpc(
+        net,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "query",
+            "params": {"request_type": "view_global_contract_code_by_account_id",
+                       "finality": "final", "account_id": account}
+        }),
+    );
+    let v = match answer {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("NO_GLOBAL_CONTRACT_CODE") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(v["result"]["hash"].as_str().map(str::to_string))
+}
+
+fn balance_yocto(net: Network, account: &str) -> Result<u128> {
+    let v = rpc(
+        net,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "query",
+            "params": {"request_type": "view_account", "finality": "final", "account_id": account}
+        }),
+    )?;
+    v["result"]["amount"]
+        .as_str()
+        .and_then(|a| a.parse().ok())
+        .with_context(|| format!("no balance for {account} on {net}"))
+}
+
+fn near_of(yocto: u128) -> String {
+    format!("{:.2}", yocto as f64 / 1e24)
+}
+
+fn publish(net: Network, release: &Release, tag_name: &str) -> Result<()> {
+    let (_, artifact, var) = GLOBALS
+        .iter()
+        .find(|(name, _, _)| *name == tag_name)
+        .with_context(|| format!("{tag_name} is not published as a global contract"))?;
+    let publisher = account(var);
+    let root = repo_root()?;
+    let bytes = load_staged(&root, release.name(), artifact)?;
+    let want = release.want(tag_name)?;
+    let staged = bs58_of(&bytes);
+    if staged != want {
+        bail!(
+            "staged {artifact} hashes {staged}, {} names {want}",
+            release.name()
+        );
+    }
+
+    println!("{artifact} {} bytes, hash {staged}", bytes.len());
+    println!("publisher {publisher} on {net}, from {var}");
+    println!(
+        "this signs DeployGlobalContract with the publisher's own key. It does not touch \
+         gd_approve or gd_deploy, so the council delay does not apply. That is the genesis \
+         path; once the publisher holds no key this command can no longer run and every \
+         later publish goes through the council."
+    );
+
+    if global_hash(net, &publisher)?.as_deref() == Some(want.as_str()) {
+        println!("already published, nothing to do");
+        return Ok(());
+    }
+
+    let cost = (bytes.len() as u128).saturating_mul(GLOBAL_CODE_COST_PER_BYTE);
+    let held = balance_yocto(net, &publisher)?;
+    println!(
+        "costs {} NEAR, never refunded, charged again on every republish",
+        near_of(cost)
+    );
+    println!("publisher holds {} NEAR", near_of(held));
+    if held < cost {
+        bail!(
+            "{publisher} is short {} NEAR",
+            near_of(cost.saturating_sub(held))
+        );
+    }
+
+    let path = staged_dir(&root, release.name()).join(format!("{artifact}.wasm"));
+    let sign_with = signer();
+    let status = Command::new("near")
+        .args([
+            "contract",
+            "deploy-as-global",
+            "use-file",
+            path.to_str().context("artifact path is not utf8")?,
+            "as-global-account-id",
+            &publisher,
+            "network-config",
+            net.cli_name(),
+            &sign_with,
+            "send",
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("{publisher}: near deploy-as-global exited {status}");
+    }
+
+    match global_hash(net, &publisher)? {
+        Some(now) if now == want => {
+            println!("\npublished {want} as a global under {publisher}");
+            println!(
+                "point an account at it with `near contract deploy ACCOUNT \
+                 use-global-account-id {publisher} with-init-call`, naming the init \
+                 method and its json args, on network-config {net} with {sign_with}"
+            );
+            Ok(())
+        }
+        Some(now) => bail!("published but chain reports {now}, expected {want}"),
+        None => bail!("near reported success but no global is published under {publisher}"),
+    }
+}
+
+const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const PRODUCTION_GRACE_NS: u64 = 14 * DAY_NS;
+
+fn derived(bad: &mut Vec<String>, label: &str, got: &serde_json::Value, want: &str) {
+    let got = got.as_str().unwrap_or("<absent>");
+    let verdict = if got == want {
+        "ok"
+    } else {
+        bad.push(format!("{label} is {got}, the fleet layout says {want}"));
+        "MISMATCH"
+    };
+    println!("{label:<30} {got:<34} {verdict}");
+}
+
+fn chosen(bad: &mut Vec<String>, label: &str, value: &str) {
+    if value == "<absent>" || value == "null" {
+        bad.push(format!("{label} did not answer"));
+        println!("{label:<30} {value:<34} UNREADABLE");
+        return;
+    }
+    println!("{label:<30} {value:<34} confirm against intent");
+}
+
+fn permanence(net: Network) -> Result<()> {
+    let registry = account("REGISTRY_ACCOUNT");
+    let extension = account("EXTENSION_ACCOUNT");
+    let recovery = account("RECOVERY_ACCOUNT");
+    let root = account("ROOT_ACCOUNT");
+    let deployer = account("DEPLOYER_ACCOUNT");
+
+    let root_config = view(net, &root, "config")?;
+    let deployer_config = view(net, &deployer, "config")?;
+    let registry_treasury = view(net, &registry, "get_treasury")?;
+    let extension_treasury = view_if_present(net, &extension, "get_treasury")?;
+    let grace = view(net, &registry, "get_grace_period_ns")?;
+
+    let mut bad = Vec::new();
+    println!("no setter exists for any of these. a wrong value means redeploying that contract.\n");
+    println!("{:<30} {:<34} state", "field", "on chain");
+
+    println!("\n-- derived from the fleet layout");
+    derived(
+        &mut bad,
+        "registry.hos_extension",
+        &view(net, &registry, "get_hos_extension")?,
+        &extension,
+    );
+    derived(
+        &mut bad,
+        "extension.registry",
+        &view(net, &extension, "get_registry")?,
+        &registry,
+    );
+    derived(
+        &mut bad,
+        "extension.recovery",
+        &view(net, &extension, "get_recovery")?,
+        &recovery,
+    );
+    derived(
+        &mut bad,
+        "registrar.registry",
+        &root_config["registry"],
+        &registry,
+    );
+    derived(
+        &mut bad,
+        "registrar.hos_extension",
+        &root_config["hos_extension"],
+        &extension,
+    );
+    derived(
+        &mut bad,
+        "registrar.recovery",
+        &root_config["recovery"],
+        &recovery,
+    );
+    derived(
+        &mut bad,
+        "registrar.wallet_impl",
+        &root_config["wallet_impl"],
+        &deployer,
+    );
+    derived(
+        &mut bad,
+        "recovery.transfer_authority",
+        &view(net, &recovery, "transfer_authority")?,
+        &extension,
+    );
+    derived(
+        &mut bad,
+        "registrar.chain_id",
+        &root_config["chain_id"],
+        net.cli_name(),
+    );
+
+    println!("\n-- the same value must appear in both places");
+    let registry_treasury = registry_treasury.as_str().unwrap_or("<absent>");
+    chosen(&mut bad, "registry.treasury", registry_treasury);
+    match extension_treasury.as_ref().and_then(|v| v.as_str()) {
+        Some(found) if found == registry_treasury => println!(
+            "{:<30} {:<34} matches the registry",
+            "extension.treasury", found
+        ),
+        Some(found) => {
+            bad.push(format!(
+                "extension.treasury is {found}, the registry pays {registry_treasury}"
+            ));
+            println!("{:<30} {:<34} DIVERGED", "extension.treasury", found);
+        }
+        None => {
+            bad.push(
+                "extension.treasury cannot be read; this build predates get_treasury".to_string(),
+            );
+            println!(
+                "{:<30} {:<34} NO GETTER",
+                "extension.treasury", "unreadable"
+            );
+        }
+    }
+
+    println!("\n-- chosen, nothing on chain can check these for you");
+    chosen(
+        &mut bad,
+        "recovery.owner",
+        view(net, &recovery, "owner")?
+            .as_str()
+            .unwrap_or("<absent>"),
+    );
+    chosen(
+        &mut bad,
+        "recovery.signer",
+        view(net, &recovery, "signer")?
+            .as_str()
+            .unwrap_or("<absent>"),
+    );
+    chosen(
+        &mut bad,
+        "registrar.wallet_timeout_secs",
+        &root_config["wallet_timeout_secs"].to_string(),
+    );
+
+    println!("\n-- global contract code the fleet points at");
+    for (tag, _, var) in &GLOBALS {
+        let Ok(publisher) = std::env::var(var) else {
+            println!("{:<30} {:<34} {var} unset, not checked", *tag, "-");
+            continue;
+        };
+        match global_hash(net, &publisher)? {
+            Some(hash) => println!("{:<30} {hash:<34} published", *tag),
+            None => {
+                bad.push(format!("{tag}: nothing published under {publisher}"));
+                println!("{:<30} {:<34} NOTHING PUBLISHED", *tag, publisher);
+            }
+        }
+    }
+
+    println!("\n-- delays");
+    match grace.as_str().and_then(|g| g.parse::<u64>().ok()) {
+        Some(ns) if ns >= PRODUCTION_GRACE_NS => println!(
+            "{:<30} {:<34} ok",
+            "registry.grace_period_ns",
+            format!("{} days", ns / DAY_NS)
+        ),
+        Some(ns) => {
+            bad.push(format!(
+                "grace_period_ns is {} days, production wants 14",
+                ns / DAY_NS
+            ));
+            println!(
+                "{:<30} {:<34} TOO SHORT",
+                "registry.grace_period_ns",
+                format!("{} days", ns / DAY_NS)
+            );
+        }
+        None => {
+            bad.push("grace_period_ns did not answer with a number".to_string());
+            println!("{:<30} {:<34} UNREADABLE", "registry.grace_period_ns", "-");
+        }
+    }
+    if deployer_config["production_delay"].as_bool() == Some(true) {
+        println!(
+            "{:<30} {:<34} ok",
+            "deployer.approval_delay_ns", "48h or longer"
+        );
+    } else {
+        bad.push("deployer approval_delay_ns is below the 48h production delay".to_string());
+        println!(
+            "{:<30} {:<34} TOO SHORT",
+            "deployer.approval_delay_ns", "under 48h"
+        );
+    }
+
+    if bad.is_empty() {
+        println!("\nevery permanent field agrees with the fleet layout");
+        return Ok(());
+    }
+    for line in &bad {
+        println!("\n  {line}");
+    }
+    bail!(
+        "{} permanent field(s) wrong, fix before deleting any key",
+        bad.len()
+    )
+}
+
 fn ready(net: Network, prof: Profile) -> Result<()> {
     let registry = account("REGISTRY_ACCOUNT");
     let state = view(net, &registry, "deployment_readiness")?;
@@ -701,7 +1034,12 @@ fn up(net: Network, prof: Profile, name: &str) -> Result<()> {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: fleet <up|plan|stage|verify|keys|ready|deploy> [release]");
+    let tags: Vec<&str> = GLOBALS.iter().map(|(tag, _, _)| *tag).collect();
+    eprintln!(
+        "usage: fleet <up|plan|stage|verify|keys|ready|permanence|deploy> [release]\n       \
+         fleet publish <release> <{}>",
+        tags.join("|")
+    );
     eprintln!("  NETWORK=testnet|mainnet  FLEET_PROFILE=test|production");
     eprintln!("  SIGN_WITH=sign-with-legacy-keychain (default) | sign-with-keychain");
     std::process::exit(2)
@@ -722,6 +1060,11 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "keys" => keys(net, prof),
         "ready" => ready(net, prof),
+        "permanence" => permanence(net),
+        "publish" => match (args.get(2), args.get(3)) {
+            (Some(name), Some(tag)) => publish(net, &resolve(&repo_root()?, name)?, tag),
+            _ => usage(),
+        },
         "plan" => match args.get(2) {
             Some(name) => plan(name),
             None => usage(),

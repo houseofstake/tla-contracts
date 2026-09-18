@@ -305,7 +305,7 @@ async fn deploy_demo_fleet_to_testnet() -> Result<()> {
 }
 
 const NEAR_USD_MICRO: u128 = 5_000_000;
-const GRACE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+const GRACE_NS: u64 = 14 * 24 * 60 * 60 * 1_000_000_000;
 const CONTRACT_FLOOR: NearToken = NearToken::from_near(6);
 const CREATION_DEPOSIT_DEFAULT: u128 = 10_000_000_000_000_000_000_000;
 

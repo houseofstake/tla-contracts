@@ -535,7 +535,7 @@ impl TlaRegistry {
     #[payable]
     pub fn withdraw(&mut self, amount: U128) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
-        self.assert_council()?;
+        self.assert_treasury_or_council()?;
         let recipient = self.treasury.clone();
         let amount_yocto = amount.0;
         if amount_yocto == 0 {
@@ -757,6 +757,76 @@ pub(crate) const UPGRADE_DELAY_NS: u64 = 48 * 60 * 60 * 1_000_000_000;
 
 #[near]
 impl TlaRegistry {
+    #[handle_result]
+    #[payable]
+    pub fn approve_treasury_rotation(
+        &mut self,
+        new_treasury: AccountId,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if new_treasury == self.treasury {
+            return Err(ContractError::TreasuryUnchanged);
+        }
+        if new_treasury == env::current_account_id() {
+            return Err(ContractError::TreasuryIsSelf);
+        }
+        self.pending_treasury = Some(new_treasury.clone());
+        Event::TreasuryRotationApproved {
+            new_treasury,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn cancel_treasury_rotation(&mut self) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if self.pending_treasury.take().is_none() {
+            return Err(ContractError::NoTreasuryRotationPending);
+        }
+        Event::TreasuryRotationCancelled {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn commit_treasury_rotation(&mut self) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        let pending = self
+            .pending_treasury
+            .clone()
+            .ok_or(ContractError::NoTreasuryRotationPending)?;
+        if env::predecessor_account_id() != pending {
+            return Err(ContractError::OnlyPendingTreasury);
+        }
+        let previous_treasury = std::mem::replace(&mut self.treasury, pending.clone());
+        self.pending_treasury = None;
+        let unclaimed = self
+            .pending_refunds
+            .get(&previous_treasury)
+            .copied()
+            .unwrap_or(0);
+        Event::TreasuryRotated {
+            previous_treasury,
+            new_treasury: pending,
+            unclaimed_on_previous_yocto: U128(unclaimed),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    pub fn pending_treasury(&self) -> Option<AccountId> {
+        self.pending_treasury.clone()
+    }
+
     #[handle_result]
     #[payable]
     pub fn approve_council_rotation(

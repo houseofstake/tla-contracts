@@ -93,7 +93,7 @@ pub async fn deploy_fleet() -> Result<Fleet> {
     let recovery = subaccount(&root, "rec", NearToken::from_near(10)).await?;
     let impl_owner = subaccount(&root, "w", NearToken::from_near(10)).await?;
     let tla = subaccount(&root, "tla", NearToken::from_near(10)).await?;
-    let bob = subaccount(&root, "bob", NearToken::from_near(5)).await?;
+    let bob = subaccount(&root, "bob", NearToken::from_near(200)).await?;
     let relay = subaccount(&root, "relay", NearToken::from_near(120)).await?;
     let impl_account = impl_owner.id().clone();
 
@@ -216,7 +216,7 @@ pub fn second_watcher_key() -> String {
         .to_string()
 }
 pub const NEAR_USD_MICRO: u128 = 5_000_000;
-pub const GRACE_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+pub const GRACE_NS: u64 = 14 * 24 * 60 * 60 * 1_000_000_000;
 
 pub async fn deploy_registry(fleet: &Fleet) -> Result<Contract> {
     deploy_registry_with_terms(fleet, None, GRACE_NS).await

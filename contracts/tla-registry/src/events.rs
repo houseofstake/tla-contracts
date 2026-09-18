@@ -277,6 +277,20 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
+    TreasuryRotationApproved {
+        new_treasury: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    TreasuryRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    TreasuryRotated {
+        previous_treasury: AccountId,
+        new_treasury: AccountId,
+        unclaimed_on_previous_yocto: U128,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     Upgraded { by: AccountId },
 }
 

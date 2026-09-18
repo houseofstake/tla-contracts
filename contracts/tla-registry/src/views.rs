@@ -66,6 +66,7 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
     ) -> Result<RentPriceView, ContractError> {
+        validate_mintable_name(&tla_id, &name)?;
         let terms = self.terms_for(&tla_id);
         let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
         let rent_usd = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config, &terms);

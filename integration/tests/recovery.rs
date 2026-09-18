@@ -14,6 +14,7 @@ use serde_json::json;
 const DOMAIN_REQUEST: u8 = 1;
 const DOMAIN_VERDICT: u8 = 2;
 const TIMELOCK_SECS: u32 = 60;
+const INSTALL_TGAS: u64 = 30;
 
 fn watcher_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
@@ -143,7 +144,7 @@ async fn request_name_recovery(
             "new_owner": new_owner,
             "attestation": sign(attestation, &message),
         }))
-        .max_gas()
+        .gas(near_sdk::Gas::from_tgas(INSTALL_TGAS))
         .transact()
         .await?;
     if let Some(failure) = requested.receipt_failures().first() {
@@ -191,7 +192,7 @@ async fn arm_and_install_name_policy(
             "attestation_key": pubkey_str(attestation),
             "timelock_secs": TIMELOCK_SECS,
         }))
-        .max_gas()
+        .gas(near_sdk::Gas::from_tgas(INSTALL_TGAS))
         .transact()
         .await?
         .into_result()?;
@@ -422,7 +423,7 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
             "attestation_key": pubkey_str(&attestation),
             "timelock_secs": TIMELOCK_SECS,
         }))
-        .max_gas()
+        .gas(near_sdk::Gas::from_tgas(INSTALL_TGAS))
         .transact()
         .await?
         .into_result()?;
@@ -443,7 +444,7 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
             "round": U64(0),
             "attestation": sign(&attestation, &request_msg),
         }))
-        .max_gas()
+        .gas(near_sdk::Gas::from_tgas(INSTALL_TGAS))
         .transact()
         .await?;
     assert!(requested.is_success(), "request_recovery: {requested:#?}");
@@ -469,7 +470,7 @@ async fn recovery_reaches_approved_for_a_native_account() -> Result<()> {
         .bob
         .call(recovery.id(), "submit_verdict")
         .args_json(json!({ "account": victim, "verdict": "Approve", "signatures": signatures }))
-        .max_gas()
+        .gas(near_sdk::Gas::from_tgas(INSTALL_TGAS))
         .transact()
         .await?;
     assert!(verdict.is_success(), "submit_verdict: {verdict:#?}");

@@ -26,6 +26,15 @@ ignore = [
     # dependencies expand with. It does not outlive compilation and no shipped
     # artifact links it.
     "RUSTSEC-2026-0173",
+
+    # rustls, reached only by the sandbox integration/Cargo.lock pulls through
+    # near-workspaces. It cannot be patched there: rustls 0.23.45 wants a newer
+    # aws-lc-rs than the one near-crypto 0.37.2 pins with an exact requirement.
+    # rustls is absent from the workspace lock entirely, so no contract links
+    # it. tools/fleet does reach the network over TLS and IS patched, to
+    # 0.23.45; this entry must not be read as permission to let that one slip,
+    # because the ignore list applies to every lock the gate audits.
+    "RUSTSEC-2026-0285",
 ]
 
 informational_warnings = ["unmaintained", "unsound", "notice"]

@@ -32,7 +32,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
-const STATE_VERSION: u16 = 4;
+const STATE_VERSION: u16 = 5;
 
 const ALLOWANCE_WARN_REMAINING: u64 = 5;
 const AUTHORITY_TLA_PREFIX: &[u8] = b"pa_tla:";
@@ -70,7 +70,7 @@ pub(crate) fn authority_used(authority: &AccountId, tla_id: &AccountId) -> u64 {
 const MIN_GRACE_PERIOD_NS: u64 = 60 * 1_000_000_000;
 pub(crate) const MIN_LEASE_TERM_NS: u64 = 60 * 1_000_000_000;
 pub(crate) const MAX_LEASE_TERM_NS: u64 = 10 * ONE_YEAR_NS;
-pub(crate) const PRODUCTION_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+pub(crate) const PRODUCTION_GRACE_PERIOD_NS: u64 = 14 * 24 * 60 * 60 * 1_000_000_000;
 pub(crate) const PRODUCTION_LEASE_TERM_NS: u64 = ONE_YEAR_NS;
 use hos_common::MAX_AUTHORITY_HOLD_NS;
 
@@ -163,6 +163,7 @@ pub struct TlaRegistry {
     pub(crate) paid_order_ids: LookupMap<String, PaidOrderState>,
     pub(crate) pending_council: Option<AccountId>,
     pub(crate) pending_council_at: Option<u64>,
+    pub(crate) pending_treasury: Option<AccountId>,
 }
 
 #[near]
@@ -242,6 +243,7 @@ impl TlaRegistry {
             paid_order_ids: LookupMap::new(StorageKey::PaidOrderIds),
             pending_council: None,
             pending_council_at: None,
+            pending_treasury: None,
         }
     }
 
@@ -250,6 +252,9 @@ impl TlaRegistry {
     pub fn migrate() -> Self {
         let mut current = match hos_common::state_version() {
             Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(4) => hos_common::try_state_read::<legacy::TlaRegistryV4>()
+                .map(Self::from)
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
             Some(2) => hos_common::try_state_read::<legacy::TlaRegistryV2>()
                 .map(Self::from)
@@ -493,6 +498,14 @@ impl TlaRegistry {
     pub(crate) fn assert_council(&self) -> Result<(), ContractError> {
         if env::predecessor_account_id() != self.council {
             return Err(ContractError::OnlyCouncil);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn assert_treasury_or_council(&self) -> Result<(), ContractError> {
+        let caller = env::predecessor_account_id();
+        if caller != self.treasury && caller != self.council {
+            return Err(ContractError::OnlyTreasuryOrCouncil);
         }
         Ok(())
     }
