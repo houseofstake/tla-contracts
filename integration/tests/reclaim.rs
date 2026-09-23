@@ -353,3 +353,343 @@ async fn a_reclaim_through_the_asset_gate_still_parks_the_wallet() -> Result<()>
     assert_eq!(lease["state"], "Parked");
     Ok(())
 }
+
+async fn deploy_test_ft(fleet: &Fleet, label: &str) -> Result<near_workspaces::Contract> {
+    let ft = fleet
+        .relay
+        .create_subaccount(label)
+        .initial_balance(near_workspaces::types::NearToken::from_near(20))
+        .transact()
+        .await?
+        .into_result()?
+        .deploy(&wasm("test_ft"))
+        .await?
+        .into_result()?;
+    ft.call("new")
+        .args_json(json!({ "owner": ft.id(), "total_supply": U128(1_000_000) }))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(ft)
+}
+
+async fn fund_with_ft(
+    ft: &near_workspaces::Contract,
+    holder: &near_workspaces::AccountId,
+) -> Result<()> {
+    ft.call("storage_deposit")
+        .args_json(json!({ "account_id": holder, "registration_only": true }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(
+            hos_common::FT_STORAGE_DEPOSIT_YOCTO,
+        ))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    ft.call("ft_transfer")
+        .args_json(json!({ "receiver_id": holder, "amount": U128(1_000) }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+async fn ft_balance(
+    ft: &near_workspaces::Contract,
+    holder: &near_workspaces::AccountId,
+) -> Result<u128> {
+    let raw: U128 = ft
+        .view("ft_balance_of")
+        .args_json(json!({ "account_id": holder }))
+        .await?
+        .json()?;
+    Ok(raw.0)
+}
+
+async fn is_parked(
+    registry: &near_workspaces::Contract,
+    tla: &near_workspaces::AccountId,
+    name: &str,
+) -> Result<bool> {
+    let parked: serde_json::Value = registry
+        .view("get_parked_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .await?
+        .json()?;
+    Ok(!parked.is_null())
+}
+
+async fn wallet_payout(
+    fleet: &Fleet,
+    tenant: &near_workspaces::AccountId,
+) -> Result<near_workspaces::AccountId> {
+    let payout: String = fleet
+        .worker
+        .view(tenant, "hos_payout_account")
+        .await?
+        .json()?;
+    Ok(payout.parse()?)
+}
+
+#[tokio::test]
+async fn a_held_allowlisted_token_stops_the_reclaim_until_it_is_swept() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let ft = deploy_test_ft(&fleet, "held").await?;
+    fleet
+        .council
+        .call(registry.id(), "add_ft_allowlist")
+        .args_json(json!({ "token": ft.id() }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let name = "stocked";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fund_with_ft(&ft, &tenant).await?;
+    assert_eq!(
+        ft_balance(&ft, &tenant).await?,
+        1_000,
+        "the tenant must actually hold the token, or the gate below is tested against nothing"
+    );
+
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+
+    let gated = fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        gated.is_success(),
+        "the gate refuses inside a callback, so the caller sees a successful \
+         transaction and only the state says whether the name was taken back"
+    );
+    assert!(
+        !is_parked(&registry, &tla, name).await?,
+        "a reclaim that parks a name still holding an allowlisted token hands the \
+         balance to whoever rents it next"
+    );
+
+    let payout = wallet_payout(&fleet, &tenant).await?;
+    let before = ft_balance(&ft, &payout).await?;
+    let swept = fleet
+        .relay
+        .call(registry.id(), "reclaim_sweep_ft")
+        .args_json(json!({ "tla_id": tla, "name": name, "ft": ft.id() }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(
+            hos_common::FT_STORAGE_DEPOSIT_YOCTO + 1,
+        ))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = swept.receipt_failures().first() {
+        bail!("reclaim_sweep_ft failed: {failure:?}");
+    }
+
+    assert_eq!(
+        ft_balance(&ft, &tenant).await?,
+        0,
+        "the sweep has to empty the account, not merely report success"
+    );
+    assert_eq!(
+        ft_balance(&ft, &payout).await? - before,
+        1_000,
+        "the swept balance must reach the payout account the wallet names"
+    );
+
+    let reclaimed = fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = reclaimed.receipt_failures().first() {
+        bail!("reclaim_finalize after the sweep failed: {failure:?}");
+    }
+    assert!(
+        is_parked(&registry, &tla, name).await?,
+        "once the balance is gone the gate must let the reclaim through, or a swept \
+         name can never be recovered at all"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_native_sweep_moves_the_balance_a_finalize_leaves_behind() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "funded";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fleet
+        .relay
+        .transfer_near(&tenant, near_workspaces::types::NearToken::from_near(5))
+        .await?
+        .into_result()?;
+
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+
+    let payout = wallet_payout(&fleet, &tenant).await?;
+    let held_before = balance_of(&fleet.worker, &tenant).await?;
+    let payout_before = balance_of(&fleet.worker, &payout).await?;
+    assert!(
+        held_before > near_workspaces::types::NearToken::from_near(5).as_yoctonear(),
+        "the account must hold real value before the sweep is worth asserting on"
+    );
+
+    let swept = fleet
+        .relay
+        .call(registry.id(), "reclaim_sweep_near")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    if let Some(failure) = swept.receipt_failures().first() {
+        bail!("reclaim_sweep_near failed: {failure:?}");
+    }
+
+    let held_after = balance_of(&fleet.worker, &tenant).await?;
+    let payout_after = balance_of(&fleet.worker, &payout).await?;
+    assert!(
+        held_after < held_before,
+        "the swept account still holds {held_after} against {held_before}"
+    );
+    assert!(
+        payout_after > payout_before,
+        "the balance left the account without reaching the payout account: \
+         {payout_before} to {payout_after}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unlisted_token_rides_the_name_to_its_next_renter() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let ft = deploy_test_ft(&fleet, "unlisted").await?;
+    let name = "carrier";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fund_with_ft(&ft, &tenant).await?;
+
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+    fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(
+        is_parked(&registry, &tla, name).await?,
+        "only an allowlisted token blocks the gate, so this reclaim must complete"
+    );
+
+    let price = rent_price(&registry, &tla, name).await?;
+    fleet
+        .relay
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(price))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    assert_eq!(
+        ft_balance(&ft, &tenant).await?,
+        1_000,
+        "this is the loss boundary the allowlist draws: a token nobody listed stays \
+         on the account and belongs to the incoming renter"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.relay.id().as_str(),
+        "the name has to have actually changed hands for the balance above to matter"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sweep_is_refused_once_the_name_has_been_re_rented() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry_with_terms(&fleet, Some(SHORT_TERM_NS), SHORT_TERM_NS).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let name = "resold";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    fleet
+        .worker
+        .fast_forward(BLOCKS_PAST_TERM_AND_GRACE)
+        .await?;
+    fleet
+        .relay
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let price = rent_price(&registry, &tla, name).await?;
+    fleet
+        .relay
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(price))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    fleet
+        .relay
+        .transfer_near(&tenant, near_workspaces::types::NearToken::from_near(3))
+        .await?
+        .into_result()?;
+    let held_before = balance_of(&fleet.worker, &tenant).await?;
+
+    let refused = fleet
+        .relay
+        .call(registry.id(), "reclaim_sweep_near")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    let landed = refused.is_success() && refused.receipt_failures().is_empty();
+    assert!(
+        !landed,
+        "a name that has been rented again is the new renter's: sweeping it would \
+         take the funds of someone who just paid for the account"
+    );
+    assert_eq!(
+        balance_of(&fleet.worker, &tenant).await?,
+        held_before,
+        "the refused sweep must leave the new renter's balance untouched"
+    );
+    Ok(())
+}

@@ -876,3 +876,80 @@ async fn revoking_a_relay_stops_new_mints_and_leaves_settled_ones_alone() -> Res
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_transfer_is_refused_while_the_name_holds_a_listed_token() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+
+    let ft = fleet
+        .relay
+        .create_subaccount("held")
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await?
+        .into_result()?
+        .deploy(&wasm("test_ft"))
+        .await?
+        .into_result()?;
+    ft.call("new")
+        .args_json(json!({ "owner": ft.id(), "total_supply": near_sdk::json_types::U128(1_000) }))
+        .transact()
+        .await?
+        .into_result()?;
+    fleet
+        .council
+        .call(registry.id(), "add_ft_allowlist")
+        .args_json(json!({ "token": ft.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let name = "loaded";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    ft.call("storage_deposit")
+        .args_json(json!({ "account_id": tenant, "registration_only": true }))
+        .deposit(NearToken::from_yoctonear(
+            hos_common::FT_STORAGE_DEPOSIT_YOCTO,
+        ))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    ft.call("ft_transfer")
+        .args_json(json!({ "receiver_id": tenant, "amount": near_sdk::json_types::U128(1) }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let gated = fleet
+        .bob
+        .call(registry.id(), "transfer_sub_account")
+        .args_json(json!({
+            "tla_id": tla,
+            "name": name,
+            "new_owner": fleet.relay.id(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+
+    assert!(
+        !gated.is_success(),
+        "the sender has to be told: the gate panics with sub_account_holds_tokens \
+         rather than reporting a transfer that quietly did nothing"
+    );
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        fleet.bob.id().as_str(),
+        "a transfer that goes through while the name still holds a token hands the \
+         balance to the recipient, which is why the sender has to be told before they try"
+    );
+    Ok(())
+}

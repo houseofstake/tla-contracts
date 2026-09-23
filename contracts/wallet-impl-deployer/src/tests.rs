@@ -56,6 +56,24 @@ fn key_delete_callback(result: near_sdk::PromiseResult) {
 }
 
 #[test]
+fn the_upgrade_proven_flag_is_readable() {
+    let mut c = deploy();
+    assert!(!c.upgrade_proven());
+    c.upgrade_proven = true;
+    assert!(c.upgrade_proven());
+}
+
+#[test]
+fn the_state_version_is_readable_from_chain() {
+    let c = deploy();
+    assert_eq!(
+        c.state_version(),
+        crate::STATE_VERSION,
+        "an operator must be able to read which shape is on the account before an upgrade"
+    );
+}
+
+#[test]
 fn a_key_that_survived_deletion_is_not_reported_as_deleted() {
     let mut c = deploy();
     key_delete_callback(near_sdk::PromiseResult::Failed);

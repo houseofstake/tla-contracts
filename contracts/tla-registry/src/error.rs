@@ -91,6 +91,7 @@ pub enum ContractError {
     ApprovalTooYoung,
     InsufficientContractBalance,
     ReclaimInProgress,
+    ReclaimNotPending,
     SubAccountTlaMismatch,
     SubAccountNotSellable,
     BusinessSubNotResellable,

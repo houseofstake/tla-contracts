@@ -326,6 +326,14 @@ impl ImplDeployer {
         self.approved_upgrade_at.map(near_sdk::json_types::U64)
     }
 
+    pub fn upgrade_proven(&self) -> bool {
+        self.upgrade_proven
+    }
+
+    pub fn state_version(&self) -> u16 {
+        self.state_version
+    }
+
     pub fn current_hash(&self) -> Option<Base58CryptoHash> {
         self.current_hash.map(Base58CryptoHash::from)
     }

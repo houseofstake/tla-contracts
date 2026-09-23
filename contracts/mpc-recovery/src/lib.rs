@@ -34,6 +34,7 @@ const UPGRADE_DELAY_NS: u64 = 72 * 60 * 60 * 1_000_000_000;
 /// Once the watcher set is set through governance it cannot drop to one, so no
 /// single watcher can carry a recovery on its own.
 const MIN_WATCHER_THRESHOLD: u32 = 2;
+const MAX_WATCHERS: u32 = 32;
 const STATE_VERSION: u16 = 1;
 
 #[near(contract_state)]
@@ -91,6 +92,10 @@ impl MpcRecovery {
     ) -> Self {
         require!(threshold >= MIN_WATCHER_THRESHOLD, error::THRESHOLD_TOO_LOW);
         require!((threshold as usize) <= watchers.len(), error::BAD_THRESHOLD);
+        require!(
+            watchers.len() as u32 <= MAX_WATCHERS,
+            error::TOO_MANY_WATCHERS
+        );
         require!(owner != env::current_account_id(), error::OWNER_IS_SELF);
         let mut seen = BTreeSet::new();
         for watcher in &watchers {
@@ -200,6 +205,10 @@ impl MpcRecovery {
         self.assert_owner();
         require!(threshold >= MIN_WATCHER_THRESHOLD, error::THRESHOLD_TOO_LOW);
         require!((threshold as usize) <= watchers.len(), error::BAD_THRESHOLD);
+        require!(
+            watchers.len() as u32 <= MAX_WATCHERS,
+            error::TOO_MANY_WATCHERS
+        );
         let mut seen = BTreeSet::new();
         for watcher in &watchers {
             require!(hos_common::is_ed25519(watcher), error::WATCHER_NOT_ED25519);
@@ -722,6 +731,10 @@ impl MpcRecovery {
         self.accounts.get(&account).map(|a| a.round)
     }
 
+    pub fn round_floor_of(&self, account: AccountId) -> u64 {
+        self.round_floor.get(&account).copied().unwrap_or(0)
+    }
+
     pub fn timelock_of(&self, account: AccountId) -> Option<u32> {
         self.accounts.get(&account).map(|a| a.policy.timelock_secs)
     }
@@ -774,6 +787,14 @@ impl MpcRecovery {
 
     pub fn upgrade_delay_ns(&self) -> U64 {
         U64(UPGRADE_DELAY_NS)
+    }
+
+    pub fn upgrade_proven(&self) -> bool {
+        self.upgrade_proven
+    }
+
+    pub fn state_version(&self) -> u16 {
+        self.state_version
     }
 
     pub fn on_wallet_transferred(&mut self, wallet: AccountId) -> bool {

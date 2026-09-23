@@ -44,7 +44,7 @@ pub fn default_fee_config() -> FeeConfig {
         rent_tier_10_usd_micro: U128(10 * USD_MICRO_PER_DOLLAR),
         rent_tier_12plus_usd_micro: U128(5 * USD_MICRO_PER_DOLLAR),
         sub_fee_per_account_usd_micro: U128(USD_MICRO_PER_DOLLAR / 2),
-        account_creation_deposit_yocto: U128(ONE_NEAR / 100),
+        account_creation_deposit_yocto: U128(12 * ONE_NEAR / 1000),
         business_max_subs: 1000,
         retraction_notice_ns: U64(7 * 24 * 60 * 60 * 1_000_000_000),
         max_rate_move_bps: 2_000,

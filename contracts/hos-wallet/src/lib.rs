@@ -517,6 +517,23 @@ impl TenantWallet {
         self.payout_account.clone()
     }
 
+    pub fn hos_freeze_expiry(&self) -> U64 {
+        U64(if self.effective_frozen() == FreezeState::AuthorityFrozen {
+            self.authority_freeze_until_ns
+        } else {
+            0
+        })
+    }
+
+    pub fn hos_revert_window(&self) -> Option<(AccountId, U64)> {
+        if env::block_timestamp() >= self.revert_until_ns {
+            return None;
+        }
+        self.revert_to
+            .clone()
+            .map(|to| (to, U64(self.revert_until_ns)))
+    }
+
     pub fn hos_impl_pin(&self) -> ImplPinView {
         ImplPinView {
             pinned: self.pinned_impl.map(Base58CryptoHash::from),
@@ -524,6 +541,10 @@ impl TenantWallet {
             approved_at_ns: U64(self.approved_impl_at),
             pin_delay_ns: U64(IMPL_PIN_DELAY_NS),
         }
+    }
+
+    pub fn hos_state_version(&self) -> u16 {
+        self.state_version
     }
 
     #[payable]

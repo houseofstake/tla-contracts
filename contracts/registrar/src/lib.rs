@@ -394,6 +394,14 @@ impl Registrar {
         U64(UPGRADE_DELAY_NS)
     }
 
+    pub fn upgrade_proven(&self) -> bool {
+        self.upgrade_proven
+    }
+
+    pub fn state_version(&self) -> u16 {
+        self.state_version
+    }
+
     pub fn registry(&self) -> &AccountId {
         &self.registry
     }

@@ -311,6 +311,48 @@ fn a_revert_returns_the_name_to_where_it_came_from_without_a_fresh_arming() {
 }
 
 #[test]
+fn the_revert_window_is_readable_while_it_is_open_and_closes_with_it() {
+    let mut c = deploy();
+    assert!(c.hos_revert_window().is_none());
+
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_transfer_ownership(Some(acc(BUYER)), RotationCause::Transfer, Some(acc(OWNER)));
+    let (target, until) = c
+        .hos_revert_window()
+        .expect("a rotation records where the name can be pulled back to");
+    assert_eq!(target, acc(OWNER));
+
+    ctx(AUTHORITY, 1, until.0);
+    assert!(
+        c.hos_revert_window().is_none(),
+        "a closed window must not read as revertible"
+    );
+}
+
+#[test]
+fn the_authority_freeze_expiry_is_readable_and_a_self_freeze_reports_none() {
+    let mut c = deploy();
+    assert_eq!(c.hos_freeze_expiry().0, 0);
+
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_freeze();
+    assert!(
+        c.hos_freeze_expiry().0 > 0,
+        "a holder must be able to see when a freeze HoS set will lapse"
+    );
+
+    ctx(AUTHORITY, 1, now_ns());
+    c.hos_unfreeze();
+    ctx(OWNER, 1, now_ns());
+    c.hos_freeze();
+    assert_eq!(
+        c.hos_freeze_expiry().0,
+        0,
+        "a freeze the holder set has no expiry to report"
+    );
+}
+
+#[test]
 #[should_panic(expected = "only return the name to where it came from")]
 fn a_revert_cannot_send_the_name_to_a_third_party() {
     let mut c = deploy();
@@ -2020,6 +2062,16 @@ mod deployed_shape {
             crate::STATE_VERSION,
             "a fleet-wide publish must be able to learn a wallet's state version without \
              parsing the rest, or a shape change becomes an outage on every leased account"
+        );
+    }
+
+    #[test]
+    fn the_state_version_is_readable_without_reaching_for_raw_state() {
+        let c = deploy();
+        assert_eq!(
+            c.hos_state_version(),
+            crate::STATE_VERSION,
+            "a view answers this on an account whose raw state is too large to fetch"
         );
     }
 }

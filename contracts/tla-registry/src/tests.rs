@@ -422,6 +422,141 @@ mod tla_admin {
     }
 
     #[test]
+    fn an_operator_admin_cannot_grant_the_recovery_role() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        assert!(
+            matches!(
+                c.add_recovery_authority(acc(CAROL)),
+                Err(ContractError::OnlyCouncil)
+            ),
+            "revoking the role already needs the council, so granting it must too"
+        );
+    }
+
+    #[test]
+    fn allocating_a_tla_takes_a_vote_at_either_arity() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        assert!(matches!(
+            c.register_tla(
+                acc("one.testnet"),
+                TlaType::Open,
+                PremiumCategory::Standard,
+                None
+            ),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert!(
+            matches!(
+                c.register_tlas(
+                    vec![acc("one.testnet")],
+                    TlaType::Open,
+                    PremiumCategory::Standard,
+                    None
+                ),
+                Err(ContractError::OnlyCouncil)
+            ),
+            "the batch form must not be a way around the vote the singular form needs"
+        );
+        ctx(COUNCIL, 1, 0);
+        c.register_tlas(
+            vec![acc("one.testnet")],
+            TlaType::Open,
+            PremiumCategory::Standard,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_operator_decides_when_a_tla_opens_at_either_arity() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(COUNCIL, 1, 0);
+        c.register_tlas(
+            vec![acc("one.testnet"), acc("two.testnet")],
+            TlaType::Open,
+            PremiumCategory::Standard,
+            None,
+        )
+        .unwrap();
+        ctx(BOB, 1, 0);
+        c.activate_open_tla(acc("one.testnet")).unwrap();
+        assert!(
+            c.activate_open_tlas(vec![acc("two.testnet")]).is_ok(),
+            "release timing is operational, so both arities stay with the operator"
+        );
+    }
+
+    #[test]
+    fn naming_a_licensee_takes_a_vote() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(COUNCIL, 1, 0);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        ctx(BOB, 1, 0);
+        assert!(
+            matches!(
+                c.admin_set_tla_type(acc(TLA), TlaType::Business, Some(acc(CAROL))),
+                Err(ContractError::OnlyCouncil)
+            ),
+            "a licensee mints under the TLA, so seating one is not an operator call"
+        );
+    }
+
+    #[test]
+    fn the_operator_owns_the_collection_metadata_and_the_day_to_day() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        c.admin_set_nft_metadata("HoS".to_string(), "HOS".to_string(), None, None, None)
+            .unwrap();
+        c.pause().unwrap();
+        c.unpause().unwrap();
+        assert!(
+            c.remove_ft_allowlist(acc("token.testnet")).is_ok(),
+            "an incident response must not wait on a vote"
+        );
+    }
+
+    #[test]
+    fn the_rate_bootstrap_takes_a_vote() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        assert!(matches!(
+            c.admin_set_initial_rate(U128(NEAR_USD_MICRO)),
+            Err(ContractError::OnlyCouncil)
+        ));
+    }
+
+    #[test]
+    fn an_operator_admin_cannot_widen_the_asset_gate() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        assert!(matches!(
+            c.add_ft_allowlist(acc("token.testnet")),
+            Err(ContractError::OnlyCouncil)
+        ));
+        assert!(
+            c.remove_ft_allowlist(acc("token.testnet")).is_ok(),
+            "narrowing the gate stays with the operator so an incident needs no vote"
+        );
+    }
+
+    #[test]
     fn duplicate_registration_rejected() {
         let mut c = deploy_with_open_tla();
         ctx(ADMIN, 1, 0);
@@ -1828,10 +1963,40 @@ mod reclaim {
             .reclaim_finalize(acc(TLA), "alice".to_string())
             .expect("reclaim takes the in-progress lock");
         assert!(c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
-        ctx(ADMIN, 1, 2);
+        ctx(ADMIN, 1, expires + GRACE_NS + DAY_NS);
         c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string())
             .unwrap();
         assert!(!c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn clearing_refuses_a_name_with_nothing_pending() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ADMIN, 1, 2);
+        assert!(
+            matches!(
+                c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string()),
+                Err(ContractError::ReclaimNotPending)
+            ),
+            "a clear that removes nothing must not emit an event saying it did"
+        );
+    }
+
+    #[test]
+    fn clearing_refuses_a_name_that_is_not_reclaimable() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+        c.reclaim_pending.insert(key, true);
+        ctx(ADMIN, 1, 2);
+        assert!(
+            matches!(
+                c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string()),
+                Err(ContractError::SubAccountNotReclaimable)
+            ),
+            "the hatch exists for a stuck reclaim, so it must not reach a live lease"
+        );
     }
 
     #[test]
@@ -1958,6 +2123,52 @@ mod refunds_and_admin {
         assert_eq!(c.get_ft_allowlist(), vec![acc("token.testnet")]);
         c.remove_ft_allowlist(acc("token.testnet")).unwrap();
         assert!(c.get_ft_allowlist().is_empty());
+    }
+
+    #[test]
+    fn a_token_stays_sweepable_after_it_leaves_the_transfer_gate() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 1);
+        let token = acc("token.testnet");
+        c.add_ft_allowlist(token.clone()).unwrap();
+        assert_eq!(c.get_sweepable_tokens(), vec![token.clone()]);
+
+        ctx(ADMIN, 1, 1);
+        c.remove_ft_allowlist(token.clone()).unwrap();
+        assert!(c.get_ft_allowlist().is_empty());
+        assert_eq!(
+            c.get_sweepable_tokens(),
+            vec![token],
+            "a token off the gate must remain sweepable or a holder's balance strands"
+        );
+    }
+
+    #[test]
+    fn the_upgrade_proven_flag_is_readable_before_and_after_a_migration() {
+        let mut c = deploy();
+        assert!(
+            !c.upgrade_proven(),
+            "a fresh deploy has not proven its upgrade path and cannot be sealed"
+        );
+        c.upgrade_proven = true;
+        assert!(c.upgrade_proven());
+    }
+
+    #[test]
+    fn the_state_version_view_reports_the_shape_on_disk() {
+        let c = deploy();
+        let bytes = near_sdk::borsh::to_vec(&c).unwrap();
+        assert_eq!(
+            c.state_version(),
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            "the view must read the same two bytes migrate dispatches on, or an operator \
+             confirms a shape the upgrade will not take"
+        );
+        assert_eq!(
+            c.state_version(),
+            crate::STATE_VERSION,
+            "view_state refuses on this account, so a view is the only way to learn the shape"
+        );
     }
 
     #[test]
@@ -3108,6 +3319,20 @@ mod price_oracle {
     }
 
     #[test]
+    fn the_operator_repoints_the_oracle_without_a_vote() {
+        let mut c = deploy();
+        ctx(ADMIN, 1, 0);
+        c.add_admin(acc(BOB)).unwrap();
+        ctx(BOB, 1, 0);
+        c.set_price_oracle(acc(KEEPER)).unwrap();
+        assert_eq!(
+            c.get_price_oracle(),
+            acc(KEEPER),
+            "a dead keeper leaves every price stale, so replacing it cannot wait on the council"
+        );
+    }
+
+    #[test]
     fn admin_initializes_rate_and_stamps_sequence() {
         let c = deploy_initialized();
         assert_eq!(c.get_near_usd_rate().0, dollars(5));
@@ -3658,11 +3883,11 @@ mod council_split {
             Err(ContractError::OnlyCouncil)
         ));
         assert!(matches!(
-            c.add_recovery_authority(acc(BOB)),
+            c.approve_upgrade([0u8; 32].into()),
             Err(ContractError::OnlyCouncil)
         ));
         assert!(matches!(
-            c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None),
+            c.add_admin(acc(BOB)),
             Err(ContractError::OnlyCouncil)
         ));
     }
@@ -4573,6 +4798,29 @@ mod migration {
         );
         assert_eq!(migrated.lease_term_ns, crate::PRODUCTION_LEASE_TERM_NS);
         assert!(migrated.pending_council.is_none());
+    }
+
+    #[test]
+    fn the_shape_on_the_account_today_passes_through_untouched() {
+        let mut c = deploy();
+        ctx(COUNCIL, 1, 0);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        c.total_revenue = 700;
+        let treasury = c.get_treasury();
+        ctx("registry.testnet", 0, 0);
+        near_sdk::env::state_write(&c);
+        drop(c);
+
+        let migrated = crate::TlaRegistry::migrate();
+        assert_eq!(
+            migrated.state_version(),
+            crate::STATE_VERSION,
+            "the redeploy reads its own shape back, so no legacy reader is involved"
+        );
+        assert_eq!(migrated.treasury, treasury, "the destination must survive");
+        assert_eq!(migrated.total_revenue, 700, "revenue must survive");
+        assert!(migrated.tlas.contains_key(&acc(TLA)));
     }
 
     fn as_v4(c: TlaRegistry) -> crate::legacy::TlaRegistryV4 {

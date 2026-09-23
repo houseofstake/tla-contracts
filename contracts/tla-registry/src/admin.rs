@@ -198,6 +198,35 @@ impl TlaRegistry {
 
     #[handle_result]
     #[payable]
+    pub fn admin_set_tla_type(
+        &mut self,
+        tla_id: AccountId,
+        tla_type: TlaType,
+        licensee: Option<AccountId>,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_council()?;
+        if tla_type == TlaType::Business && licensee.is_none() {
+            return Err(ContractError::BusinessTlaRequiresLicensee);
+        }
+        let entry = self
+            .tlas
+            .get_mut(&tla_id)
+            .ok_or(ContractError::TlaNotFound)?;
+        entry.tla_type = tla_type.clone();
+        entry.licensee = licensee.clone();
+        Event::TlaTypeChanged {
+            tla_id,
+            tla_type,
+            licensee,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
     pub fn suspend_tla(&mut self, tla_id: AccountId) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_admin()?;
@@ -562,7 +591,7 @@ impl TlaRegistry {
     #[payable]
     pub fn add_ft_allowlist(&mut self, token: AccountId) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
-        self.assert_admin()?;
+        self.assert_council()?;
         if self.ft_allowlist.contains(&token) {
             return Ok(());
         }
@@ -656,6 +685,10 @@ impl TlaRegistry {
         crate::assert_one_yocto()?;
         self.assert_admin()?;
         let key = sub_account_key(&tla_id, &name);
+        if !self.reclaim_pending.contains_key(&key) {
+            return Err(ContractError::ReclaimNotPending);
+        }
+        self.resolve_reclaimable(&tla_id, &key)?;
         self.reclaim_pending.remove(&key);
         Event::ReclaimPendingCleared {
             full_name: key,
@@ -1000,5 +1033,13 @@ impl TlaRegistry {
 
     pub fn upgrade_delay_ns(&self) -> near_sdk::json_types::U64 {
         near_sdk::json_types::U64(self.upgrade_delay_ns)
+    }
+
+    pub fn upgrade_proven(&self) -> bool {
+        self.upgrade_proven
+    }
+
+    pub fn state_version(&self) -> u16 {
+        self.state_version
     }
 }

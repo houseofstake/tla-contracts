@@ -936,6 +936,75 @@ fn transfer_resets_idle_policy() {
 }
 
 #[test]
+fn the_round_floor_is_readable_and_survives_the_policy_it_came_from() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    assert_eq!(c.round_floor_of(account_id()), 0);
+    install(&mut c, mother_pk);
+    ctx(TRANSFER_AUTHORITY, 0, 1);
+    c.on_wallet_transferred(account_id());
+    assert!(c.accounts.get(&account_id()).is_none());
+    assert_eq!(
+        c.round_floor_of(account_id()),
+        c.round_floor.get(&account_id()).copied().unwrap_or(0),
+        "the floor that stops a round being rewound must be observable after the policy is gone"
+    );
+}
+
+#[test]
+fn the_upgrade_proven_flag_is_readable() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    assert!(!c.upgrade_proven());
+    c.upgrade_proven = true;
+    assert!(c.upgrade_proven());
+}
+
+fn watcher_keys(n: usize) -> Vec<PublicKey> {
+    (0..n).map(|_| keypair().1).collect()
+}
+
+#[test]
+fn the_watcher_set_is_bounded_so_a_quorum_check_cannot_run_out_of_gas() {
+    let full = watcher_keys(crate::MAX_WATCHERS as usize);
+    let c = deploy(&full, 2);
+    assert_eq!(
+        c.watchers().len(),
+        crate::MAX_WATCHERS as usize,
+        "the ceiling itself must remain usable"
+    );
+}
+
+#[test]
+#[should_panic(expected = "watcher set is full")]
+fn a_constructor_cannot_seat_more_watchers_than_the_ceiling() {
+    let over = watcher_keys(crate::MAX_WATCHERS as usize + 1);
+    deploy(&over, 2);
+}
+
+#[test]
+#[should_panic(expected = "watcher set is full")]
+fn set_watchers_cannot_seat_more_watchers_than_the_ceiling() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    let over = watcher_keys(crate::MAX_WATCHERS as usize + 1);
+    ctx_yocto(OWNER, 0, 0);
+    c.set_watchers(over, 2);
+}
+
+#[test]
+fn the_state_version_is_readable_from_chain() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1, spare_watcher()], 2);
+    assert_eq!(
+        c.state_version(),
+        crate::STATE_VERSION,
+        "an operator must be able to read which shape is on the account before an upgrade"
+    );
+}
+
+#[test]
 fn transfer_resets_requested_policy() {
     let (_, wk1) = keypair();
     let (mother, mother_pk) = keypair();

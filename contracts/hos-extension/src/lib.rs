@@ -1004,6 +1004,14 @@ impl HosExtension {
         self.effective_paused()
     }
 
+    pub fn get_pause_expiry(&self) -> U64 {
+        U64(if self.effective_paused() {
+            self.paused_until_ns
+        } else {
+            0
+        })
+    }
+
     pub fn get_admins(&self) -> Vec<AccountId> {
         self.admins.iter().cloned().collect()
     }
@@ -1030,6 +1038,14 @@ impl HosExtension {
 
     pub fn upgrade_delay_ns(&self) -> U64 {
         U64(UPGRADE_DELAY_NS)
+    }
+
+    pub fn upgrade_proven(&self) -> bool {
+        self.upgrade_proven
+    }
+
+    pub fn state_version(&self) -> u16 {
+        self.state_version
     }
 
     pub fn min_sweep_attached(&self) -> U128 {

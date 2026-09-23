@@ -181,6 +181,24 @@ fn mint_failure_refunds_registry() {
 }
 
 #[test]
+fn the_upgrade_proven_flag_is_readable() {
+    let mut c = deploy();
+    assert!(!c.upgrade_proven());
+    c.upgrade_proven = true;
+    assert!(c.upgrade_proven());
+}
+
+#[test]
+fn the_state_version_is_readable_from_chain() {
+    let c = deploy();
+    assert_eq!(
+        c.state_version(),
+        crate::STATE_VERSION,
+        "an operator must be able to read which shape is on the account before an upgrade"
+    );
+}
+
+#[test]
 fn council_sets_min_balance_to_the_storage_floor() {
     let mut c = deploy();
     ctx(COUNCIL, 1);

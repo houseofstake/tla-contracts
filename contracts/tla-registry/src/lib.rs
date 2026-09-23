@@ -336,7 +336,7 @@ impl TlaRegistry {
     #[payable]
     pub fn set_price_oracle(&mut self, account: AccountId) -> Result<(), ContractError> {
         assert_one_yocto()?;
-        self.assert_council()?;
+        self.assert_admin()?;
         self.price_oracle = account.clone();
         Event::PriceOracleUpdated {
             account,

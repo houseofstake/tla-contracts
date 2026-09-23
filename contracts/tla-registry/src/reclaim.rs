@@ -197,7 +197,7 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
-    fn resolve_reclaimable(
+    pub(crate) fn resolve_reclaimable(
         &self,
         tla_id: &AccountId,
         key: &str,

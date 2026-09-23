@@ -46,6 +46,13 @@ pub enum Event {
         expires_at: U64,
     },
     #[event_version("1.0.0")]
+    TlaTypeChanged {
+        tla_id: AccountId,
+        tla_type: TlaType,
+        licensee: Option<AccountId>,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     TlaSuspended { tla_id: AccountId, by: AccountId },
     #[event_version("1.0.0")]
     TlaUnsuspended { tla_id: AccountId, by: AccountId },

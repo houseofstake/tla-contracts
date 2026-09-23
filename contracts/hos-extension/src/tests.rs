@@ -548,6 +548,39 @@ fn only_an_admin_can_lift_a_pause() {
 }
 
 #[test]
+fn the_pause_expiry_is_readable_and_clears_when_the_pause_lifts() {
+    let mut c = deploy();
+    assert_eq!(c.get_pause_expiry().0, 0);
+    ctx(ADMIN, 1);
+    c.pause().unwrap();
+    assert!(
+        c.get_pause_expiry().0 > 0,
+        "a bounded pause must expose the point at which it lapses"
+    );
+    ctx(ADMIN, 1);
+    c.unpause().unwrap();
+    assert_eq!(c.get_pause_expiry().0, 0);
+}
+
+#[test]
+fn the_upgrade_proven_flag_is_readable() {
+    let mut c = deploy();
+    assert!(!c.upgrade_proven());
+    c.upgrade_proven = true;
+    assert!(c.upgrade_proven());
+}
+
+#[test]
+fn the_state_version_is_readable_from_chain() {
+    let c = deploy();
+    assert_eq!(
+        c.state_version(),
+        crate::STATE_VERSION,
+        "an operator must be able to read which shape is on the account before an upgrade"
+    );
+}
+
+#[test]
 fn an_admin_cannot_approve_an_upgrade() {
     let mut c = deploy();
     ctx_at(ADMIN, 1, 0);

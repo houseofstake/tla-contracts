@@ -200,6 +200,10 @@ impl TlaRegistry {
         self.ft_allowlist.iter().cloned().collect()
     }
 
+    pub fn get_sweepable_tokens(&self) -> Vec<AccountId> {
+        self.sweepable_tokens.iter().cloned().collect()
+    }
+
     pub fn deployment_readiness(&self) -> DeploymentReadiness {
         let this = near_sdk::env::current_account_id();
         let rate_ready = self.near_usd_rate_micro != 0;

@@ -5,10 +5,10 @@ Authors: House of Stake
 Status: Draft
 DiscussionsTo: https://github.com/near/NEPs/discussions
 Type: Contract Standard
+Requires: 171
 Version: 1.0.0
 Created: 2026-08-16
-LastUpdated: 2026-08-19
-Requires: 171
+LastUpdated: 2026-09-19
 ---
 
 ## Summary
@@ -209,7 +209,7 @@ conformance is worth more than encoding an incidental invariant.
    `status` from the same predicate the contract already enforces is the only way to guarantee
    this; recomputing it separately will drift.
 
-Requirement 4 is what makes the item worth asking. Requirement 6 is what stops a consumer
+Without requirement 4 there is no reason to ask the item at all. Requirement 6 stops a consumer
 reconstructing liveness out of fields whose composition rule belongs to the implementation:
 an item may be authentic, owned, and still unable to act.
 
@@ -231,8 +231,8 @@ A collection MUST implement NEP-171 as written. This standard adds no required c
 
 TEP-62 requires `get_nft_address_by_index()` because on TON an index and an address are
 different things. Here the index *is* the address, so the round trip degenerates into
-`nft_token(token_id)`, which NEP-171 already requires. A reader coming from TEP-62 should be
-told this explicitly, because they will look for an address-by-index method and not find one.
+`nft_token(token_id)`, which NEP-171 already requires. A reader coming from TEP-62 will look for
+an address-by-index method and not find one.
 
 A collection MAY additionally expose its own `rotation_seq` per token. When it does, a consumer
 can type a disagreement by direction rather than retrying; when it does not, a consumer MUST
@@ -342,16 +342,15 @@ differs. The counter says nothing about what changed, only that the cached
 reasoning may no longer hold, which is the only thing a cache needs.
 
 Placing the counter on the parent rather than on the collection is deliberate. The cached claim
-is about the parent's behaviour, so a counter on the collection would answer a question nobody
-asked and would leave the parent's own upgrades invisible.
+is about the parent's behaviour, so a counter on the collection would track the wrong thing and
+leave the parent's own upgrades invisible.
 
 A consumer that cannot observe an epoch MUST bound the lifetime of its cached proof, and an
 implementation that omits the counter MUST document that T3 is unavailable to its consumers
 rather than leaving them to discover it.
 
 TON's per-item round trip is stateless and therefore never stale. That is the cost this
-optimisation trades away, and a standard that claims the benefit without naming the cost is
-incomplete.
+optimisation trades away.
 
 ### Trust model
 
@@ -372,8 +371,9 @@ authentic.
 
 Parent, `contracts/registrar/src/lib.rs`, `config_epoch`, also surfaced in `config`. It starts at
 zero, increases on both arms of `migrate` and on every configuration setter, and is never reset.
-Unit tests cover a setter moving it and an upgrade moving it. The parent is sealed in production,
-so step 2 of T3 is terminal there and only this counter needs watching.
+Unit tests cover a setter moving it and an upgrade moving it. The deployed parents hold a
+FullAccess key, so step 2 of T3 is a snapshot there rather than terminal, and a consumer caching
+T3 against them re-reads the key list as well as this counter.
 
 Item, `contracts/hos-wallet/src/lib.rs`, `nft_item_info`. Its `status` resolves through
 `blocking_condition`, the same predicate `assert_renter_active` consults before refusing work, so
@@ -391,16 +391,23 @@ impossible to create at all, and the same test asserts the empty key list and th
 its collection, so the whole cached chain is proven in one place; a pair whose halves disagree
 is refused.
 
+Deployed, NEAR mainnet, 2026-09-18, collection `registry.hos`. `ak-hog-hos.mainnet` answers
+`nft_item_info` with `registry.hos` and owner `ak-hog.near`; `registry.hos` returns the same owner
+from `nft_token`; a token id it never minted returns null. `view_account` on the item reports the
+all ones code hash and names `impl.hos` in `global_contract_account_id`.
+
 Consumer, `packages/contract-client/src/item.ts` in the House of Stake product repository, which is
 not public: the ladder, the pinned final-block pair, the direction-typed divergence, and a refusal
-reason per clause, each tested including an attacker supplying both halves.
+reason per clause, each tested including an attacker supplying both halves. Outlayer's wallet
+binding implements the check independently, pairing `nft_item_info` with the collection's
+`nft_token` before it will bind a leased name, proven on testnet in September 2026.
 
 ## Security Implications
 
 `collection_id` is a claim and nothing else. Any contract at any account can return an
 `nft_item_info` naming any collection, so an implementation that grants an item privileges because
 of the collection it names has built an authorisation bypass that costs an attacker one deployment.
-Requirement 2 exists for this reason and is the single most important line in the specification.
+Requirement 2 exists for this reason.
 
 A consumer that reads the collection out of `item.collection_id` rather than from its own
 configuration has defeated T2 entirely. The attacker then supplies both halves of the pair and they
@@ -408,8 +415,8 @@ agree, because they are the same attacker. This mistake produces a consumer that
 verifies and does not.
 
 T1 is not proof of ownership. `nft_token` reports what the collection believes, so a compromised or
-buggy collection can enumerate names an account does not own. Only the pair distinguishes the
-collection's belief from the account's own account of itself.
+buggy collection can enumerate names an account does not own. Only the pair distinguishes what the
+collection believes from what the account reports.
 
 Both halves of T2 MUST be read at the same final block height. At optimistic finality the two reads
 can straddle a reorg and the pinning that the tier exists to provide is gone.
@@ -457,8 +464,7 @@ that assertion is reported rather than leaving each implementation to invent it.
 
 Membership becomes cheap to check repeatedly. After a one time examination of the collection, T3
 reduces the question to a suffix comparison that is free, offline, and available to a client that
-has never seen the account before. TEP-62 cannot express this, because a TON address does not
-distinguish who may produce siblings.
+has never seen the account before.
 
 An item that holds funds and acts on its own behalf can be asked what it is, rather than being
 described exclusively by an index that may be stale or wrong.
@@ -479,10 +485,9 @@ action that moves value.
 
 On-chain consumers gain nothing from the pair check. NEAR is asynchronous in the way TON is, so by
 the time a callback lands the ownership it verified may have moved. The specification directs those
-consumers to invert the flow instead, which is a real constraint rather than a workaround.
+consumers to invert the flow instead.
 
-T3 introduces a cache with a staleness horizon where TON's per item round trip has none. A standard
-that claimed the benefit without naming this cost would be incomplete.
+T3 introduces a cache with a staleness horizon where TON's per-item round trip has none.
 
 ### Backwards Compatibility
 
