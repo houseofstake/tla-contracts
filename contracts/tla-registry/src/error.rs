@@ -7,6 +7,7 @@ pub enum ContractError {
     OnlyAdmin,
     OnlyCouncil,
     OnlyTreasuryOrCouncil,
+    OnlyAdminOrCouncil,
     MarketplacePaused,
     OnlyPaymentAuthority,
     AuthorityNotBoundToTla,

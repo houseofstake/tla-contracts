@@ -144,6 +144,8 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
+    BusinessResaleEnabled { tla_id: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
     SubAccountRented {
         full_name: String,
         tla_id: AccountId,

@@ -393,7 +393,7 @@ impl TlaRegistry {
                 .get(&key)
                 .ok_or(ContractError::SubAccountNotFound)?;
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if tla.tla_type == TlaType::Business {
+            if crate::business::licensee_governed(&tla_id, tla) {
                 if tla.licensee.as_ref() != Some(&caller) {
                     return Err(ContractError::OnlyLicensee);
                 }

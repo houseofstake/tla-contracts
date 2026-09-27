@@ -421,6 +421,175 @@ async fn a_name_settles_against_tokens_and_leaves_with_the_buyer() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn a_business_name_opened_for_resale_sells_through_intents() -> Result<()> {
+    let fleet = deploy_fleet().await?;
+    let registry = deploy_registry(&fleet).await?;
+    let tla = fleet.registrar.id().clone();
+    let verifier = deploy_verifier(&fleet, 0).await?;
+    let ft = deploy_ft(&fleet).await?;
+    for (method, args) in [
+        ("add_venue", json!({ "account_id": verifier.id() })),
+        (
+            "admin_set_tla_type",
+            json!({ "tla_id": tla, "tla_type": "Business", "licensee": fleet.bob.id() }),
+        ),
+    ] {
+        fleet
+            .council
+            .call(registry.id(), method)
+            .args_json(args)
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?
+            .into_result()?;
+    }
+
+    let name = "alice";
+    let tenant = rent(&fleet, &registry, &tla, name).await?;
+    let token_id = format!("{name}.{tla}");
+    let name_token = format!("nep171:{}:{token_id}", registry.id());
+    let cash_token = format!("nep141:{}", ft.id());
+    let price = 500_000u128;
+    let deposit = || {
+        fleet
+            .bob
+            .call(registry.id(), "nft_transfer_call")
+            .args_json(json!({
+                "receiver_id": verifier.id(),
+                "token_id": token_id,
+                "approval_id": null,
+                "memo": null,
+                "msg": json!({ "receiver_id": fleet.bob.id() }).to_string(),
+            }))
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+    };
+
+    let refused = deposit().transact().await?;
+    assert!(
+        refused.is_failure()
+            && format!("{:?}", refused.failures()).contains("business_sub_not_resellable"),
+        "a business name reached intents before resale opened: {:?}",
+        refused.failures()
+    );
+    assert_eq!(held_amount(&verifier, &fleet.bob, &name_token).await?, 0);
+
+    fleet
+        .council
+        .call(registry.id(), "enable_business_resale")
+        .args_json(json!({ "tla_id": tla }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deposited = deposit().transact().await?.into_result()?;
+    if let Some(failure) = deposited.receipt_failures().first() {
+        bail!("intents refused the deposit: {failure:?}");
+    }
+    assert_eq!(
+        held_amount(&verifier, &fleet.bob, &name_token).await?,
+        1,
+        "the licensee must hold its own name inside the verifier"
+    );
+
+    let buyer = funded(&fleet, "buyer", 20).await?;
+    fund_inside_intents(&ft, &verifier, &buyer, price).await?;
+    let seller = Signing::new(fleet.bob.clone());
+    let purchaser = Signing::new(buyer.clone());
+    seller.register(&verifier).await?;
+    purchaser.register(&verifier).await?;
+
+    let seller_payload = seller.sign(
+        &verifier,
+        nonce_for(&verifier, FAR_FUTURE_NANOS).await,
+        json!({
+            "signer_id": fleet.bob.id(),
+            "deadline": FAR_FUTURE_ISO,
+            "intents": [{
+                "intent": "token_diff",
+                "diff": { name_token.clone(): "-1", cash_token.clone(): price.to_string() },
+            }],
+        }),
+    );
+    let buyer_payload = purchaser.sign(
+        &verifier,
+        nonce_for(&verifier, FAR_FUTURE_NANOS).await,
+        json!({
+            "signer_id": buyer.id(),
+            "deadline": FAR_FUTURE_ISO,
+            "intents": [{
+                "intent": "token_diff",
+                "diff": { name_token.clone(): "1", cash_token.clone(): format!("-{price}") },
+            }],
+        }),
+    );
+    let executed = fleet
+        .relay
+        .call(verifier.id(), "execute_intents")
+        .args_json(json!({ "signed": [seller_payload, buyer_payload] }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = executed.receipt_failures().first() {
+        bail!("settlement failed: {failure:?}");
+    }
+    assert_eq!(held_amount(&verifier, &buyer, &name_token).await?, 1);
+    assert_eq!(
+        held_amount(&verifier, &fleet.bob, &cash_token).await?,
+        price
+    );
+
+    let withdrawal = purchaser.sign(
+        &verifier,
+        nonce_for(&verifier, FAR_FUTURE_NANOS).await,
+        json!({
+            "signer_id": buyer.id(),
+            "deadline": FAR_FUTURE_ISO,
+            "intents": [{
+                "intent": "nft_withdraw",
+                "token": registry.id(),
+                "receiver_id": buyer.id(),
+                "token_id": token_id,
+            }],
+        }),
+    );
+    let withdrawn = fleet
+        .relay
+        .call(verifier.id(), "execute_intents")
+        .args_json(json!({ "signed": [withdrawal] }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    if let Some(failure) = withdrawn.receipt_failures().first() {
+        bail!("withdrawal failed: {failure:?}");
+    }
+
+    assert_eq!(
+        owner_account(&fleet.worker, &tenant, fleet.extension.id()).await?,
+        buyer.id().as_str(),
+        "the business account itself must end up under the buyer"
+    );
+    let sub: serde_json::Value = registry
+        .view("get_sub_account")
+        .args_json(json!({ "tla_id": tla, "name": name }))
+        .await?
+        .json()?;
+    assert_eq!(sub["owner"], buyer.id().as_str());
+    assert_eq!(
+        sub["payout_account"],
+        buyer.id().as_str(),
+        "the payout must follow the name out of the verifier to the buyer"
+    );
+
+    Ok(())
+}
+
 struct Market {
     fleet: Fleet,
     registry: Contract,

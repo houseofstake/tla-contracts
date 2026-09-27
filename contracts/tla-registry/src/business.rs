@@ -6,6 +6,22 @@ use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::{env, near, AccountId, Promise};
 
+const RESALE_PREFIX: &[u8] = b"biz_resale:";
+
+fn resale_key(tla_id: &AccountId) -> Vec<u8> {
+    let mut key = RESALE_PREFIX.to_vec();
+    key.extend_from_slice(tla_id.as_str().as_bytes());
+    key
+}
+
+fn resale_enabled(tla_id: &AccountId) -> bool {
+    env::storage_has_key(&resale_key(tla_id))
+}
+
+pub(crate) fn licensee_governed(tla_id: &AccountId, tla: &TlaEntry) -> bool {
+    tla.tla_type == TlaType::Business && !resale_enabled(tla_id)
+}
+
 #[near]
 impl TlaRegistry {
     #[handle_result]
@@ -28,9 +44,7 @@ impl TlaRegistry {
             }
             tla.licensee.clone()
         };
-        if licensee.as_ref() != Some(&caller) {
-            return Err(ContractError::OnlyLicensee);
-        }
+        self.assert_may_retract(&tla_id, licensee.as_ref(), &caller)?;
         let sub = self
             .sub_accounts
             .get_mut(&key)
@@ -72,13 +86,11 @@ impl TlaRegistry {
             .ok_or(ContractError::TlaNotFound)?
             .licensee
             .clone();
+        self.assert_may_retract(&tla_id, licensee.as_ref(), &caller)?;
         let sub = self
             .sub_accounts
             .get_mut(&key)
             .ok_or(ContractError::SubAccountNotFound)?;
-        if licensee.as_ref() != Some(&caller) {
-            return Err(ContractError::OnlyLicensee);
-        }
         let retraction_at = sub
             .retraction_at
             .ok_or(ContractError::NoRetractionScheduled)?;
@@ -227,6 +239,32 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
+    pub fn enable_business_resale(&mut self, tla_id: AccountId) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_admin_or_council()?;
+        let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
+        if tla.tla_type != TlaType::Business {
+            return Err(ContractError::NotBusinessTla);
+        }
+        let key = resale_key(&tla_id);
+        if env::storage_has_key(&key) {
+            return Ok(());
+        }
+        env::storage_write(&key, &[1]);
+        Event::BusinessResaleEnabled {
+            tla_id,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    pub fn is_business_resale_enabled(&self, tla_id: AccountId) -> bool {
+        resale_enabled(&tla_id)
+    }
+
+    #[handle_result]
     pub fn get_business_renewal_cost(
         &self,
         tla_id: AccountId,
@@ -250,6 +288,24 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
+    fn assert_may_retract(
+        &self,
+        tla_id: &AccountId,
+        licensee: Option<&AccountId>,
+        caller: &AccountId,
+    ) -> Result<(), ContractError> {
+        if resale_enabled(tla_id) {
+            if self.is_admin_or_council(caller) {
+                return Ok(());
+            }
+            return Err(ContractError::OnlyAdminOrCouncil);
+        }
+        if licensee != Some(caller) {
+            return Err(ContractError::OnlyLicensee);
+        }
+        Ok(())
+    }
+
     pub(crate) fn effective_business_cap(&self, tla_id: &AccountId) -> u32 {
         self.business_sub_cap_override
             .get(tla_id)

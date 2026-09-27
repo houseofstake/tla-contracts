@@ -512,6 +512,17 @@ impl TlaRegistry {
         Ok(())
     }
 
+    pub(crate) fn is_admin_or_council(&self, account: &AccountId) -> bool {
+        *account == self.council || self.admins.contains(account)
+    }
+
+    pub(crate) fn assert_admin_or_council(&self) -> Result<(), ContractError> {
+        if !self.is_admin_or_council(&env::predecessor_account_id()) {
+            return Err(ContractError::OnlyAdminOrCouncil);
+        }
+        Ok(())
+    }
+
     pub(crate) fn convert_usd_to_near(&self, usd_micro: u128) -> Result<u128, ContractError> {
         let rate = self.near_usd_rate_micro;
         if rate == 0 {

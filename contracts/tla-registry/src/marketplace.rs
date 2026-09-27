@@ -331,7 +331,7 @@ impl TlaRegistry {
             return Err(ContractError::RetractionPending);
         }
         let tla = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
-        if tla.tla_type == TlaType::Business {
+        if crate::business::licensee_governed(tla_id, tla) {
             return Err(ContractError::BusinessSubNotResellable);
         }
         if !matches!(

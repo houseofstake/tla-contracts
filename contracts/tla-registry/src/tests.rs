@@ -3289,6 +3289,109 @@ mod business {
             Err(ContractError::BusinessSubNotResellable)
         ));
     }
+
+    #[test]
+    fn a_business_sub_trades_once_resale_is_open() {
+        let mut c = deploy_with_business_tla();
+        rent_business_sub(&mut c, "staff");
+        assert!(!c.is_business_resale_enabled(acc(TLA)));
+        ctx(ADMIN, 1, 2);
+        c.enable_business_resale(acc(TLA)).unwrap();
+        assert!(c.is_business_resale_enabled(acc(TLA)));
+        ctx(ALICE, 1, 3);
+        assert!(c
+            .nft_transfer(acc(BOB), format!("staff.{TLA}"), None, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn only_an_admin_or_the_council_opens_business_resale() {
+        let mut c = deploy_with_business_tla();
+        for caller in [BOB, ALICE] {
+            ctx(caller, 1, 2);
+            assert!(matches!(
+                c.enable_business_resale(acc(TLA)),
+                Err(ContractError::OnlyAdminOrCouncil)
+            ));
+        }
+        ctx(ADMIN, 0, 2);
+        assert!(matches!(
+            c.enable_business_resale(acc(TLA)),
+            Err(ContractError::RequiresOneYocto)
+        ));
+        c.council = acc(OTHER_COUNCIL);
+        ctx(OTHER_COUNCIL, 1, 3);
+        c.enable_business_resale(acc(TLA)).unwrap();
+        ctx(ADMIN, 1, 4);
+        c.enable_business_resale(acc(TLA)).unwrap();
+        assert!(c.is_business_resale_enabled(acc(TLA)));
+    }
+
+    #[test]
+    fn resale_cannot_be_opened_on_an_open_tla() {
+        let mut c = deploy_with_open_tla();
+        ctx(ADMIN, 1, 2);
+        assert!(matches!(
+            c.enable_business_resale(acc(TLA)),
+            Err(ContractError::NotBusinessTla)
+        ));
+    }
+
+    #[test]
+    fn with_resale_open_only_hos_can_retract() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ADMIN, 1, 2);
+        c.enable_business_resale(acc(TLA)).unwrap();
+        ctx(ALICE, 1, 3);
+        assert!(matches!(
+            c.schedule_retraction(acc(TLA), "staff".to_string()),
+            Err(ContractError::OnlyAdminOrCouncil)
+        ));
+        ctx(ADMIN, 1, 4);
+        let _ = c
+            .schedule_retraction(acc(TLA), "staff".to_string())
+            .unwrap();
+        assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_some());
+        ctx(ALICE, 1, 5);
+        assert!(matches!(
+            c.cancel_retraction(acc(TLA), "staff".to_string()),
+            Err(ContractError::OnlyAdminOrCouncil)
+        ));
+        ctx(ADMIN, 1, 6);
+        let _ = c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+        c.on_retraction_canceled(format!("staff.{TLA}"), acc(ADMIN));
+        assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    #[test]
+    fn without_resale_hos_cannot_retract_a_business_sub() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ADMIN, 1, 2);
+        assert!(matches!(
+            c.schedule_retraction(acc(TLA), "staff".to_string()),
+            Err(ContractError::OnlyLicensee)
+        ));
+    }
+
+    #[test]
+    fn with_resale_open_the_owner_sets_payout_not_the_licensee() {
+        let mut c = deploy_with_business_tla();
+        rent_employee_sub(&mut c, "staff", BOB);
+        ctx(ADMIN, 1, 2);
+        c.enable_business_resale(acc(TLA)).unwrap();
+        ctx(ALICE, 1, 3);
+        assert!(matches!(
+            c.set_payout_account(acc(TLA), "staff".to_string(), acc(ALICE)),
+            Err(ContractError::OnlyOwner)
+        ));
+        ctx(BOB, 1, 4);
+        assert!(c
+            .set_payout_account(acc(TLA), "staff".to_string(), acc(CAROL))
+            .is_ok());
+    }
 }
 
 mod price_oracle {

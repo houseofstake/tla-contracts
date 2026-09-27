@@ -159,8 +159,13 @@ against their own account id, clearing the entry before the transfer and restori
 fails. `withdraw` reserves every pending refund before releasing anything, so a treasury withdrawal
 cannot spend money a user is owed.
 
-Business TLAs add a sub-account cap and a scheduled retraction. Scheduling and cancelling both sit with
-the licensee, so the party that can start the notice period is the party that can stop it.
+Business TLAs add a sub-account cap and a scheduled retraction. Their names cannot change hands until
+an admin or the council opens the TLA to resale with `enable_business_resale`, and opening it is
+permanent. Until then the licensee governs the names: it sets their payout, and scheduling and
+cancelling a retraction both sit with it, so the party that can start the notice period is the party
+that can stop it. Once resale is open a business name trades like any other, its owner sets its
+payout, and retraction passes to an admin or the council, because a licensee able to retract a name
+it had already sold could take back what the buyer paid for.
 
 ## Reclaim
 
@@ -292,8 +297,9 @@ Every privileged method demands exactly one yoctoNEAR. The protocol only lets a 
 a deposit, so a restricted function-call key can never reach one of these, and a key handed to a script
 cannot escalate into governance. That holds uniformly: registering a TLA, adding or removing an admin,
 a payment authority or a recovery authority, changing the fee model, releasing revenue, setting a
-business cap, adding or removing a venue, approving and running an upgrade, sealing, and on
-`mpc-recovery` rotating the watcher set, delegating the installer and pointing at the registry.
+business cap, opening a business TLA to resale, adding or removing a venue, approving and running an
+upgrade, sealing, and on `mpc-recovery` rotating the watcher set, delegating the installer and
+pointing at the registry.
 
 The accounts these contracts pay are fixed when they are initialised and have no setters. `treasury`
 receives revenue released by council and anything skimmed from the extension, and changing it takes a
