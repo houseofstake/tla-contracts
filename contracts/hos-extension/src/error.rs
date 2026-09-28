@@ -35,6 +35,8 @@ pub enum ContractError {
     NoTreasuryRotationPending,
     OnlyPendingTreasury,
     TreasuryRotationTooYoung,
+    EmptyBatch,
+    BatchTooLarge,
 }
 
 impl FunctionError for ContractError {

@@ -1181,3 +1181,62 @@ fn a_sweep_that_does_nothing_returns_the_deposit_to_whoever_paid_it() {
          it from the account that actually paid"
     );
 }
+
+fn migrations() -> Vec<AccountId> {
+    near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .filter(|r| {
+            r.actions.iter().any(|a| {
+                matches!(
+                    a,
+                    near_sdk::mock::MockAction::FunctionCallWeight { method_name, .. }
+                        if method_name == b"hos_migrate"
+                )
+            })
+        })
+        .map(|r| r.receiver_id)
+        .collect()
+}
+
+#[test]
+fn anyone_can_migrate_a_wallet() {
+    let mut c = deploy();
+    ctx(BUYER, 0);
+    let _ = c.migrate_wallet(acc(WALLET));
+    assert_eq!(migrations(), vec![acc(WALLET)]);
+}
+
+#[test]
+fn a_batch_migrates_every_wallet_it_names() {
+    let mut c = deploy();
+    ctx(BUYER, 0);
+    let wallets: Vec<AccountId> = (0..MAX_MIGRATE_BATCH)
+        .map(|i| acc(&format!("n{i}.tla.testnet")))
+        .collect();
+    assert!(c.migrate_wallets(wallets.clone()).is_ok());
+    assert_eq!(migrations(), wallets);
+}
+
+#[test]
+fn an_empty_batch_is_refused() {
+    let mut c = deploy();
+    ctx(BUYER, 0);
+    assert!(matches!(
+        c.migrate_wallets(vec![]),
+        Err(ContractError::EmptyBatch)
+    ));
+}
+
+#[test]
+fn a_batch_one_call_cannot_fund_is_refused() {
+    let mut c = deploy();
+    ctx(BUYER, 0);
+    let wallets: Vec<AccountId> = (0..=MAX_MIGRATE_BATCH)
+        .map(|i| acc(&format!("n{i}.tla.testnet")))
+        .collect();
+    assert!(matches!(
+        c.migrate_wallets(wallets),
+        Err(ContractError::BatchTooLarge)
+    ));
+    assert!(migrations().is_empty());
+}

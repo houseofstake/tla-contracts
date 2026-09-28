@@ -30,7 +30,15 @@ const _: () = assert!(
     RESET_TGAS + RESET_CALLBACK_TGAS + ROTATE_CB_FRAME_TGAS <= ROTATE_CB_TGAS,
     "after_force_swap schedules the recovery reset out of its own static gas, so a budget that only covers the reservations leaves the rotation to survive on whatever the caller happens to leave unspent"
 );
-const GAS_FOR_LEASE: Gas = Gas::from_tgas(8);
+const LEASE_TGAS: u64 = 8;
+const GAS_FOR_LEASE: Gas = Gas::from_tgas(LEASE_TGAS);
+const MIGRATE_SEND_TGAS: u64 = 3;
+const MIGRATE_FRAME_TGAS: u64 = 10;
+const MAX_MIGRATE_BATCH: usize = 25;
+const _: () = assert!(
+    MAX_MIGRATE_BATCH as u64 * (LEASE_TGAS + MIGRATE_SEND_TGAS) + MIGRATE_FRAME_TGAS <= 300,
+    "every migration in a batch carries its own gas and costs the batch call to send, so a batch one call cannot fund fails outright and schedules none of them"
+);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_BALANCE_CB: Gas = Gas::from_tgas(105);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
@@ -605,12 +613,24 @@ impl HosExtension {
             .hos_set_payout_account(payout_account, expected_owner))
     }
 
-    #[handle_result]
-    pub fn migrate_wallet(&mut self, wallet: AccountId) -> Result<Promise, ContractError> {
-        self.assert_council()?;
-        Ok(ext_wallet::ext(wallet)
+    pub fn migrate_wallet(&mut self, wallet: AccountId) -> Promise {
+        ext_wallet::ext(wallet)
             .with_static_gas(GAS_FOR_LEASE)
-            .hos_migrate(self.registry.clone()))
+            .hos_migrate(self.registry.clone())
+    }
+
+    #[handle_result]
+    pub fn migrate_wallets(&mut self, wallets: Vec<AccountId>) -> Result<(), ContractError> {
+        if wallets.is_empty() {
+            return Err(ContractError::EmptyBatch);
+        }
+        if wallets.len() > MAX_MIGRATE_BATCH {
+            return Err(ContractError::BatchTooLarge);
+        }
+        for wallet in wallets {
+            let _ = self.migrate_wallet(wallet);
+        }
+        Ok(())
     }
 
     #[handle_result]
