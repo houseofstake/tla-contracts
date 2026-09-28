@@ -259,8 +259,8 @@ There is deliberately no `locked` view. A contract cannot enumerate its own acce
 would assert something it cannot check. `view_access_key_list` on the deployer account is the signal,
 and an empty result is the proof.
 
-Keys are still present on testnet so the fleet can be iterated without waiting out the window. Removing
-them is a mainnet step, and until it happens the delay binds the contract path only.
+The mainnet accounts still hold their full access keys, so until those are removed the delay binds the
+contract path only.
 
 ## Trust boundaries
 
@@ -388,7 +388,12 @@ advisory position.
 
 ## Status
 
-Pre-audit. Not deployed to mainnet.
+Deployed on NEAR mainnet. Each release tag names the commit every live contract was built from and
+carries its code hash, so the deployed bytes can be checked against a reproducible build of that
+commit.
+
+Audited by Valhalla Security. Every finding in their report is closed, and the fixes are awaiting
+their final review.
 
 `w_resolve_auth` implements NEP-641, which is not final and has no reference implementation yet. Those
 shapes will move.
@@ -396,8 +401,6 @@ shapes will move.
 `docs/sharded-nft-items.md` is a draft, not a submitted NEP. It has no number yet, because a NEP takes
 the number of the pull request that proposes it.
 
-Three limitations are deliberate rather than outstanding, and are described where they apply: the
-fungible token check on transfers is hygiene and not a laundering control, `mpc-recovery` can sign
-`AddKey` but only for accounts that already hold an MPC-derived key, and the deployer on testnet runs
-with its publish delay set to zero so the fleet can be iterated. The last of those is a mainnet
-blocker and `config` reports it.
+Two limitations are deliberate rather than outstanding, and are described where they apply: the
+fungible token check on transfers is hygiene and not a laundering control, and `mpc-recovery` can sign
+`AddKey` but only for accounts that already hold an MPC-derived key.
