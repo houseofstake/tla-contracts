@@ -3030,6 +3030,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "registrar-opener"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "registrar-opener-stub"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
+name = "registrar-opener-wipe"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

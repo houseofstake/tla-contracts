@@ -10,10 +10,13 @@ CONTRACTS=(
   contracts/hos-extension
   contracts/mpc-recovery
   contracts/tla-registry
+  contracts/registrar-opener
+  contracts/registrar-opener-wipe
   dev-contracts/test-ft
   dev-contracts/test-mpc
   dev-contracts/test-staking-pool
   dev-contracts/test-dapp
+  dev-contracts/registrar-opener-stub
 )
 
 MAINNET_RPC=${MAINNET_RPC:-https://rpc.mainnet.near.org}

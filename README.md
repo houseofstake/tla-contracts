@@ -19,10 +19,13 @@ that set so a lease can be reclaimed and a sale settled without the owner taking
 | `tla-registry` | The lease ledger and the NEP-171 collection. Rental, renewal, pricing, reclaim, business sub-account rules, and the only contract holding money. |
 | `hos-extension` | Acts on leased accounts on behalf of the registry. Pushes lease updates, forces transfers, sweeps a reclaimed account. |
 | `mpc-recovery` | Recovery for both account kinds. For an ordinary NEAR account a watcher quorum authorises an MPC-signed `AddKey` after a timelock. For a leased name the same policy gates a rotation performed by the registry. |
+| `registrar-opener` | Runs on mainnet `registrar`, the only account allowed to create a top level account. The security council approves a batch of names in one vote, then the operator opens them. |
+| `registrar-opener-wipe` | Ran once, inside the transaction that reinstalled the opener, to clear the `registrar` storage it replaced. Kept for the record and never deployed again. |
 | `hos-common` | Types and helpers shared by more than one contract. |
 
-`dev-contracts` holds stub fungible token, staking pool, dapp and MPC signer contracts. They exist so
-the integration tests can exercise real cross-contract paths, and are never deployed.
+`dev-contracts` holds stub fungible token, staking pool, dapp, MPC signer and caller-reporting
+contracts. They exist so the integration tests can exercise real cross-contract paths, and are never
+deployed.
 
 ## Controlling a leased account
 
@@ -331,7 +334,7 @@ absent value is not an empty string, and no field changes meaning depending on w
 ## Layout
 
 ```
-contracts/         the six deployed contracts
+contracts/         the deployed contracts and the opener's one-time install wipe
 crates/            shared library code
 dev-contracts/     stubs used only by the integration tests
 integration/       near-workspaces tests, a separate cargo workspace
