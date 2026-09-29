@@ -2,25 +2,28 @@ use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json;
 use near_sdk::store::LookupSet;
 use near_sdk::utils::is_promise_success;
-use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, Promise, PublicKey};
+use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, Promise};
 
 use crate::names::{assert_openable, fold_digest, seed_digest};
 use crate::{emit, error, RegistrarOpener, RegistrarOpenerExt, StorageKey};
 
 pub const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(4);
-pub const GAS_PER_NAME: Gas = Gas::from_tgas(14);
+pub const GAS_FOR_INIT: Gas = Gas::from_tgas(10);
+pub const GAS_PER_NAME: Gas = Gas::from_tgas(25);
 pub const MIN_FUNDING: NearToken = NearToken::from_millinear(10);
-const MAX_NAMES_PER_CALL: usize = 20;
+const MAX_NAMES_PER_CALL: usize = 11;
 pub const MAX_NAMES_PER_ADD: usize = 100;
 pub const MAX_LIVE_BATCHES: u32 = 4;
+pub const MAX_INIT_ARGS_LEN: usize = 1024;
+const INIT_METHOD: &str = "new";
 
 const _: () = assert!(
     GAS_PER_NAME.as_gas() * (MAX_NAMES_PER_CALL as u64) <= 300_000_000_000_000,
     "a full open call must fit the 300 Tgas a transaction can carry"
 );
 const _: () = assert!(
-    GAS_FOR_CALLBACK.as_gas() < GAS_PER_NAME.as_gas(),
-    "every name must budget more gas than its own callback spends"
+    GAS_FOR_CALLBACK.as_gas() + GAS_FOR_INIT.as_gas() < GAS_PER_NAME.as_gas(),
+    "GAS_PER_NAME has to cover a name's setup call and its callback"
 );
 #[near(serializers = [borsh])]
 pub struct Batch {
@@ -28,17 +31,39 @@ pub struct Batch {
     pub digest: CryptoHash,
     pub count: u32,
     pub remaining: u32,
-    pub owner_key: PublicKey,
+    pub global_code: AccountId,
+    pub init_args: String,
     pub funding: NearToken,
     pub names: LookupSet<AccountId>,
+}
+
+fn assert_init_args(init_args: &str) {
+    require!(
+        init_args.len() <= MAX_INIT_ARGS_LEN,
+        error::INIT_ARGS_TOO_LONG
+    );
+    require!(
+        serde_json::from_str::<serde_json::Value>(init_args).is_ok_and(|args| args.is_object()),
+        error::INIT_ARGS_NOT_AN_OBJECT
+    );
 }
 
 #[near]
 impl RegistrarOpener {
     #[payable]
-    pub fn create_batch(&mut self, owner_key: PublicKey, funding: NearToken) -> u32 {
+    pub fn create_batch(
+        &mut self,
+        global_code: AccountId,
+        init_args: String,
+        funding: NearToken,
+    ) -> u32 {
         self.assert_operator();
         require!(funding >= MIN_FUNDING, error::FUNDING_TOO_LOW);
+        require!(
+            global_code != env::current_account_id(),
+            error::CODE_IS_SELF
+        );
+        assert_init_args(&init_args);
         require!(
             self.batches.len() < MAX_LIVE_BATCHES,
             error::TOO_MANY_BATCHES
@@ -49,17 +74,22 @@ impl RegistrarOpener {
             .unwrap_or_else(|| env::panic_str(error::BATCH_IDS_EXHAUSTED));
         let batch = Batch {
             approved: false,
-            digest: seed_digest(&owner_key, funding),
+            digest: seed_digest(&global_code, &init_args, funding),
             count: 0,
             remaining: 0,
-            owner_key,
+            global_code: global_code.clone(),
+            init_args,
             funding,
             names: LookupSet::new(StorageKey::BatchNames { batch_id }),
         };
         self.batches.insert(batch_id, batch);
         emit(
             "batch_created",
-            serde_json::json!({"batch_id": batch_id, "funding": funding}),
+            serde_json::json!({
+                "batch_id": batch_id,
+                "funding": funding,
+                "global_code": global_code,
+            }),
         );
         batch_id
     }
@@ -135,7 +165,8 @@ impl RegistrarOpener {
         let batch = self.batch_mut(batch_id);
         require!(batch.approved, error::BATCH_NOT_APPROVED);
         let funding = batch.funding;
-        let owner_key = batch.owner_key.clone();
+        let global_code = batch.global_code.clone();
+        let init_args = batch.init_args.clone().into_bytes();
         let total = funding.as_yoctonear().saturating_mul(names.len() as u128);
         require!(
             env::attached_deposit() == NearToken::from_yoctonear(total),
@@ -153,7 +184,13 @@ impl RegistrarOpener {
             Promise::new(name.clone())
                 .create_account()
                 .transfer(funding)
-                .add_full_access_key(owner_key.clone())
+                .use_global_contract_by_account_id(global_code.clone())
+                .function_call(
+                    INIT_METHOD.to_string(),
+                    init_args.clone(),
+                    NearToken::from_yoctonear(0),
+                    GAS_FOR_INIT,
+                )
                 .then(
                     Self::ext(here.clone())
                         .with_static_gas(GAS_FOR_CALLBACK)

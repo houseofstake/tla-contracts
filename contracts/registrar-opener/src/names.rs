@@ -1,8 +1,8 @@
-use near_sdk::{env, require, AccountId, CryptoHash, NearToken, PublicKey};
+use near_sdk::{env, require, AccountId, CryptoHash, NearToken};
 
 use crate::error;
 
-const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
+const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v2";
 const MIN_TLA_LEN: usize = 3;
 const MAX_TLA_LEN: usize = 64;
 
@@ -21,9 +21,12 @@ pub fn to_hash(bytes: Vec<u8>) -> CryptoHash {
     hash
 }
 
-pub fn seed_digest(owner_key: &PublicKey, funding: NearToken) -> CryptoHash {
+pub fn seed_digest(global_code: &AccountId, init_args: &str, funding: NearToken) -> CryptoHash {
     let mut bytes = DIGEST_DOMAIN.to_vec();
-    bytes.extend_from_slice(owner_key.as_bytes());
+    for part in [global_code.as_bytes(), init_args.as_bytes()] {
+        bytes.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(part);
+    }
     bytes.extend_from_slice(&funding.as_yoctonear().to_le_bytes());
     to_hash(env::sha256(&bytes))
 }

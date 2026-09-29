@@ -104,7 +104,7 @@ async fn the_multisig_installs_the_opener_over_itself_on_live_testnet() -> Resul
     let view: serde_json::Value = host.view("opener_view").await?.json()?;
     assert_eq!(view["admin"], council.id().as_str());
     assert_eq!(view["operator"], operator.id().as_str());
-    assert_eq!(view["state_version"], 1);
+    assert_eq!(view["state_version"], 2);
     assert!(
         host.view("get_members").await.is_err(),
         "the multisig methods survived the replacement"

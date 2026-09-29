@@ -9,6 +9,9 @@ pub const NOMINEE_IS_OPERATOR: &str = "the nominated admin is the operator, the 
 pub const ROLE_IS_SELF: &str = "neither role may be this account";
 pub const ALREADY_INSTALLED: &str = "this account already runs the opener";
 pub const NO_STATE: &str = "there is no state to migrate";
+pub const STATE_VERSION_UNKNOWN: &str = "state version is not the one this code understands";
+pub const BATCHES_LIVE: &str =
+    "discard every batch before this upgrade, the stored batch shape changed";
 pub const ONE_YOCTO: &str = "exactly one yoctoNEAR must be attached";
 
 pub const NO_BATCH: &str = "no batch with that id";
@@ -21,6 +24,9 @@ pub const TOO_MANY_BATCHES: &str = "discard a batch before drafting another";
 pub const BATCH_IDS_EXHAUSTED: &str = "batch ids are exhausted, reusing one would alias its \
                                        stored names";
 pub const DIGEST_MISMATCH: &str = "digest does not match the batch contents";
+pub const CODE_IS_SELF: &str = "the shared code has to come from another account";
+pub const INIT_ARGS_TOO_LONG: &str = "the setup arguments are longer than a batch may carry";
+pub const INIT_ARGS_NOT_AN_OBJECT: &str = "the setup arguments must be a JSON object";
 pub const NOT_IN_BATCH: &str = "name is not in this batch";
 
 pub const EMPTY_NAMES: &str = "no names supplied";

@@ -1,5 +1,5 @@
 use near_sdk::json_types::Base58CryptoHash;
-use near_sdk::{near, AccountId, NearToken, PublicKey};
+use near_sdk::{near, AccountId, NearToken};
 
 use crate::{RegistrarOpener, RegistrarOpenerExt};
 
@@ -9,7 +9,8 @@ pub struct BatchView {
     pub digest: Base58CryptoHash,
     pub count: u32,
     pub remaining: u32,
-    pub owner_key: PublicKey,
+    pub global_code: AccountId,
+    pub init_args: String,
     pub funding: NearToken,
 }
 
@@ -33,7 +34,8 @@ impl RegistrarOpener {
             digest: Base58CryptoHash::from(batch.digest),
             count: batch.count,
             remaining: batch.remaining,
-            owner_key: batch.owner_key.clone(),
+            global_code: batch.global_code.clone(),
+            init_args: batch.init_args.clone(),
             funding: batch.funding,
         })
     }

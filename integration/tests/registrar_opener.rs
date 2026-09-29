@@ -12,9 +12,12 @@ const FUNDING: NearToken = NearToken::from_millinear(10);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
 const DAO_ACCOUNT: &str = "hos-root.sputnik-dao.near";
 const COUNCIL_THRESHOLD: usize = 3;
-const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
+const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v2";
 const MULTISIG_STATE: &str = "registrar-mainnet-state.json";
 const INSTALLED_STATE: &str = "registrar-mainnet-state-v1.1.0.json";
+const STORAGE_BYTES_PER_ACCOUNT: usize = 100;
+const STORAGE_BYTES_PER_RECORD: usize = 40;
+const STORAGE_BYTES_PER_KEY: usize = 33 + 9 + STORAGE_BYTES_PER_RECORD;
 
 struct Fleet {
     worker: Worker<Sandbox>,
@@ -24,6 +27,8 @@ struct Fleet {
     operator: Account,
     stranger: Account,
     owner_key: PublicKey,
+    global_code: near_workspaces::AccountId,
+    init_args: String,
 }
 
 fn fixture(name: &str) -> Result<Vec<u8>> {
@@ -91,12 +96,19 @@ async fn patch_mainnet_registrar(
 ) -> Result<Contract> {
     let id: near_workspaces::AccountId = "registrar".parse()?;
     let rows = mainnet_state(state)?;
+    let stored: usize = rows
+        .iter()
+        .map(|(key, value)| key.len() + value.len() + STORAGE_BYTES_PER_RECORD)
+        .sum();
+    let storage_usage = STORAGE_BYTES_PER_ACCOUNT + STORAGE_BYTES_PER_KEY + code.len() + stored;
     let mut patch = worker
         .patch(&id)
         .code(code)
         .access_key(sk.public_key(), near_workspaces::AccessKey::full_access())
         .account(
-            near_workspaces::AccountDetailsPatch::default().balance(NearToken::from_near(100_000)),
+            near_workspaces::AccountDetailsPatch::default()
+                .balance(NearToken::from_near(100_000))
+                .storage_usage(storage_usage as u64),
         );
     for (key, value) in &rows {
         patch = patch.state(key, value);
@@ -125,9 +137,17 @@ fn key_bytes(key: &PublicKey) -> Vec<u8> {
     bytes
 }
 
-fn expected_digest(owner_key: &PublicKey, funding: NearToken, names: &[&str]) -> [u8; 32] {
+fn expected_digest(
+    global_code: &near_workspaces::AccountId,
+    init_args: &str,
+    funding: NearToken,
+    names: &[&str],
+) -> [u8; 32] {
     let mut seed = DIGEST_DOMAIN.to_vec();
-    seed.extend_from_slice(&key_bytes(owner_key));
+    for part in [global_code.as_bytes(), init_args.as_bytes()] {
+        seed.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        seed.extend_from_slice(part);
+    }
     seed.extend_from_slice(&funding.as_yoctonear().to_le_bytes());
     let mut digest: [u8; 32] = Sha256::digest(&seed).into();
     for name in names {
@@ -243,6 +263,73 @@ async fn install_opener(dao: &Contract, registrar: &Contract, operator: &Account
     Ok(())
 }
 
+async fn publish_registrar(worker: &Worker<Sandbox>) -> Result<near_workspaces::AccountId> {
+    let root = worker.root_account()?;
+    let publishing_council = root
+        .create_subaccount("gpubcouncil")
+        .initial_balance(NearToken::from_near(60))
+        .transact()
+        .await?
+        .into_result()?;
+    let publisher = root
+        .create_subaccount("gpub")
+        .initial_balance(NearToken::from_near(60))
+        .transact()
+        .await?
+        .into_result()?;
+    let deployer = publisher
+        .deploy(&common::wasm("wallet_impl_deployer"))
+        .await?
+        .into_result()?;
+    deployer
+        .call("new")
+        .args_json(json!({ "council": publishing_council.id(), "approval_delay_ns": "0" }))
+        .transact()
+        .await?
+        .into_result()?;
+    let code = common::wasm("registrar");
+    publishing_council
+        .call(deployer.id(), "gd_approve")
+        .args_json(json!({ "hash": bs58::encode(Sha256::digest(&code)).into_string() }))
+        .deposit(YOCTO)
+        .transact()
+        .await?
+        .into_result()?;
+    publishing_council
+        .call(deployer.id(), "gd_deploy")
+        .args_json(json!({ "code": common::code_arg(&code) }))
+        .deposit(NearToken::from_yoctonear(
+            code.len() as u128 * common::GLOBAL_CODE_COST_PER_BYTE,
+        ))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(publisher.id().clone())
+}
+
+fn registrar_setup_args() -> String {
+    json!({ "config": {
+        "registry": "registry.test.near",
+        "council": DAO_ACCOUNT,
+        "wallet_impl": "impl.test.near",
+        "hos_extension": "ext.test.near",
+        "recovery": "rec.test.near",
+        "chain_id": "testnet",
+        "min_balance": NearToken::from_millinear(100),
+        "wallet_timeout_secs": 3600,
+    }})
+    .to_string()
+}
+
+fn batch_args(fleet: &Fleet) -> serde_json::Value {
+    json!({
+        "global_code": fleet.global_code,
+        "init_args": fleet.init_args,
+        "funding": FUNDING,
+    })
+}
+
 async fn setup() -> Result<Fleet> {
     let worker = near_workspaces::sandbox().await?;
     let sk = SecretKey::from_seed(KeyType::ED25519, "registrar-opener");
@@ -253,6 +340,7 @@ async fn setup() -> Result<Fleet> {
     let operator = worker.dev_create_account().await?;
     let stranger = worker.dev_create_account().await?;
     install_opener(&dao, &registrar, &operator).await?;
+    let global_code = publish_registrar(&worker).await?;
 
     let owner_key = SecretKey::from_seed(KeyType::ED25519, "cohort-owner").public_key();
     Ok(Fleet {
@@ -263,6 +351,8 @@ async fn setup() -> Result<Fleet> {
         operator,
         stranger,
         owner_key,
+        global_code,
+        init_args: registrar_setup_args(),
     })
 }
 
@@ -270,7 +360,7 @@ async fn draft(fleet: &Fleet, names: &[&str]) -> Result<u32> {
     let batch_id: u32 = fleet
         .operator
         .call(fleet.registrar.id(), "create_batch")
-        .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .args_json(batch_args(fleet))
         .deposit(YOCTO)
         .max_gas()
         .transact()
@@ -393,7 +483,19 @@ async fn assert_opened(fleet: &Fleet, name: &str) -> Result<()> {
         "{name} is below its own storage floor"
     );
     let keys = fleet.worker.view_access_keys(&id).await?;
-    assert_eq!(keys.len(), 1, "{name} should carry exactly the owner key");
+    assert!(keys.is_empty(), "{name} opened with a key on it: {keys:?}");
+    match &account.contract_state {
+        near_workspaces::ContractState::GlobalAccountId(publisher) => assert_eq!(
+            publisher, &fleet.global_code,
+            "{name} runs shared code from the wrong account"
+        ),
+        other => anyhow::bail!("{name} does not run the shared registrar: {other:?}"),
+    }
+    let registry: String = fleet.worker.view(&id, "registry").await?.json()?;
+    assert_eq!(
+        registry, "registry.test.near",
+        "{name} was not set up with the batch's arguments"
+    );
     Ok(())
 }
 
@@ -460,7 +562,7 @@ async fn the_multisig_installs_the_opener_over_itself_in_one_request() -> Result
     let view: serde_json::Value = registrar.view("opener_view").await?.json()?;
     assert_eq!(view["admin"], council.id().as_str());
     assert_eq!(view["operator"], operator.id().as_str());
-    assert_eq!(view["state_version"], 1);
+    assert_eq!(view["state_version"], 2);
     assert!(
         registrar.view("get_members").await.is_err(),
         "the multisig methods should be gone once the code is replaced"
@@ -688,7 +790,7 @@ async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
     let view: serde_json::Value = registrar.view("opener_view").await?.json()?;
     assert_eq!(view["admin"], dao.id().as_str());
     assert_eq!(view["operator"], operator.id().as_str());
-    assert_eq!(view["state_version"], 1);
+    assert_eq!(view["state_version"], 2);
     assert!(
         registrar.view("get_members").await.is_err(),
         "the multisig survived the replacement"
@@ -706,6 +808,7 @@ async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
         "STATE was not replaced"
     );
 
+    let global_code = publish_registrar(&worker).await?;
     let fleet = Fleet {
         worker,
         registrar,
@@ -714,6 +817,8 @@ async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
         operator,
         stranger,
         owner_key: SecretKey::from_seed(KeyType::ED25519, "cohort-owner").public_key(),
+        global_code,
+        init_args: registrar_setup_args(),
     };
     let batch_id = draft(&fleet, &["alpha"]).await?;
     approve(&fleet, batch_id).await?;
@@ -796,7 +901,12 @@ async fn the_stored_digest_is_the_one_an_outside_observer_computes() -> Result<(
     let fleet = setup().await?;
     let batch_id = draft(&fleet, &["alpha", "bravo", "charlie"]).await?;
     let stored = digest_of(&fleet, batch_id).await?;
-    let ours = expected_digest(&fleet.owner_key, FUNDING, &["alpha", "bravo", "charlie"]);
+    let ours = expected_digest(
+        &fleet.global_code,
+        &fleet.init_args,
+        FUNDING,
+        &["alpha", "bravo", "charlie"],
+    );
     assert_eq!(
         stored,
         bs58::encode(ours).into_string(),
@@ -874,7 +984,7 @@ async fn replacing_the_operator_locks_the_old_one_out_at_once() -> Result<()> {
 #[tokio::test]
 async fn the_documented_per_call_maximum_fits_and_every_name_lands() -> Result<()> {
     let fleet = setup().await?;
-    let names: Vec<String> = (0..20).map(|index| format!("batch{index:02}")).collect();
+    let names: Vec<String> = (0..11).map(|index| format!("batch{index:02}")).collect();
     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
     let batch_id = draft(&fleet, &borrowed).await?;
     approve(&fleet, batch_id).await?;
@@ -900,7 +1010,7 @@ async fn a_full_add_names_call_fits_and_the_digest_still_matches() -> Result<()>
     let batch_id: u32 = fleet
         .operator
         .call(fleet.registrar.id(), "create_batch")
-        .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .args_json(batch_args(&fleet))
         .deposit(YOCTO)
         .max_gas()
         .transact()
@@ -923,7 +1033,13 @@ async fn a_full_add_names_call_fits_and_the_digest_still_matches() -> Result<()>
     assert_eq!(batch["count"], 100);
     assert_eq!(
         digest_of(&fleet, batch_id).await?,
-        bs58::encode(expected_digest(&fleet.owner_key, FUNDING, &borrowed)).into_string()
+        bs58::encode(expected_digest(
+            &fleet.global_code,
+            &fleet.init_args,
+            FUNDING,
+            &borrowed
+        ))
+        .into_string()
     );
     Ok(())
 }
@@ -966,7 +1082,13 @@ async fn the_admin_can_open_one_name_outside_any_batch() -> Result<()> {
         COUNCIL_THRESHOLD,
     )
     .await?;
-    assert_opened(&fleet, "solo").await?;
+    let keys = fleet.worker.view_access_keys(&"solo".parse()?).await?;
+    assert_eq!(
+        keys.len(),
+        1,
+        "solo should carry exactly the key the council chose"
+    );
+    assert_eq!(keys[0].public_key, fleet.owner_key);
     Ok(())
 }
 
@@ -1003,7 +1125,7 @@ async fn a_dao_upgrade_lands_and_carries_the_state_across() -> Result<()> {
 
     let view: serde_json::Value = fleet.registrar.view("opener_view").await?.json()?;
     assert_eq!(view["operator"], fleet.operator.id().as_str());
-    assert_eq!(view["state_version"], 1);
+    assert_eq!(view["state_version"], 2);
     let batch = batch_view(&fleet, batch_id).await?;
     assert_eq!(batch["approved"], true, "the batch did not survive migrate");
     assert_eq!(batch["remaining"], 1);
@@ -1062,7 +1184,7 @@ async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<(
     let batch_id: u32 = fleet
         .operator
         .call(fleet.registrar.id(), "create_batch")
-        .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .args_json(batch_args(&fleet))
         .deposit(YOCTO)
         .max_gas()
         .transact()
@@ -1264,11 +1386,7 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
             YOCTO,
         ),
         ("cancel_nomination", json!({}), YOCTO),
-        (
-            "create_batch",
-            json!({ "owner_key": fleet.owner_key, "funding": FUNDING }),
-            YOCTO,
-        ),
+        ("create_batch", batch_args(&fleet), YOCTO),
         (
             "add_names",
             json!({ "batch_id": batch_id, "names": ["smuggled"] }),
@@ -1472,6 +1590,7 @@ async fn redoing_the_install_clears_mainnets_storage_and_names_a_new_operator() 
     assert_eq!(view["live_batches"], 0);
     assert!(view["pending_admin"].is_null());
 
+    let global_code = publish_registrar(&worker).await?;
     let fleet = Fleet {
         worker,
         registrar,
@@ -1480,7 +1599,73 @@ async fn redoing_the_install_clears_mainnets_storage_and_names_a_new_operator() 
         operator,
         stranger,
         owner_key: SecretKey::from_seed(KeyType::ED25519, "cohort-owner").public_key(),
+        global_code,
+        init_args: registrar_setup_args(),
     };
+    let batch_id = draft(&fleet, &["alpha"]).await?;
+    approve(&fleet, batch_id).await?;
+    open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300))
+        .await?
+        .into_result()?;
+    assert_opened(&fleet, "alpha").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_council_upgrade_carries_mainnets_install_over_to_opening_without_a_key() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let registrar = installed_mainnet_registrar(&worker).await?;
+    let before: serde_json::Value = registrar.view("opener_view").await?.json()?;
+    assert_eq!(
+        before["state_version"], 1,
+        "the fixture is not the first version"
+    );
+
+    let council = council_accounts(&worker).await?;
+    let dao = deploy_dao(&worker).await?;
+    let operator = worker.dev_create_account().await?;
+    let stranger = worker.dev_create_account().await?;
+    let global_code = publish_registrar(&worker).await?;
+    let fleet = Fleet {
+        worker,
+        registrar,
+        dao,
+        council,
+        operator,
+        stranger,
+        owner_key: SecretKey::from_seed(KeyType::ED25519, "cohort-owner").public_key(),
+        global_code,
+        init_args: registrar_setup_args(),
+    };
+
+    dao_calls(
+        &fleet,
+        "upgrade",
+        json!({ "code": base64::engine::general_purpose::STANDARD.encode(ours_wasm()?) }),
+        YOCTO,
+        COUNCIL_THRESHOLD,
+    )
+    .await?;
+    let after: serde_json::Value = fleet.registrar.view("opener_view").await?.json()?;
+    assert_eq!(
+        after["state_version"], 2,
+        "the upgrade did not lift the stored state"
+    );
+    for field in ["admin", "operator", "next_batch_id", "opened", "failed"] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed across the upgrade"
+        );
+    }
+
+    dao_calls(
+        &fleet,
+        "change_operator",
+        json!({ "operator": fleet.operator.id() }),
+        YOCTO,
+        COUNCIL_THRESHOLD,
+    )
+    .await?;
     let batch_id = draft(&fleet, &["alpha"]).await?;
     approve(&fleet, batch_id).await?;
     open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300))

@@ -14,7 +14,7 @@ mod tests;
 
 use batch::Batch;
 
-const STATE_VERSION: u16 = 1;
+const STATE_VERSION: u16 = 2;
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -89,7 +89,15 @@ impl RegistrarOpener {
             env::predecessor_account_id() == env::current_account_id(),
             error::ONLY_SELF
         );
-        let state: Self = env::state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str(error::NO_STATE));
+        match state.state_version {
+            STATE_VERSION => {}
+            1 => {
+                require!(state.batches.is_empty(), error::BATCHES_LIVE);
+                state.state_version = STATE_VERSION;
+            }
+            _ => env::panic_str(error::STATE_VERSION_UNKNOWN),
+        }
         emit(
             "migrated",
             serde_json::json!({"state_version": state.state_version}),

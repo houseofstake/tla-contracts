@@ -1,4 +1,5 @@
 use near_sdk::json_types::Base58CryptoHash;
+use near_sdk::mock::MockAction;
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{
     test_vm_config, testing_env, AccountId, CryptoHash, Gas, NearToken, PromiseResult, PublicKey,
@@ -7,13 +8,13 @@ use near_sdk::{
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::batch::{MAX_LIVE_BATCHES, MAX_NAMES_PER_ADD};
+use crate::batch::{MAX_INIT_ARGS_LEN, MAX_LIVE_BATCHES, MAX_NAMES_PER_ADD};
 
 const NOTHING: NearToken = NearToken::from_yoctonear(0);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
 const FUNDING: NearToken = NearToken::from_millinear(20);
 const NOW: u64 = 1_000_000;
-const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
+const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v2";
 
 fn here() -> AccountId {
     "registrar".parse().unwrap()
@@ -41,10 +42,12 @@ fn owner_key() -> PublicKey {
         .unwrap()
 }
 
-fn other_key() -> PublicKey {
-    "ed25519:HghiythFFPjVXwc9BLNi8uqFmfQc1DWFrJQ4nE6ANo7R"
-        .parse()
-        .unwrap()
+fn global_code() -> AccountId {
+    "gpub.near".parse().unwrap()
+}
+
+fn init_args() -> String {
+    r#"{"config":{"registry":"registry.near","council":"council.sputnik-dao.near"}}"#.to_string()
 }
 
 fn context(predecessor: AccountId, deposit: NearToken) -> VMContextBuilder {
@@ -81,9 +84,17 @@ fn names(raw: &[&str]) -> Vec<AccountId> {
     raw.iter().map(|name| name.parse().unwrap()).collect()
 }
 
-fn expected_digest(owner_key: &PublicKey, funding: NearToken, added: &[&str]) -> CryptoHash {
+fn expected_digest(
+    global_code: &AccountId,
+    init_args: &str,
+    funding: NearToken,
+    added: &[&str],
+) -> CryptoHash {
     let mut seed = DIGEST_DOMAIN.to_vec();
-    seed.extend_from_slice(owner_key.as_bytes());
+    for part in [global_code.as_bytes(), init_args.as_bytes()] {
+        seed.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        seed.extend_from_slice(part);
+    }
     seed.extend_from_slice(&funding.as_yoctonear().to_le_bytes());
     let mut digest: CryptoHash = Sha256::digest(&seed).into();
     for name in added {
@@ -96,7 +107,7 @@ fn expected_digest(owner_key: &PublicKey, funding: NearToken, added: &[&str]) ->
 
 fn drafted(contract: &mut RegistrarOpener, raw: &[&str]) -> u32 {
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     contract.add_names(batch_id, names(raw));
     batch_id
 }
@@ -155,7 +166,7 @@ fn a_second_install_cannot_rename_the_admin() {
 fn a_new_batch_starts_empty_and_unapproved() {
     let mut contract = installed();
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     let batch = contract.get_batch(batch_id).unwrap();
     assert_eq!(batch.count, 0);
     assert_eq!(batch.remaining, 0);
@@ -170,7 +181,12 @@ fn the_digest_matches_an_independent_recomputation() {
     let stored = CryptoHash::from(contract.get_batch(batch_id).unwrap().digest);
     assert_eq!(
         stored,
-        expected_digest(&owner_key(), FUNDING, &["aaa", "bbb", "ccc"])
+        expected_digest(
+            &global_code(),
+            &init_args(),
+            FUNDING,
+            &["aaa", "bbb", "ccc"]
+        )
     );
 }
 
@@ -179,7 +195,7 @@ fn the_digest_is_the_same_whether_the_names_arrive_in_one_call_or_several() {
     let mut contract = installed();
     let one = drafted(&mut contract, &["aaa", "bbb", "ccc"]);
     as_account(operator(), YOCTO);
-    let many = contract.create_batch(owner_key(), FUNDING);
+    let many = contract.create_batch(global_code(), init_args(), FUNDING);
     contract.add_names(many, names(&["aaa"]));
     contract.add_names(many, names(&["bbb", "ccc"]));
     assert_eq!(
@@ -192,7 +208,7 @@ fn the_digest_is_the_same_whether_the_names_arrive_in_one_call_or_several() {
 fn every_added_name_moves_the_digest() {
     let mut contract = installed();
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     let seeded = contract.get_batch(batch_id).unwrap().digest;
     let after_one = contract.add_names(batch_id, names(&["aaa"]));
     let after_two = contract.add_names(batch_id, names(&["bbb"]));
@@ -201,17 +217,21 @@ fn every_added_name_moves_the_digest() {
 }
 
 #[test]
-fn the_owner_key_and_the_funding_are_both_bound_into_the_digest() {
+fn the_code_the_setup_and_the_funding_are_all_bound_into_the_digest() {
     let mut contract = installed();
     let baseline = drafted(&mut contract, &["aaa"]);
     as_account(operator(), YOCTO);
-    let other_owner = contract.create_batch(other_key(), FUNDING);
-    contract.add_names(other_owner, names(&["aaa"]));
-    let other_funding = contract.create_batch(owner_key(), NearToken::from_millinear(30));
+    let other_code = contract.create_batch("other.near".parse().unwrap(), init_args(), FUNDING);
+    contract.add_names(other_code, names(&["aaa"]));
+    let other_setup = contract.create_batch(global_code(), r#"{"config":{}}"#.into(), FUNDING);
+    contract.add_names(other_setup, names(&["aaa"]));
+    let other_funding =
+        contract.create_batch(global_code(), init_args(), NearToken::from_millinear(30));
     contract.add_names(other_funding, names(&["aaa"]));
     let digest = contract.get_batch(baseline).unwrap().digest;
-    assert_ne!(digest, contract.get_batch(other_owner).unwrap().digest);
-    assert_ne!(digest, contract.get_batch(other_funding).unwrap().digest);
+    for other in [other_code, other_setup, other_funding] {
+        assert_ne!(digest, contract.get_batch(other).unwrap().digest);
+    }
 }
 
 #[test]
@@ -260,7 +280,7 @@ fn the_operator_cannot_hoard_batches_against_the_accounts_storage() {
     let mut contract = installed();
     as_account(operator(), YOCTO);
     for _ in 0..=MAX_LIVE_BATCHES {
-        contract.create_batch(owner_key(), FUNDING);
+        contract.create_batch(global_code(), init_args(), FUNDING);
     }
 }
 
@@ -270,10 +290,10 @@ fn discarding_frees_a_slot_for_the_next_batch() {
     as_account(operator(), YOCTO);
     let mut ids = Vec::new();
     for _ in 0..MAX_LIVE_BATCHES {
-        ids.push(contract.create_batch(owner_key(), FUNDING));
+        ids.push(contract.create_batch(global_code(), init_args(), FUNDING));
     }
     contract.discard_batch(ids[0]);
-    let reopened = contract.create_batch(owner_key(), FUNDING);
+    let reopened = contract.create_batch(global_code(), init_args(), FUNDING);
     assert!(contract.get_batch(reopened).is_some());
 }
 
@@ -282,7 +302,7 @@ fn discarding_frees_a_slot_for_the_next_batch() {
 fn a_stranger_cannot_draft_a_batch() {
     let mut contract = installed();
     as_account(stranger(), YOCTO);
-    contract.create_batch(owner_key(), FUNDING);
+    contract.create_batch(global_code(), init_args(), FUNDING);
 }
 
 #[test]
@@ -290,7 +310,7 @@ fn a_stranger_cannot_draft_a_batch() {
 fn the_admin_cannot_draft_a_batch() {
     let mut contract = installed();
     as_account(admin(), YOCTO);
-    contract.create_batch(owner_key(), FUNDING);
+    contract.create_batch(global_code(), init_args(), FUNDING);
 }
 
 #[test]
@@ -308,7 +328,12 @@ fn approval_flips_the_batch_and_leaves_the_names_in_place() {
 fn approving_a_digest_that_is_not_the_batch_is_refused() {
     let mut contract = installed();
     let batch_id = drafted(&mut contract, &["aaa", "bbb"]);
-    let wrong = Base58CryptoHash::from(expected_digest(&owner_key(), FUNDING, &["aaa"]));
+    let wrong = Base58CryptoHash::from(expected_digest(
+        &global_code(),
+        &init_args(),
+        FUNDING,
+        &["aaa"],
+    ));
     as_account(admin(), YOCTO);
     contract.approve_batch(batch_id, wrong);
 }
@@ -318,7 +343,7 @@ fn approving_a_digest_that_is_not_the_batch_is_refused() {
 fn an_empty_batch_cannot_be_approved() {
     let mut contract = installed();
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     let digest = contract.get_batch(batch_id).unwrap().digest;
     as_account(admin(), YOCTO);
     contract.approve_batch(batch_id, digest);
@@ -349,7 +374,7 @@ fn approval_demands_one_yocto() {
 fn drafting_demands_one_yocto() {
     let mut contract = installed();
     as_account(operator(), NOTHING);
-    contract.create_batch(owner_key(), FUNDING);
+    contract.create_batch(global_code(), init_args(), FUNDING);
 }
 
 #[test]
@@ -441,7 +466,7 @@ fn the_replaced_operator_loses_every_operator_method() {
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
     as_account(operator(), YOCTO);
-    contract.create_batch(owner_key(), FUNDING);
+    contract.create_batch(global_code(), init_args(), FUNDING);
 }
 
 #[test]
@@ -466,7 +491,7 @@ fn the_admin_can_revoke_an_approved_batch_that_can_never_drain() {
     assert!(contract.get_batch(stuck).is_none());
 
     as_account(operator(), YOCTO);
-    let next = contract.create_batch(owner_key(), FUNDING);
+    let next = contract.create_batch(global_code(), init_args(), FUNDING);
     assert!(
         contract.get_batch(next).is_some(),
         "revoking an undrainable batch did not free its slot"
@@ -570,7 +595,7 @@ fn a_fully_opened_batch_can_be_discarded_so_its_slot_comes_back() {
     }
     as_account(operator(), YOCTO);
     contract.discard_batch(ids[0]);
-    let next = contract.create_batch(owner_key(), FUNDING);
+    let next = contract.create_batch(global_code(), init_args(), FUNDING);
     assert!(
         contract.get_batch(next).is_some(),
         "a spent batch did not free its slot, the operator is bricked at the cap"
@@ -885,7 +910,7 @@ fn a_call_cannot_carry_more_names_than_the_documented_maximum() {
         .collect();
     let batch_names: Vec<AccountId> = raw.iter().map(|name| name.parse().unwrap()).collect();
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     contract.add_names(batch_id, batch_names);
 }
 
@@ -893,7 +918,7 @@ fn a_call_cannot_carry_more_names_than_the_documented_maximum() {
 fn a_batch_grows_past_any_ceiling_and_costs_one_lookup_to_check() {
     let mut contract = installed();
     as_account(operator(), YOCTO);
-    let batch_id = contract.create_batch(owner_key(), FUNDING);
+    let batch_id = contract.create_batch(global_code(), init_args(), FUNDING);
     let mut added = 0u32;
     while added < 1000 {
         let chunk: Vec<AccountId> = (0..MAX_NAMES_PER_ADD)
@@ -911,4 +936,98 @@ fn a_batch_grows_past_any_ceiling_and_costs_one_lookup_to_check() {
     assert_eq!(batch.remaining, 1000);
     assert!(contract.is_in_batch(batch_id, "name000999".parse().unwrap()));
     assert!(!contract.is_in_batch(batch_id, "name001000".parse().unwrap()));
+}
+
+#[test]
+fn opening_attaches_the_shared_code_and_runs_its_setup_without_adding_a_key() {
+    let mut contract = installed();
+    let batch_id = approved(&mut contract, &["aaa"]);
+    as_account(operator(), FUNDING);
+    contract.open_names(batch_id, names(&["aaa"]));
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    let opening = receipts
+        .iter()
+        .find(|receipt| receipt.receiver_id.as_str() == "aaa")
+        .expect("no receipt went to the name");
+    let mut attached = false;
+    let mut set_up = false;
+    for action in &opening.actions {
+        match action {
+            MockAction::AddKeyWithFullAccess { .. } | MockAction::AddKeyWithFunctionCall { .. } => {
+                panic!("opening a name must not put a key on it")
+            }
+            MockAction::UseGlobalContract { contract_id, .. } => {
+                attached = format!("{contract_id:?}").contains(global_code().as_str());
+            }
+            MockAction::FunctionCallWeight {
+                method_name, args, ..
+            } => {
+                set_up = method_name == b"new" && *args == init_args().into_bytes();
+            }
+            _ => {}
+        }
+    }
+    assert!(attached, "the name does not run the batch's shared code");
+    assert!(
+        set_up,
+        "the name's setup did not run with the batch's arguments"
+    );
+}
+
+#[test]
+#[should_panic(expected = "the setup arguments must be a JSON object")]
+fn a_batch_refuses_setup_arguments_that_are_not_a_json_object() {
+    let mut contract = installed();
+    as_account(operator(), YOCTO);
+    contract.create_batch(global_code(), "[1,2]".into(), FUNDING);
+}
+
+#[test]
+#[should_panic(expected = "the setup arguments are longer than a batch may carry")]
+fn a_batch_refuses_setup_arguments_past_the_ceiling() {
+    let mut contract = installed();
+    as_account(operator(), YOCTO);
+    let padded = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_INIT_ARGS_LEN));
+    contract.create_batch(global_code(), padded, FUNDING);
+}
+
+#[test]
+#[should_panic(expected = "the shared code has to come from another account")]
+fn a_batch_cannot_take_its_code_from_the_registrar_itself() {
+    let mut contract = installed();
+    as_account(operator(), YOCTO);
+    contract.create_batch(here(), init_args(), FUNDING);
+}
+
+#[test]
+fn an_upgrade_from_the_first_version_lifts_the_state_once_no_batch_is_live() {
+    let mut contract = installed();
+    as_account(here(), NOTHING);
+    contract.state_version = 1;
+    near_sdk::env::state_write(&contract);
+    assert_eq!(
+        RegistrarOpener::migrate().opener_view().state_version,
+        STATE_VERSION
+    );
+}
+
+#[test]
+#[should_panic(expected = "discard every batch before this upgrade")]
+fn an_upgrade_from_the_first_version_waits_until_every_batch_is_discarded() {
+    let mut contract = installed();
+    drafted(&mut contract, &["aaa"]);
+    as_account(here(), NOTHING);
+    contract.state_version = 1;
+    near_sdk::env::state_write(&contract);
+    RegistrarOpener::migrate();
+}
+
+#[test]
+#[should_panic(expected = "state version is not the one this code understands")]
+fn an_upgrade_refuses_a_state_version_it_does_not_know() {
+    let mut contract = installed();
+    as_account(here(), NOTHING);
+    contract.state_version = STATE_VERSION + 1;
+    near_sdk::env::state_write(&contract);
+    RegistrarOpener::migrate();
 }
