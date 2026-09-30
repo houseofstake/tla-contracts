@@ -1077,18 +1077,12 @@ async fn the_admin_can_open_one_name_outside_any_batch() -> Result<()> {
     dao_calls(
         &fleet,
         "create_account",
-        json!({ "name": "solo", "owner_key": fleet.owner_key }),
+        json!({ "name": "solo", "global_code": fleet.global_code, "init_args": fleet.init_args }),
         FUNDING,
         COUNCIL_THRESHOLD,
     )
     .await?;
-    let keys = fleet.worker.view_access_keys(&"solo".parse()?).await?;
-    assert_eq!(
-        keys.len(),
-        1,
-        "solo should carry exactly the key the council chose"
-    );
-    assert_eq!(keys[0].public_key, fleet.owner_key);
+    assert_opened(&fleet, "solo").await?;
     Ok(())
 }
 
@@ -1402,7 +1396,7 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
         ("upgrade", json!({ "code": "AA==" }), YOCTO),
         (
             "create_account",
-            json!({ "name": "stolen", "owner_key": fleet.owner_key }),
+            json!({ "name": "stolen", "global_code": fleet.global_code, "init_args": fleet.init_args }),
             FUNDING,
         ),
     ];

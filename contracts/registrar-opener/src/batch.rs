@@ -37,7 +37,11 @@ pub struct Batch {
     pub names: LookupSet<AccountId>,
 }
 
-fn assert_init_args(init_args: &str) {
+pub fn assert_setup(global_code: &AccountId, init_args: &str) {
+    require!(
+        *global_code != env::current_account_id(),
+        error::CODE_IS_SELF
+    );
     require!(
         init_args.len() <= MAX_INIT_ARGS_LEN,
         error::INIT_ARGS_TOO_LONG
@@ -46,6 +50,24 @@ fn assert_init_args(init_args: &str) {
         serde_json::from_str::<serde_json::Value>(init_args).is_ok_and(|args| args.is_object()),
         error::INIT_ARGS_NOT_AN_OBJECT
     );
+}
+
+pub fn open_account(
+    name: AccountId,
+    funding: NearToken,
+    global_code: AccountId,
+    init_args: Vec<u8>,
+) -> Promise {
+    Promise::new(name)
+        .create_account()
+        .transfer(funding)
+        .use_global_contract_by_account_id(global_code)
+        .function_call(
+            INIT_METHOD.to_string(),
+            init_args,
+            NearToken::from_yoctonear(0),
+            GAS_FOR_INIT,
+        )
 }
 
 #[near]
@@ -59,11 +81,7 @@ impl RegistrarOpener {
     ) -> u32 {
         self.assert_operator();
         require!(funding >= MIN_FUNDING, error::FUNDING_TOO_LOW);
-        require!(
-            global_code != env::current_account_id(),
-            error::CODE_IS_SELF
-        );
-        assert_init_args(&init_args);
+        assert_setup(&global_code, &init_args);
         require!(
             self.batches.len() < MAX_LIVE_BATCHES,
             error::TOO_MANY_BATCHES
@@ -181,22 +199,18 @@ impl RegistrarOpener {
                 "opening",
                 serde_json::json!({"name": name, "batch_id": batch_id}),
             );
-            Promise::new(name.clone())
-                .create_account()
-                .transfer(funding)
-                .use_global_contract_by_account_id(global_code.clone())
-                .function_call(
-                    INIT_METHOD.to_string(),
-                    init_args.clone(),
-                    NearToken::from_yoctonear(0),
-                    GAS_FOR_INIT,
-                )
-                .then(
-                    Self::ext(here.clone())
-                        .with_static_gas(GAS_FOR_CALLBACK)
-                        .on_name_opened(batch_id, name.clone()),
-                )
-                .detach();
+            open_account(
+                name.clone(),
+                funding,
+                global_code.clone(),
+                init_args.clone(),
+            )
+            .then(
+                Self::ext(here.clone())
+                    .with_static_gas(GAS_FOR_CALLBACK)
+                    .on_name_opened(batch_id, name.clone()),
+            )
+            .detach();
         }
         names.len() as u32
     }

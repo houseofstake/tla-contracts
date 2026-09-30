@@ -2,7 +2,7 @@ use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::mock::MockAction;
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{
-    test_vm_config, testing_env, AccountId, CryptoHash, Gas, NearToken, PromiseResult, PublicKey,
+    test_vm_config, testing_env, AccountId, CryptoHash, Gas, NearToken, PromiseResult,
     RuntimeFeesConfig,
 };
 use sha2::{Digest, Sha256};
@@ -34,12 +34,6 @@ fn next_operator() -> AccountId {
 
 fn stranger() -> AccountId {
     "stranger.near".parse().unwrap()
-}
-
-fn owner_key() -> PublicKey {
-    "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
-        .parse()
-        .unwrap()
 }
 
 fn global_code() -> AccountId {
@@ -831,7 +825,7 @@ fn the_operator_cannot_use_the_single_create_path() {
     let mut contract = installed();
     as_account(operator(), FUNDING);
     contract
-        .create_account("aaa".parse().unwrap(), owner_key())
+        .create_account("aaa".parse().unwrap(), global_code(), init_args())
         .detach();
 }
 
@@ -841,7 +835,7 @@ fn the_single_create_path_refuses_dust() {
     let mut contract = installed();
     as_account(admin(), NearToken::from_yoctonear(1));
     contract
-        .create_account("aaa".parse().unwrap(), owner_key())
+        .create_account("aaa".parse().unwrap(), global_code(), init_args())
         .detach();
 }
 
@@ -850,7 +844,7 @@ fn a_single_create_that_lands_is_counted() {
     let mut contract = installed();
     as_account(admin(), FUNDING);
     contract
-        .create_account("aaa".parse().unwrap(), owner_key())
+        .create_account("aaa".parse().unwrap(), global_code(), init_args())
         .detach();
     as_callback(PromiseResult::Successful(Vec::new()));
     contract.on_account_created("aaa".parse().unwrap());
@@ -863,7 +857,7 @@ fn a_single_create_that_fails_takes_the_whole_call_down() {
     let mut contract = installed();
     as_account(admin(), FUNDING);
     contract
-        .create_account("aaa".parse().unwrap(), owner_key())
+        .create_account("aaa".parse().unwrap(), global_code(), init_args())
         .detach();
     as_callback(PromiseResult::Failed);
     contract.on_account_created("aaa".parse().unwrap());
@@ -944,10 +938,44 @@ fn opening_attaches_the_shared_code_and_runs_its_setup_without_adding_a_key() {
     let batch_id = approved(&mut contract, &["aaa"]);
     as_account(operator(), FUNDING);
     contract.open_names(batch_id, names(&["aaa"]));
+    assert_opens_without_a_key("aaa");
+}
+
+#[test]
+fn a_single_create_attaches_the_shared_code_and_runs_its_setup_without_adding_a_key() {
+    let mut contract = installed();
+    as_account(admin(), FUNDING);
+    contract
+        .create_account("aaa".parse().unwrap(), global_code(), init_args())
+        .detach();
+    assert_opens_without_a_key("aaa");
+}
+
+#[test]
+#[should_panic(expected = "the shared code has to come from another account")]
+fn a_single_create_cannot_take_its_code_from_the_registrar_itself() {
+    let mut contract = installed();
+    as_account(admin(), FUNDING);
+    contract
+        .create_account("aaa".parse().unwrap(), here(), init_args())
+        .detach();
+}
+
+#[test]
+#[should_panic(expected = "the setup arguments must be a JSON object")]
+fn a_single_create_refuses_setup_arguments_that_are_not_a_json_object() {
+    let mut contract = installed();
+    as_account(admin(), FUNDING);
+    contract
+        .create_account("aaa".parse().unwrap(), global_code(), "[1,2]".into())
+        .detach();
+}
+
+fn assert_opens_without_a_key(name: &str) {
     let receipts = near_sdk::test_utils::get_created_receipts();
     let opening = receipts
         .iter()
-        .find(|receipt| receipt.receiver_id.as_str() == "aaa")
+        .find(|receipt| receipt.receiver_id.as_str() == name)
         .expect("no receipt went to the name");
     let mut attached = false;
     let mut set_up = false;
@@ -967,11 +995,8 @@ fn opening_attaches_the_shared_code_and_runs_its_setup_without_adding_a_key() {
             _ => {}
         }
     }
-    assert!(attached, "the name does not run the batch's shared code");
-    assert!(
-        set_up,
-        "the name's setup did not run with the batch's arguments"
-    );
+    assert!(attached, "{name} does not run the shared code");
+    assert!(set_up, "{name} was not set up with the given arguments");
 }
 
 #[test]
@@ -983,7 +1008,7 @@ fn a_batch_refuses_setup_arguments_that_are_not_a_json_object() {
 }
 
 #[test]
-#[should_panic(expected = "the setup arguments are longer than a batch may carry")]
+#[should_panic(expected = "the setup arguments are too long")]
 fn a_batch_refuses_setup_arguments_past_the_ceiling() {
     let mut contract = installed();
     as_account(operator(), YOCTO);

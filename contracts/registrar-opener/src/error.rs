@@ -25,7 +25,7 @@ pub const BATCH_IDS_EXHAUSTED: &str = "batch ids are exhausted, reusing one woul
                                        stored names";
 pub const DIGEST_MISMATCH: &str = "digest does not match the batch contents";
 pub const CODE_IS_SELF: &str = "the shared code has to come from another account";
-pub const INIT_ARGS_TOO_LONG: &str = "the setup arguments are longer than a batch may carry";
+pub const INIT_ARGS_TOO_LONG: &str = "the setup arguments are too long";
 pub const INIT_ARGS_NOT_AN_OBJECT: &str = "the setup arguments must be a JSON object";
 pub const NOT_IN_BATCH: &str = "name is not in this batch";
 

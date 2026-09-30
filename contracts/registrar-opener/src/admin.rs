@@ -1,9 +1,9 @@
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use near_sdk::serde_json;
 use near_sdk::utils::is_promise_success;
-use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, Promise, PublicKey};
+use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, Promise};
 
-use crate::batch::{GAS_FOR_CALLBACK, MIN_FUNDING};
+use crate::batch::{assert_setup, open_account, GAS_FOR_CALLBACK, MIN_FUNDING};
 use crate::names::{assert_openable, to_hash};
 use crate::{assert_one_yocto, emit, error, RegistrarOpener, RegistrarOpenerExt};
 
@@ -86,24 +86,26 @@ impl RegistrarOpener {
     }
 
     #[payable]
-    pub fn create_account(&mut self, name: AccountId, owner_key: PublicKey) -> Promise {
+    pub fn create_account(
+        &mut self,
+        name: AccountId,
+        global_code: AccountId,
+        init_args: String,
+    ) -> Promise {
         self.assert_admin_account();
         let funding = env::attached_deposit();
         require!(funding >= MIN_FUNDING, error::FUNDING_TOO_LOW);
         assert_openable(std::slice::from_ref(&name));
+        assert_setup(&global_code, &init_args);
         emit(
             "opening",
             serde_json::json!({"name": name, "batch_id": Option::<u32>::None}),
         );
-        Promise::new(name.clone())
-            .create_account()
-            .transfer(funding)
-            .add_full_access_key(owner_key)
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_FOR_CALLBACK)
-                    .on_account_created(name),
-            )
+        open_account(name.clone(), funding, global_code, init_args.into_bytes()).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_CALLBACK)
+                .on_account_created(name),
+        )
     }
 
     #[private]

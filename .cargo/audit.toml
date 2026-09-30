@@ -7,7 +7,7 @@ ignore = [
     # tracked upstream rather than patched here.
     "RUSTSEC-2022-0054",
 
-    # The three below reach the workspace only through near-vm-runner, which is
+    # The four below reach the workspace only through near-vm-runner, which is
     # the sandbox the integration tests run against. Verified absent from the
     # deployed artifact with
     # cargo tree -e normal --target wasm32-unknown-unknown -i <crate>,
@@ -15,6 +15,7 @@ ignore = [
     "RUSTSEC-2026-0258",
     "RUSTSEC-2026-0222",
     "RUSTSEC-2026-0269",
+    "RUSTSEC-2026-0316",
 
     # Host-side build and test dependencies, absent from the wasm32 tree by the
     # same check. anyhow and lru arrive with the sandbox, proc-macro-error3 and
