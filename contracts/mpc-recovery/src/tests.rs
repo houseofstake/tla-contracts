@@ -1710,33 +1710,22 @@ fn rotated_to_council() -> MpcRecovery {
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_owner_rotation(council());
-    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    ctx_paying(COUNCIL, 0, 1);
     c.commit_owner_rotation();
     c
 }
 
 #[test]
-fn an_owner_rotation_seats_the_council_once_the_delay_has_run() {
+fn an_owner_rotation_seats_the_council_without_a_wait() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_owner_rotation(council());
     assert_eq!(c.pending_owner(), Some((council(), U64(0))));
-    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    ctx_paying(COUNCIL, 0, 1);
     c.commit_owner_rotation();
     assert_eq!(c.owner(), council());
     assert!(c.pending_owner().is_none());
-}
-
-#[test]
-#[should_panic(expected = "an approved owner rotation must wait out the delay")]
-fn an_owner_rotation_cannot_commit_inside_its_delay() {
-    let (_, wk1) = keypair();
-    let mut c = deploy(&[wk1, spare_watcher()], 2);
-    ctx_paying(OWNER, 0, 1);
-    c.approve_owner_rotation(council());
-    ctx_paying(COUNCIL, UPGRADE_DELAY_NS - 1, 1);
-    c.commit_owner_rotation();
 }
 
 #[test]

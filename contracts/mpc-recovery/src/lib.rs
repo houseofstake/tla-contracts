@@ -277,13 +277,6 @@ impl MpcRecovery {
             env::predecessor_account_id() == pending,
             error::ONLY_PENDING_OWNER
         );
-        let approved_at = self
-            .pending_owner_at
-            .unwrap_or_else(|| env::panic_str(error::NO_OWNER_ROTATION_PENDING));
-        require!(
-            env::block_timestamp() >= approved_at.saturating_add(UPGRADE_DELAY_NS),
-            error::OWNER_ROTATION_TOO_YOUNG
-        );
         self.owner = pending.clone();
         self.pending_owner = None;
         self.pending_owner_at = None;
