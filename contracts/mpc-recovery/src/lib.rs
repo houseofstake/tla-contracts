@@ -1,5 +1,6 @@
 mod error;
 mod events;
+mod legacy;
 mod proof;
 mod state;
 mod tx;
@@ -35,7 +36,7 @@ const UPGRADE_DELAY_NS: u64 = 72 * 60 * 60 * 1_000_000_000;
 /// single watcher can carry a recovery on its own.
 const MIN_WATCHER_THRESHOLD: u32 = 2;
 const MAX_WATCHERS: u32 = 32;
-const STATE_VERSION: u16 = 1;
+const STATE_VERSION: u16 = 2;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -54,6 +55,8 @@ pub struct MpcRecovery {
     registry: Option<AccountId>,
     armed: LookupMap<AccountId, ArmedPolicy>,
     upgrade_proven: bool,
+    pending_owner: Option<AccountId>,
+    pending_owner_at: Option<u64>,
 }
 
 #[near(serializers = [json])]
@@ -117,6 +120,8 @@ impl MpcRecovery {
             approved_at: None,
             registry: None,
             upgrade_proven: false,
+            pending_owner: None,
+            pending_owner_at: None,
         }
     }
 
@@ -125,6 +130,9 @@ impl MpcRecovery {
     pub fn migrate() -> Self {
         let mut current = match hos_common::state_version() {
             Some(STATE_VERSION) => hos_common::try_state_read::<Self>()
+                .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
+            Some(1) => hos_common::try_state_read::<legacy::MpcRecoveryV1>()
+                .map(Self::from)
                 .unwrap_or_else(|| env::panic_str(error::NO_STATE)),
             Some(_) => env::panic_str(error::STATE_VERSION_UNKNOWN),
             None => env::panic_str(error::NO_STATE),
@@ -226,6 +234,64 @@ impl MpcRecovery {
         self.assert_owner();
         self.installer = installer.clone();
         Event::InstallerChanged { installer }.emit();
+    }
+
+    #[payable]
+    pub fn approve_owner_rotation(&mut self, new_owner: AccountId) {
+        self.assert_one_yocto();
+        self.assert_owner();
+        require!(new_owner != self.owner, error::OWNER_UNCHANGED);
+        require!(new_owner != env::current_account_id(), error::OWNER_IS_SELF);
+        self.pending_owner = Some(new_owner.clone());
+        self.pending_owner_at = Some(env::block_timestamp());
+        Event::OwnerRotationApproved {
+            new_owner,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn cancel_owner_rotation(&mut self) {
+        self.assert_one_yocto();
+        self.assert_owner();
+        require!(
+            self.pending_owner.take().is_some(),
+            error::NO_OWNER_ROTATION_PENDING
+        );
+        self.pending_owner_at = None;
+        Event::OwnerRotationCancelled {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn commit_owner_rotation(&mut self) {
+        self.assert_one_yocto();
+        let pending = self
+            .pending_owner
+            .clone()
+            .unwrap_or_else(|| env::panic_str(error::NO_OWNER_ROTATION_PENDING));
+        require!(
+            env::predecessor_account_id() == pending,
+            error::ONLY_PENDING_OWNER
+        );
+        let approved_at = self
+            .pending_owner_at
+            .unwrap_or_else(|| env::panic_str(error::NO_OWNER_ROTATION_PENDING));
+        require!(
+            env::block_timestamp() >= approved_at.saturating_add(UPGRADE_DELAY_NS),
+            error::OWNER_ROTATION_TOO_YOUNG
+        );
+        self.owner = pending.clone();
+        self.pending_owner = None;
+        self.pending_owner_at = None;
+        Event::OwnerRotated {
+            new_owner: pending,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
     }
 
     #[payable]
@@ -755,6 +821,12 @@ impl MpcRecovery {
 
     pub fn installer(&self) -> AccountId {
         self.installer.clone()
+    }
+
+    pub fn pending_owner(&self) -> Option<(AccountId, U64)> {
+        self.pending_owner
+            .clone()
+            .zip(self.pending_owner_at.map(U64))
     }
 
     pub fn signer(&self) -> AccountId {

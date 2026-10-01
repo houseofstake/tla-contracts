@@ -33,6 +33,12 @@ pub enum Event {
     #[event_version("1.0.0")]
     InstallerChanged { installer: AccountId },
     #[event_version("1.0.0")]
+    OwnerRotationApproved { new_owner: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
+    OwnerRotationCancelled { by: AccountId },
+    #[event_version("1.0.0")]
+    OwnerRotated { new_owner: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
     PolicyReset { account: AccountId },
     #[event_version("1.0.0")]
     PolicyResetDeferred { account: AccountId, round: U64 },

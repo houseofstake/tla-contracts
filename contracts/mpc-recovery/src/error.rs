@@ -2,6 +2,11 @@ pub const ONLY_OWNER: &str = "only owner";
 pub const OWNER_IS_SELF: &str = "owner must not be this account, which ends with no keys";
 pub const ONLY_INSTALLER: &str = "only installer or owner";
 pub const ONLY_OWNER_REINSTALL: &str = "only owner may replace an existing policy";
+pub const OWNER_UNCHANGED: &str = "the pending owner must differ from the current one";
+pub const NO_OWNER_ROTATION_PENDING: &str = "no owner rotation has been approved";
+pub const ONLY_PENDING_OWNER: &str = "only the incoming owner";
+pub const OWNER_ROTATION_TOO_YOUNG: &str =
+    "an approved owner rotation must wait out the delay before it commits";
 pub const ONLY_TRANSFER_AUTHORITY: &str = "only transfer authority";
 pub const NO_STATE: &str = "no contract state to migrate";
 pub const BAD_THRESHOLD: &str = "threshold must be in 1..=watchers";

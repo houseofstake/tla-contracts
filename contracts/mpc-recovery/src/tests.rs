@@ -1699,6 +1699,163 @@ fn a_non_owner_cannot_rotate_the_watcher_set() {
     c.set_watchers(vec![wk2, wk3], 2);
 }
 
+const COUNCIL: &str = "hos-root.sputnik-dao.near";
+
+fn council() -> AccountId {
+    AccountId::from_str(COUNCIL).unwrap()
+}
+
+fn rotated_to_council() -> MpcRecovery {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    c.commit_owner_rotation();
+    c
+}
+
+#[test]
+fn an_owner_rotation_seats_the_council_once_the_delay_has_run() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    assert_eq!(c.pending_owner(), Some((council(), U64(0))));
+    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    c.commit_owner_rotation();
+    assert_eq!(c.owner(), council());
+    assert!(c.pending_owner().is_none());
+}
+
+#[test]
+#[should_panic(expected = "an approved owner rotation must wait out the delay")]
+fn an_owner_rotation_cannot_commit_inside_its_delay() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    ctx_paying(COUNCIL, UPGRADE_DELAY_NS - 1, 1);
+    c.commit_owner_rotation();
+}
+
+#[test]
+#[should_panic(expected = "only the incoming owner")]
+fn the_outgoing_owner_cannot_seat_an_account_that_never_signed() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    ctx_paying(OWNER, UPGRADE_DELAY_NS, 1);
+    c.commit_owner_rotation();
+}
+
+#[test]
+#[should_panic(expected = "no owner rotation has been approved")]
+fn an_owner_rotation_can_be_withdrawn_before_it_commits() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    ctx_paying(OWNER, 1, 1);
+    c.cancel_owner_rotation();
+    assert!(c.pending_owner().is_none());
+    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    c.commit_owner_rotation();
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn only_the_owner_can_move_the_owner() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(COUNCIL, 0, 1);
+    c.approve_owner_rotation(council());
+}
+
+#[test]
+#[should_panic(expected = "the pending owner must differ from the current one")]
+fn an_owner_rotation_refuses_an_owner_that_changes_nothing() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(AccountId::from_str(OWNER).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "owner must not be this account")]
+fn an_owner_rotation_refuses_an_owner_that_would_end_the_gate() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(AccountId::from_str(CONTRACT).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn moving_the_owner_takes_a_full_access_signature() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 0);
+    c.approve_owner_rotation(council());
+}
+
+#[test]
+fn the_council_holds_the_owner_powers_once_seated() {
+    let (_, wk2) = keypair();
+    let (_, wk3) = keypair();
+    let mut c = rotated_to_council();
+    ctx_paying(COUNCIL, UPGRADE_DELAY_NS, 1);
+    c.set_watchers(vec![wk2.clone(), wk3.clone()], 2);
+    assert_eq!(c.watchers(), vec![wk2, wk3]);
+    c.approve_upgrade(code_hash());
+    assert_eq!(c.approved_upgrade_hash(), Some(code_hash()));
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn the_previous_owner_loses_the_owner_powers() {
+    let (_, wk2) = keypair();
+    let (_, wk3) = keypair();
+    let mut c = rotated_to_council();
+    ctx_paying(OWNER, UPGRADE_DELAY_NS, 1);
+    c.set_watchers(vec![wk2, wk3], 2);
+}
+
+#[test]
+fn a_state_left_at_version_one_migrates_through_its_own_reader() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1, spare_watcher()], 2);
+    let owner = c.owner.clone();
+    let installer = c.installer.clone();
+    let old = crate::legacy::MpcRecoveryV1 {
+        state_version: 1,
+        owner: c.owner,
+        installer: c.installer,
+        signer: c.signer,
+        transfer_authority: c.transfer_authority,
+        watchers: c.watchers,
+        threshold: c.threshold,
+        accounts: c.accounts,
+        round_floor: c.round_floor,
+        approved_code_hash: c.approved_code_hash,
+        approved_at: c.approved_at,
+        registry: c.registry,
+        armed: c.armed,
+        upgrade_proven: c.upgrade_proven,
+    };
+    ctx_paying(OWNER, 0, 0);
+    env::state_write(&old);
+    drop(old);
+
+    let migrated = MpcRecovery::migrate();
+    assert_eq!(migrated.state_version, crate::STATE_VERSION);
+    assert_eq!(migrated.owner, owner);
+    assert_eq!(migrated.installer, installer);
+    assert!(migrated.upgrade_proven);
+    assert!(migrated.pending_owner().is_none());
+}
+
 #[test]
 #[should_panic(expected = "state version is not the one this code understands")]
 fn migrate_refuses_a_shape_it_does_not_recognise() {
@@ -2083,7 +2240,7 @@ fn the_state_layout_is_pinned_to_the_version_that_declares_it() {
             crate::STATE_VERSION,
             near_sdk::borsh::to_vec(&c).unwrap().len()
         ),
-        (1, 184),
+        (2, 186),
         "the state shape moved. Bump STATE_VERSION, add a reader for the shape that \
          is deployed today, and update this fixture. A publish that skips that leaves \
          migrate unable to read what is on the account."
