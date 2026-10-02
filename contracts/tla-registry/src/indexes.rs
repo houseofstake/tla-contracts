@@ -48,6 +48,7 @@ impl TlaRegistry {
         let removed = self.sub_accounts.remove(key)?;
         index_remove(&mut self.sub_accounts_by_owner, &removed.owner, key);
         index_remove(&mut self.sub_accounts_by_tla, &removed.tla_id, key);
+        crate::business::forget_claim(key);
         Some(removed)
     }
 

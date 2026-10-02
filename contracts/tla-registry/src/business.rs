@@ -1,17 +1,47 @@
+use crate::callbacks::MintSettlement;
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::fees;
+use crate::rental::GAS_FOR_CALLBACK;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
+use hos_common::MintOutcome;
 use near_sdk::json_types::{U128, U64};
-use near_sdk::{env, near, AccountId, Promise};
+use near_sdk::{env, near, AccountId, Promise, PromiseError};
 
 const RESALE_PREFIX: &[u8] = b"biz_resale:";
+const WHITELIST_PREFIX: &[u8] = b"biz_wl:";
+const CLAIMED_PREFIX: &[u8] = b"biz_claimed:";
+pub(crate) const MAX_WHITELIST_BATCH: usize = 100;
 
 fn resale_key(tla_id: &AccountId) -> Vec<u8> {
     let mut key = RESALE_PREFIX.to_vec();
     key.extend_from_slice(tla_id.as_str().as_bytes());
     key
+}
+
+fn whitelist_key(tla_id: &AccountId, account: &AccountId) -> Vec<u8> {
+    let mut key = WHITELIST_PREFIX.to_vec();
+    key.extend_from_slice(tla_id.as_str().as_bytes());
+    key.push(b'|');
+    key.extend_from_slice(account.as_str().as_bytes());
+    key
+}
+
+fn claimed_key(full_name: &str) -> Vec<u8> {
+    let mut key = CLAIMED_PREFIX.to_vec();
+    key.extend_from_slice(full_name.as_bytes());
+    key
+}
+
+fn assert_whitelist_batch(accounts: &[AccountId]) -> Result<(), ContractError> {
+    if accounts.is_empty() {
+        return Err(ContractError::EmptyBatch);
+    }
+    if accounts.len() > MAX_WHITELIST_BATCH {
+        return Err(ContractError::BatchTooLarge);
+    }
+    Ok(())
 }
 
 fn resale_enabled(tla_id: &AccountId) -> bool {
@@ -20,6 +50,14 @@ fn resale_enabled(tla_id: &AccountId) -> bool {
 
 pub(crate) fn licensee_governed(tla_id: &AccountId, tla: &TlaEntry) -> bool {
     tla.tla_type == TlaType::Business && !resale_enabled(tla_id)
+}
+
+pub(crate) fn licensee_sets_payout(tla_id: &AccountId, tla: &TlaEntry, full_name: &str) -> bool {
+    licensee_governed(tla_id, tla) && !env::storage_has_key(&claimed_key(full_name))
+}
+
+pub(crate) fn forget_claim(full_name: &str) {
+    env::storage_remove(&claimed_key(full_name));
 }
 
 #[near]
@@ -265,6 +303,120 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    #[payable]
+    pub fn admin_whitelist_add(
+        &mut self,
+        tla_id: AccountId,
+        accounts: Vec<AccountId>,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_admin()?;
+        assert_whitelist_batch(&accounts)?;
+        let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
+        if tla.tla_type != TlaType::Business {
+            return Err(ContractError::NotBusinessTla);
+        }
+        let mut added = Vec::new();
+        for account in accounts {
+            if !env::storage_write(&whitelist_key(&tla_id, &account), &[1]) {
+                added.push(account);
+            }
+        }
+        Event::BusinessWhitelistAdded {
+            tla_id,
+            accounts: added,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn admin_whitelist_remove(
+        &mut self,
+        tla_id: AccountId,
+        accounts: Vec<AccountId>,
+    ) -> Result<(), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_admin()?;
+        assert_whitelist_batch(&accounts)?;
+        let mut removed = Vec::new();
+        for account in accounts {
+            if env::storage_remove(&whitelist_key(&tla_id, &account)) {
+                removed.push(account);
+            }
+        }
+        Event::BusinessWhitelistRemoved {
+            tla_id,
+            accounts: removed,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    pub fn is_whitelisted(&self, tla_id: AccountId, account_id: AccountId) -> bool {
+        env::storage_has_key(&whitelist_key(&tla_id, &account_id))
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn claim_business_name(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+    ) -> Result<Promise, ContractError> {
+        self.assert_not_paused()?;
+        validate_mintable_name(&tla_id, &name)?;
+        let claimer = env::predecessor_account_id();
+        let entry = whitelist_key(&tla_id, &claimer);
+        if !env::storage_has_key(&entry) {
+            return Err(ContractError::NotWhitelisted);
+        }
+        self.assert_business_accepting(&tla_id)?;
+        let key = sub_account_key(&tla_id, &name);
+        if self.sub_accounts.contains_key(&key) || self.parked_names.contains_key(&key) {
+            return Err(ContractError::SubAccountNameTaken);
+        }
+        let attached = env::attached_deposit().as_yoctonear();
+        if attached < self.fee_config.account_creation_deposit_yocto.0 {
+            return Err(ContractError::InsufficientPayment);
+        }
+        self.business_count_check_and_bump(&tla_id)?;
+        env::storage_remove(&entry);
+        env::storage_write(&claimed_key(&key), &[1]);
+        let expires_at = self.open_lease(key, &tla_id, &claimer, &claimer);
+        Ok(self
+            .create_leased_account(&tla_id, &name, &claimer, &claimer, expires_at)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_CALLBACK)
+                    .on_business_name_claimed(MintSettlement {
+                        tla_id,
+                        name,
+                        owner: claimer.clone(),
+                        payer: claimer,
+                        rent_yocto: U128(0),
+                        attached_yocto: U128(attached),
+                        order_id: None,
+                    }),
+            ))
+    }
+
+    #[private]
+    pub fn on_business_name_claimed(
+        &mut self,
+        settlement: MintSettlement,
+        #[callback_result] outcome: Result<MintOutcome, PromiseError>,
+    ) {
+        if matches!(outcome, Ok(MintOutcome::CreationFailed)) {
+            env::storage_write(&whitelist_key(&settlement.tla_id, &settlement.owner), &[1]);
+        }
+        self.on_sub_account_created(settlement, outcome);
+    }
+
+    #[handle_result]
     pub fn get_business_renewal_cost(
         &self,
         tla_id: AccountId,
@@ -288,6 +440,17 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
+    fn assert_business_accepting(&self, tla_id: &AccountId) -> Result<(), ContractError> {
+        let tla = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
+        if tla.tla_type != TlaType::Business {
+            return Err(ContractError::NotBusinessTla);
+        }
+        if !tla.accepting_rentals(self.suspension_expiry(tla_id)) {
+            return Err(ContractError::TlaNotAcceptingRentals);
+        }
+        Ok(())
+    }
+
     fn assert_may_retract(
         &self,
         tla_id: &AccountId,

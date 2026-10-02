@@ -1729,13 +1729,24 @@ fn an_owner_rotation_seats_the_council_without_a_wait() {
 }
 
 #[test]
-#[should_panic(expected = "only the incoming owner")]
-fn the_outgoing_owner_cannot_seat_an_account_that_never_signed() {
+fn the_owner_seats_the_council_at_once() {
     let (_, wk1) = keypair();
     let mut c = deploy(&[wk1, spare_watcher()], 2);
     ctx_paying(OWNER, 0, 1);
     c.approve_owner_rotation(council());
-    ctx_paying(OWNER, UPGRADE_DELAY_NS, 1);
+    c.commit_owner_rotation();
+    assert_eq!(c.owner(), council());
+    assert!(c.pending_owner().is_none());
+}
+
+#[test]
+#[should_panic(expected = "only the owner or the incoming owner")]
+fn a_stranger_cannot_complete_an_owner_rotation() {
+    let (_, wk1) = keypair();
+    let mut c = deploy(&[wk1, spare_watcher()], 2);
+    ctx_paying(OWNER, 0, 1);
+    c.approve_owner_rotation(council());
+    ctx_paying(INSTALLER, 0, 1);
     c.commit_owner_rotation();
 }
 

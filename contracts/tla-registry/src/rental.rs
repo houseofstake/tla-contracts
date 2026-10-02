@@ -34,7 +34,7 @@ pub struct PendingReRent {
 const GAS_FOR_CREATE: Gas = Gas::from_tgas(hos_common::MINT_CALL_TGAS);
 const GAS_FOR_SET_PAYOUT: Gas = Gas::from_tgas(30);
 const GAS_FOR_SET_PAYOUT_CALLBACK: Gas = Gas::from_tgas(10);
-const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
+pub(crate) const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const PUSH_LEASE_TGAS: u64 = 20;
 const GAS_FOR_PUSH_LEASE: Gas = Gas::from_tgas(PUSH_LEASE_TGAS);
 const RERENT_ROTATE_TGAS: u64 = 45;
@@ -148,19 +148,7 @@ impl TlaRegistry {
             self.business_count_check_and_bump(&tla_id)?;
         }
 
-        let now = env::block_timestamp();
-        let lease_until_ns = now.saturating_add(self.lease_term_ns);
-        self.sub_account_insert(
-            key.clone(),
-            SubAccountEntry {
-                owner: owner.clone(),
-                tla_id: tla_id.clone(),
-                payout_account: owner.clone(),
-                rented_at: now,
-                expires_at: lease_until_ns,
-                retraction_at: None,
-            },
-        );
+        let lease_until_ns = self.open_lease(key.clone(), &tla_id, &owner, &owner);
 
         let rent = U128(rent_near);
         let attached = U128(attached.as_yoctonear());
@@ -182,12 +170,8 @@ impl TlaRegistry {
             }));
         }
 
-        let creation_deposit =
-            NearToken::from_yoctonear(self.fee_config.account_creation_deposit_yocto.0);
-        Ok(ext_registrar::ext(tla_id.clone())
-            .with_attached_deposit(creation_deposit)
-            .with_static_gas(GAS_FOR_CREATE)
-            .create_sub_account(name.clone(), owner.clone(), owner.clone(), lease_until_ns)
+        Ok(self
+            .create_leased_account(&tla_id, &name, &owner, &owner, lease_until_ns)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_CALLBACK)
@@ -244,16 +228,7 @@ impl TlaRegistry {
         }
 
         let now = env::block_timestamp();
-        let lease_until_ns = now.saturating_add(self.lease_term_ns);
-        let sub_entry = SubAccountEntry {
-            owner: owner_account.clone(),
-            tla_id: tla_id.clone(),
-            payout_account: payout_account.clone(),
-            rented_at: now,
-            expires_at: lease_until_ns,
-            retraction_at: None,
-        };
-        self.sub_account_insert(key.clone(), sub_entry);
+        let lease_until_ns = self.open_lease(key.clone(), &tla_id, &owner_account, &payout_account);
         self.record_authority_mint(&payer, &tla_id);
         self.paid_order_ids.insert(
             order_id.clone(),
@@ -289,13 +264,12 @@ impl TlaRegistry {
             }));
         }
 
-        Ok(ext_registrar::ext(tla_id.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(creation_deposit))
-            .with_static_gas(GAS_FOR_CREATE)
-            .create_sub_account(
-                name.clone(),
-                owner_account.clone(),
-                payout_account.clone(),
+        Ok(self
+            .create_leased_account(
+                &tla_id,
+                &name,
+                &owner_account,
+                &payout_account,
                 lease_until_ns,
             )
             .then(
@@ -393,7 +367,7 @@ impl TlaRegistry {
                 .get(&key)
                 .ok_or(ContractError::SubAccountNotFound)?;
             let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if crate::business::licensee_governed(&tla_id, tla) {
+            if crate::business::licensee_sets_payout(&tla_id, tla, &key) {
                 if tla.licensee.as_ref() != Some(&caller) {
                     return Err(ContractError::OnlyLicensee);
                 }
@@ -601,6 +575,50 @@ impl TlaRegistry {
             return Err(ContractError::NameStillHoldsNames);
         }
         Ok(())
+    }
+
+    pub(crate) fn open_lease(
+        &mut self,
+        key: String,
+        tla_id: &AccountId,
+        owner: &AccountId,
+        payout_account: &AccountId,
+    ) -> u64 {
+        let now = env::block_timestamp();
+        let expires_at = now.saturating_add(self.lease_term_ns);
+        self.sub_account_insert(
+            key,
+            SubAccountEntry {
+                owner: owner.clone(),
+                tla_id: tla_id.clone(),
+                payout_account: payout_account.clone(),
+                rented_at: now,
+                expires_at,
+                retraction_at: None,
+            },
+        );
+        expires_at
+    }
+
+    pub(crate) fn create_leased_account(
+        &self,
+        tla_id: &AccountId,
+        name: &str,
+        owner: &AccountId,
+        payout_account: &AccountId,
+        expires_at: u64,
+    ) -> Promise {
+        ext_registrar::ext(tla_id.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(
+                self.fee_config.account_creation_deposit_yocto.0,
+            ))
+            .with_static_gas(GAS_FOR_CREATE)
+            .create_sub_account(
+                name.to_string(),
+                owner.clone(),
+                payout_account.clone(),
+                expires_at,
+            )
     }
 
     fn resolve_rent_owner(

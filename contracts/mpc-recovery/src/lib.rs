@@ -273,16 +273,17 @@ impl MpcRecovery {
             .pending_owner
             .clone()
             .unwrap_or_else(|| env::panic_str(error::NO_OWNER_ROTATION_PENDING));
+        let caller = env::predecessor_account_id();
         require!(
-            env::predecessor_account_id() == pending,
-            error::ONLY_PENDING_OWNER
+            caller == pending || caller == self.owner,
+            error::ONLY_OWNER_OR_PENDING_OWNER
         );
         self.owner = pending.clone();
         self.pending_owner = None;
         self.pending_owner_at = None;
         Event::OwnerRotated {
             new_owner: pending,
-            by: env::predecessor_account_id(),
+            by: caller,
         }
         .emit();
     }

@@ -146,6 +146,18 @@ pub enum Event {
     #[event_version("1.0.0")]
     BusinessResaleEnabled { tla_id: AccountId, by: AccountId },
     #[event_version("1.0.0")]
+    BusinessWhitelistAdded {
+        tla_id: AccountId,
+        accounts: Vec<AccountId>,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    BusinessWhitelistRemoved {
+        tla_id: AccountId,
+        accounts: Vec<AccountId>,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     SubAccountRented {
         full_name: String,
         tla_id: AccountId,

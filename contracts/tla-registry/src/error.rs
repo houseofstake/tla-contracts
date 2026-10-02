@@ -96,6 +96,7 @@ pub enum ContractError {
     SubAccountTlaMismatch,
     SubAccountNotSellable,
     BusinessSubNotResellable,
+    NotWhitelisted,
     ApprovalsNotSupported,
     UnknownCursor,
     TokenNotFound,

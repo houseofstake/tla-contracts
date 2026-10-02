@@ -3392,6 +3392,233 @@ mod business {
             .set_payout_account(acc(TLA), "staff".to_string(), acc(CAROL))
             .is_ok());
     }
+
+    mod whitelist {
+        use super::*;
+
+        fn deposit(c: &TlaRegistry) -> u128 {
+            c.get_fee_config().account_creation_deposit_yocto.0
+        }
+
+        fn whitelist(c: &mut TlaRegistry, accounts: &[&str]) {
+            ctx(ADMIN, 1, 1);
+            c.admin_whitelist_add(acc(TLA), accounts.iter().map(|a| acc(a)).collect())
+                .unwrap();
+        }
+
+        fn claim(
+            c: &mut TlaRegistry,
+            who: &str,
+            name: &str,
+            ts: u64,
+        ) -> Result<near_sdk::Promise, ContractError> {
+            ctx(who, deposit(c), ts);
+            c.claim_business_name(acc(TLA), name.to_string())
+        }
+
+        fn land(c: &mut TlaRegistry, who: &str, name: &str, outcome: MintOutcome) {
+            let paid = deposit(c);
+            ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+            c.on_business_name_claimed(settled(name, who, who, 0, paid), Ok(outcome));
+        }
+
+        #[test]
+        fn a_whitelisted_wallet_claims_a_name_it_owns_and_is_paid_out_to() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(c.is_whitelisted(acc(TLA), acc(BOB)));
+            assert!(claim(&mut c, BOB, "bob", 2).is_ok());
+            land(&mut c, BOB, "bob", MintOutcome::Active);
+            let sub = c.get_sub_account(acc(TLA), "bob".to_string()).unwrap();
+            assert_eq!(sub.owner, acc(BOB));
+            assert_eq!(sub.payout_account, acc(BOB));
+            assert!(!c.is_whitelisted(acc(TLA), acc(BOB)));
+        }
+
+        #[test]
+        fn a_whitelist_entry_buys_exactly_one_name() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(claim(&mut c, BOB, "bob", 2).is_ok());
+            land(&mut c, BOB, "bob", MintOutcome::Active);
+            assert!(matches!(
+                claim(&mut c, BOB, "bobby", 3),
+                Err(ContractError::NotWhitelisted)
+            ));
+        }
+
+        #[test]
+        fn a_wallet_off_the_whitelist_cannot_claim() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(matches!(
+                claim(&mut c, CAROL, "carol", 2),
+                Err(ContractError::NotWhitelisted)
+            ));
+            assert!(c.get_sub_account(acc(TLA), "carol".to_string()).is_none());
+        }
+
+        #[test]
+        fn a_failed_claim_hands_the_whitelist_entry_back() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(claim(&mut c, BOB, "bob", 2).is_ok());
+            land(&mut c, BOB, "bob", MintOutcome::CreationFailed);
+            assert!(c.get_sub_account(acc(TLA), "bob".to_string()).is_none());
+            assert!(c.is_whitelisted(acc(TLA), acc(BOB)));
+            assert_eq!(c.get_pending_refund(acc(BOB)).0, deposit(&c));
+            assert_eq!(c.get_business_sub_count(acc(TLA)), 0);
+        }
+
+        #[test]
+        fn a_claim_needs_the_account_deposit_and_keeps_the_entry_when_short() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            ctx(BOB, deposit(&c) - 1, 2);
+            assert!(matches!(
+                c.claim_business_name(acc(TLA), "bob".to_string()),
+                Err(ContractError::InsufficientPayment)
+            ));
+            assert!(c.is_whitelisted(acc(TLA), acc(BOB)));
+        }
+
+        #[test]
+        fn a_claimed_name_cannot_be_passed_on() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(claim(&mut c, BOB, "bob", 2).is_ok());
+            land(&mut c, BOB, "bob", MintOutcome::Active);
+            ctx(BOB, 1, 3);
+            assert!(matches!(
+                c.transfer_sub_account(acc(TLA), "bob".to_string(), acc(CAROL)),
+                Err(ContractError::BusinessSubNotResellable)
+            ));
+        }
+
+        #[test]
+        fn a_member_decides_where_their_name_pays_out_and_the_licensee_cannot() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(claim(&mut c, BOB, "bob", 2).is_ok());
+            land(&mut c, BOB, "bob", MintOutcome::Active);
+            ctx(ALICE, 1, 3);
+            assert!(
+                matches!(
+                    c.set_payout_account(acc(TLA), "bob".to_string(), acc(ALICE)),
+                    Err(ContractError::OnlyOwner)
+                ),
+                "a member's wallet must never be pointed at the licensee"
+            );
+            ctx(BOB, 1, 4);
+            assert!(c
+                .set_payout_account(acc(TLA), "bob".to_string(), acc(CAROL))
+                .is_ok());
+            ctx_callback(near_sdk::PromiseResult::Successful(Vec::new()));
+            c.on_payout_set(acc(TLA), "bob".to_string(), acc(CAROL), acc(BOB));
+            assert_eq!(payout_of(&c, "bob"), acc(CAROL));
+        }
+
+        #[test]
+        fn a_failed_claim_leaves_a_later_employee_name_to_the_licensee() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            assert!(claim(&mut c, BOB, "staff", 2).is_ok());
+            land(&mut c, BOB, "staff", MintOutcome::CreationFailed);
+            rent_employee_sub(&mut c, "staff", BOB);
+            ctx(BOB, 1, 3);
+            assert!(
+                matches!(
+                    c.set_payout_account(acc(TLA), "staff".to_string(), acc(BOB)),
+                    Err(ContractError::OnlyLicensee)
+                ),
+                "an employee must not inherit the control a failed claim once held"
+            );
+        }
+
+        #[test]
+        fn a_removed_wallet_can_no_longer_claim() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB, CAROL]);
+            ctx(ADMIN, 1, 2);
+            c.admin_whitelist_remove(acc(TLA), vec![acc(BOB)]).unwrap();
+            assert!(!c.is_whitelisted(acc(TLA), acc(BOB)));
+            assert!(c.is_whitelisted(acc(TLA), acc(CAROL)));
+            assert!(matches!(
+                claim(&mut c, BOB, "bob", 3),
+                Err(ContractError::NotWhitelisted)
+            ));
+        }
+
+        #[test]
+        fn only_an_admin_changes_the_whitelist() {
+            let mut c = deploy_with_business_tla();
+            ctx(ALICE, 1, 1);
+            assert!(matches!(
+                c.admin_whitelist_add(acc(TLA), vec![acc(BOB)]),
+                Err(ContractError::OnlyAdmin)
+            ));
+            assert!(matches!(
+                c.admin_whitelist_remove(acc(TLA), vec![acc(BOB)]),
+                Err(ContractError::OnlyAdmin)
+            ));
+        }
+
+        #[test]
+        fn changing_the_whitelist_takes_a_full_access_signature() {
+            let mut c = deploy_with_business_tla();
+            ctx(ADMIN, 0, 1);
+            assert!(matches!(
+                c.admin_whitelist_add(acc(TLA), vec![acc(BOB)]),
+                Err(ContractError::RequiresOneYocto)
+            ));
+            assert!(matches!(
+                c.admin_whitelist_remove(acc(TLA), vec![acc(BOB)]),
+                Err(ContractError::RequiresOneYocto)
+            ));
+        }
+
+        #[test]
+        fn the_whitelist_is_for_business_tlas_only() {
+            let mut c = deploy_with_open_tla();
+            ctx(ADMIN, 1, 1);
+            assert!(matches!(
+                c.admin_whitelist_add(acc(TLA), vec![acc(BOB)]),
+                Err(ContractError::NotBusinessTla)
+            ));
+        }
+
+        #[test]
+        fn a_tla_that_stops_being_business_refuses_claims_and_still_clears() {
+            let mut c = deploy_with_business_tla();
+            whitelist(&mut c, &[BOB]);
+            ctx(COUNCIL, 1, 2);
+            c.admin_set_tla_type(acc(TLA), TlaType::Open, None).unwrap();
+            assert!(matches!(
+                claim(&mut c, BOB, "bob", 3),
+                Err(ContractError::NotBusinessTla)
+            ));
+            ctx(ADMIN, 1, 4);
+            c.admin_whitelist_remove(acc(TLA), vec![acc(BOB)]).unwrap();
+            assert!(!c.is_whitelisted(acc(TLA), acc(BOB)));
+        }
+
+        #[test]
+        fn a_whitelist_batch_is_bounded() {
+            let mut c = deploy_with_business_tla();
+            ctx(ADMIN, 1, 1);
+            assert!(matches!(
+                c.admin_whitelist_add(acc(TLA), Vec::new()),
+                Err(ContractError::EmptyBatch)
+            ));
+            let too_many: Vec<AccountId> = (0..=crate::business::MAX_WHITELIST_BATCH)
+                .map(|i| acc(&format!("member{i}.testnet")))
+                .collect();
+            assert!(matches!(
+                c.admin_whitelist_add(acc(TLA), too_many),
+                Err(ContractError::BatchTooLarge)
+            ));
+        }
+    }
 }
 
 mod price_oracle {
